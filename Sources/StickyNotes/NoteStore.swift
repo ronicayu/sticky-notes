@@ -1,27 +1,39 @@
 import Foundation
 
+enum StorageFormat {
+    case json       // local Application Support / iCloud Drive (legacy)
+    case markdown   // Obsidian vault — `.md` with YAML frontmatter
+}
+
 final class NoteStore {
     static let didChange = Notification.Name("NoteStore.didChange")
 
     private(set) var rootURL: URL
+    private(set) var format: StorageFormat
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private var watcher: FileWatcher?
+    private let iso8601 = ISO8601DateFormatter()
 
     var activeURL: URL { rootURL.appendingPathComponent("notes", isDirectory: true) }
     var archiveURL: URL { rootURL.appendingPathComponent("archive", isDirectory: true) }
 
-    init(rootURL: URL = Settings.preferredStorageRoot) {
+    private var fileExtension: String { format == .json ? "json" : "md" }
+
+    init(rootURL: URL = Settings.preferredStorageRoot, format: StorageFormat = Settings.preferredFormat) {
         self.rootURL = rootURL
+        self.format = format
         encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         ensureDirectories()
+        startWatching()
     }
 
     func save(_ note: Note) {
-        let url = activeURL.appendingPathComponent("\(note.id.uuidString).json")
+        let url = noteURL(for: note.id, in: activeURL)
         write(note, to: url)
         notifyChange()
     }
@@ -34,28 +46,32 @@ final class NoteStore {
         loadAll(from: archiveURL).sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    func loadNote(id: UUID, archived: Bool = false) -> Note? {
+        let dir = archived ? archiveURL : activeURL
+        let url = noteURL(for: id, in: dir)
+        return read(url)
+    }
+
     func archive(_ note: Note) {
-        let from = activeURL.appendingPathComponent("\(note.id.uuidString).json")
-        let to = archiveURL.appendingPathComponent("\(note.id.uuidString).json")
+        let from = noteURL(for: note.id, in: activeURL)
+        let to = noteURL(for: note.id, in: archiveURL)
         moveFile(from: from, to: to)
         notifyChange()
     }
 
     func discardActive(_ note: Note) {
-        let url = activeURL.appendingPathComponent("\(note.id.uuidString).json")
+        let url = noteURL(for: note.id, in: activeURL)
         try? FileManager.default.removeItem(at: url)
         notifyChange()
     }
 
     func restore(_ note: Note) {
-        let from = archiveURL.appendingPathComponent("\(note.id.uuidString).json")
-        let to = activeURL.appendingPathComponent("\(note.id.uuidString).json")
+        let from = noteURL(for: note.id, in: archiveURL)
+        let to = noteURL(for: note.id, in: activeURL)
         moveFile(from: from, to: to)
 
         // Force-expand on restore so the content is immediately visible.
-        if let data = try? Data(contentsOf: to),
-           var restored = try? decoder.decode(Note.self, from: data),
-           restored.collapsed {
+        if var restored = read(to), restored.collapsed {
             restored.collapsed = false
             write(restored, to: to)
         }
@@ -63,34 +79,39 @@ final class NoteStore {
     }
 
     func deleteForever(_ note: Note) {
-        let url = archiveURL.appendingPathComponent("\(note.id.uuidString).json")
+        let url = noteURL(for: note.id, in: archiveURL)
         try? FileManager.default.removeItem(at: url)
         notifyChange()
     }
 
-    private func notifyChange() {
-        NotificationCenter.default.post(name: NoteStore.didChange, object: self)
+    /// Switch to a new root and/or format. Migrates all existing notes by
+    /// re-writing them in the new location/format. Old files are left alone.
+    @discardableResult
+    func reconfigure(rootURL newRoot: URL, format newFormat: StorageFormat) -> Bool {
+        let active = loadActive()
+        let archived = loadArchived()
+
+        watcher?.stop()
+        rootURL = newRoot
+        format = newFormat
+        ensureDirectories()
+
+        for note in active {
+            write(note, to: noteURL(for: note.id, in: activeURL))
+        }
+        for note in archived {
+            write(note, to: noteURL(for: note.id, in: archiveURL))
+        }
+
+        startWatching()
+        notifyChange()
+        return true
     }
 
-    /// Move all notes/ and archive/ files from current rootURL to a new location, then update rootURL.
-    /// Returns true on success.
-    @discardableResult
-    func relocate(to newRoot: URL) -> Bool {
-        let fm = FileManager.default
-        let oldRoot = rootURL
-        if oldRoot == newRoot { return true }
+    // MARK: - Internal
 
-        let newActive = newRoot.appendingPathComponent("notes", isDirectory: true)
-        let newArchive = newRoot.appendingPathComponent("archive", isDirectory: true)
-        try? fm.createDirectory(at: newActive, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: newArchive, withIntermediateDirectories: true)
-
-        moveAllFiles(from: activeURL, to: newActive)
-        moveAllFiles(from: archiveURL, to: newArchive)
-
-        rootURL = newRoot
-        ensureDirectories()
-        return true
+    private func notifyChange() {
+        NotificationCenter.default.post(name: NoteStore.didChange, object: self)
     }
 
     private func ensureDirectories() {
@@ -99,19 +120,47 @@ final class NoteStore {
         try? fm.createDirectory(at: archiveURL, withIntermediateDirectories: true)
     }
 
+    private func startWatching() {
+        watcher = FileWatcher { [weak self] in
+            self?.notifyChange()
+        }
+        watcher?.watch([activeURL, archiveURL])
+    }
+
+    private func noteURL(for id: UUID, in dir: URL) -> URL {
+        dir.appendingPathComponent("\(id.uuidString).\(fileExtension)")
+    }
+
     private func loadAll(from dir: URL) -> [Note] {
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return []
         }
         return files.compactMap { url -> Note? in
-            guard url.pathExtension == "json", let data = try? Data(contentsOf: url) else { return nil }
+            guard url.pathExtension == fileExtension else { return nil }
+            return read(url)
+        }
+    }
+
+    private func read(_ url: URL) -> Note? {
+        switch format {
+        case .json:
+            guard let data = try? Data(contentsOf: url) else { return nil }
             return try? decoder.decode(Note.self, from: data)
+        case .markdown:
+            guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+            return parseMarkdown(raw, fallbackId: idFromFilename(url))
         }
     }
 
     private func write(_ note: Note, to url: URL) {
-        guard let data = try? encoder.encode(note) else { return }
-        try? data.write(to: url, options: .atomic)
+        switch format {
+        case .json:
+            guard let data = try? encoder.encode(note) else { return }
+            try? data.write(to: url, options: .atomic)
+        case .markdown:
+            let raw = renderMarkdown(note)
+            try? raw.write(to: url, atomically: true, encoding: .utf8)
+        }
     }
 
     private func moveFile(from: URL, to: URL) {
@@ -120,13 +169,50 @@ final class NoteStore {
         try? fm.moveItem(at: from, to: to)
     }
 
-    private func moveAllFiles(from src: URL, to dst: URL) {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil) else { return }
-        for file in files where file.pathExtension == "json" {
-            let target = dst.appendingPathComponent(file.lastPathComponent)
-            try? fm.removeItem(at: target)
-            try? fm.moveItem(at: file, to: target)
-        }
+    // MARK: - Markdown serialization
+
+    private func renderMarkdown(_ note: Note) -> String {
+        let frontmatter: [(String, String)] = [
+            ("id", note.id.uuidString),
+            ("color", note.color.rawValue),
+            ("positionX", String(format: "%.2f", note.positionX)),
+            ("positionY", String(format: "%.2f", note.positionY)),
+            ("width", String(format: "%.2f", note.width)),
+            ("height", String(format: "%.2f", note.height)),
+            ("collapsed", note.collapsed ? "true" : "false"),
+            ("created", iso8601.string(from: note.createdAt)),
+            ("updated", iso8601.string(from: note.updatedAt))
+        ]
+        let document = MarkdownFile.Document(frontmatter: frontmatter, body: note.content)
+        return MarkdownFile.serialize(document)
+    }
+
+    private func parseMarkdown(_ raw: String, fallbackId: UUID?) -> Note? {
+        let doc = MarkdownFile.parse(raw)
+        let id: UUID = doc.value(for: "id").flatMap(UUID.init(uuidString:)) ?? fallbackId ?? UUID()
+        let color = doc.value(for: "color").flatMap(NoteColor.init(rawValue:)) ?? .yellow
+        let positionX = Double(doc.value(for: "positionX") ?? "") ?? 200
+        let positionY = Double(doc.value(for: "positionY") ?? "") ?? 200
+        let width = Double(doc.value(for: "width") ?? "") ?? 240
+        let height = Double(doc.value(for: "height") ?? "") ?? 200
+        let collapsed = (doc.value(for: "collapsed") ?? "false") == "true"
+        let createdAt = doc.value(for: "created").flatMap(iso8601.date(from:)) ?? Date()
+        let updatedAt = doc.value(for: "updated").flatMap(iso8601.date(from:)) ?? createdAt
+        return Note(
+            id: id,
+            content: doc.body,
+            positionX: positionX,
+            positionY: positionY,
+            width: width,
+            height: height,
+            collapsed: collapsed,
+            color: color,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    private func idFromFilename(_ url: URL) -> UUID? {
+        UUID(uuidString: url.deletingPathExtension().lastPathComponent)
     }
 }

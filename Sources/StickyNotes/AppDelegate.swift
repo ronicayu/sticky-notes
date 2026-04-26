@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var launchAtLoginItem: NSMenuItem!
     private var iCloudItem: NSMenuItem!
+    private var vaultItem: NSMenuItem!
+    private var clearVaultItem: NSMenuItem!
     private var storagePathItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,6 +37,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         iCloudItem = NSMenuItem(title: "Sync via iCloud Drive", action: #selector(toggleICloud), keyEquivalent: "")
         menu.addItem(iCloudItem)
 
+        vaultItem = NSMenuItem(title: "Set Obsidian Vault…", action: #selector(chooseVault), keyEquivalent: "")
+        menu.addItem(vaultItem)
+
+        clearVaultItem = NSMenuItem(title: "Clear Obsidian Vault", action: #selector(clearVault), keyEquivalent: "")
+        menu.addItem(clearVaultItem)
+
         storagePathItem = NSMenuItem(title: "Show Storage Folder", action: #selector(revealStorage), keyEquivalent: "")
         menu.addItem(storagePathItem)
 
@@ -51,10 +59,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             launchAtLoginItem.toolTip = "Available only when launched from the bundled .app"
         }
 
-        iCloudItem.state = Settings.shared.useICloud ? .on : .off
-        iCloudItem.isEnabled = Settings.iCloudAvailable
-        if !Settings.iCloudAvailable {
+        let vaultActive = Settings.shared.obsidianVaultPath != nil
+        iCloudItem.state = (Settings.shared.useICloud && !vaultActive) ? .on : .off
+        iCloudItem.isEnabled = Settings.iCloudAvailable && !vaultActive
+        if vaultActive {
+            iCloudItem.toolTip = "Disabled while an Obsidian vault is configured"
+        } else if !Settings.iCloudAvailable {
             iCloudItem.toolTip = "iCloud Drive not available on this machine"
+        } else {
+            iCloudItem.toolTip = nil
+        }
+
+        if let path = Settings.shared.obsidianVaultPath {
+            let name = (path as NSString).lastPathComponent
+            vaultItem.title = "Vault: \(name)"
+            vaultItem.toolTip = path
+            clearVaultItem.isHidden = false
+        } else {
+            vaultItem.title = "Set Obsidian Vault…"
+            vaultItem.toolTip = nil
+            clearVaultItem.isHidden = true
         }
     }
 
@@ -113,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func toggleICloud() {
+        guard Settings.shared.obsidianVaultPath == nil else { return }
         let target = !Settings.shared.useICloud
         let newRoot: URL
         if target {
@@ -121,8 +146,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             newRoot = Settings.localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
         }
-        noteStore.relocate(to: newRoot)
         Settings.shared.useICloud = target
+        noteStore.reconfigure(rootURL: newRoot, format: .json)
+    }
+
+    @objc func chooseVault() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Obsidian Vault"
+        panel.message = "Pick the root folder of your Obsidian vault. Notes will be stored as Markdown files under \"<vault>/StickyNotes/\"."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use This Vault"
+        if let response = runOpenPanel(panel), response == .OK, let url = panel.urls.first {
+            Settings.shared.obsidianVaultPath = url.path
+            let newRoot = url.appendingPathComponent("StickyNotes", isDirectory: true)
+            noteStore.reconfigure(rootURL: newRoot, format: .markdown)
+        }
+    }
+
+    @objc func clearVault() {
+        Settings.shared.obsidianVaultPath = nil
+        let newRoot: URL
+        if Settings.shared.useICloud, let icloud = Settings.iCloudRootURL {
+            newRoot = icloud.appendingPathComponent("StickyNotes", isDirectory: true)
+        } else {
+            newRoot = Settings.localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
+        }
+        noteStore.reconfigure(rootURL: newRoot, format: .json)
+    }
+
+    private func runOpenPanel(_ panel: NSOpenPanel) -> NSApplication.ModalResponse? {
+        NSApp.activate(ignoringOtherApps: true)
+        return panel.runModal()
     }
 
     @objc func revealStorage() {

@@ -15,6 +15,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private var saveWorkItem: DispatchWorkItem?
     private var preCollapseHeight: CGFloat
     private var isHovering = false
+    private var pendingExternalContent: String?
 
     private static let blurAlpha: CGFloat = 0.65
     private static let activeAlpha: CGFloat = 1.0
@@ -121,6 +122,17 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         }
         MarkdownStyler.apply(to: textView)
         refreshMarkerVisibility()
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleStoreChange),
+            name: NoteStore.didChange,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     func focusEditor() {
@@ -148,6 +160,14 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     func windowDidResignKey(_ notification: Notification) {
         updateAlpha()
+        // If an external file change came in while we were focused, apply it now
+        // — but re-check disk state to avoid clobbering edits we made meanwhile.
+        if pendingExternalContent != nil {
+            pendingExternalContent = nil
+            if let updated = store.loadNote(id: note.id), updated.content != note.content {
+                applyExternalContent(updated.content)
+            }
+        }
     }
 
     private func updateAlpha() {
@@ -272,6 +292,32 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             note.height = Double(newHeight)
         }
         scheduleSave()
+    }
+
+    // MARK: - External change sync (Obsidian / iCloud)
+
+    @objc private func handleStoreChange() {
+        guard let updated = store.loadNote(id: note.id) else { return }
+        if updated.content == note.content { return }
+
+        // Defer reload while the user is actively editing; pick it up on blur.
+        if let win = window, win.isKeyWindow, win.firstResponder === textView {
+            pendingExternalContent = updated.content
+            return
+        }
+        applyExternalContent(updated.content)
+    }
+
+    private func applyExternalContent(_ newContent: String) {
+        note.content = newContent
+        let oldSelection = textView.selectedRange()
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        textStorage.replaceCharacters(in: fullRange, with: newContent)
+        MarkdownStyler.apply(to: textView)
+        refreshMarkerVisibility()
+        let len = textStorage.length
+        let clamped = NSRange(location: min(oldSelection.location, len), length: 0)
+        textView.setSelectedRange(clamped)
     }
 
     // MARK: - Persistence
