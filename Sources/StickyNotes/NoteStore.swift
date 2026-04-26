@@ -15,10 +15,23 @@ final class NoteStore {
     private var watcher: FileWatcher?
     private let iso8601 = ISO8601DateFormatter()
 
+    /// In Markdown mode the filename is creation-timestamp based (not derivable
+    /// from the UUID), so we need an in-memory map to relocate files for
+    /// archive/restore/delete. Populated by every load + save.
+    private var markdownPathIndex: [UUID: URL] = [:]
+
     var activeURL: URL { rootURL.appendingPathComponent("notes", isDirectory: true) }
     var archiveURL: URL { rootURL.appendingPathComponent("archive", isDirectory: true) }
 
     private var fileExtension: String { format == .json ? "json" : "md" }
+
+    private static let filenameFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HHmmss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone.current
+        return f
+    }()
 
     init(rootURL: URL = Settings.preferredStorageRoot, format: StorageFormat = Settings.preferredFormat) {
         self.rootURL = rootURL
@@ -33,8 +46,9 @@ final class NoteStore {
     }
 
     func save(_ note: Note) {
-        let url = noteURL(for: note.id, in: activeURL)
+        let url = existingURL(for: note.id, in: activeURL) ?? generateURL(for: note, in: activeURL)
         write(note, to: url)
+        markdownPathIndex[note.id] = url
         notifyChange()
     }
 
@@ -48,27 +62,31 @@ final class NoteStore {
 
     func loadNote(id: UUID, archived: Bool = false) -> Note? {
         let dir = archived ? archiveURL : activeURL
-        let url = noteURL(for: id, in: dir)
+        guard let url = existingURL(for: id, in: dir) else { return nil }
         return read(url)
     }
 
     func archive(_ note: Note) {
-        let from = noteURL(for: note.id, in: activeURL)
-        let to = noteURL(for: note.id, in: archiveURL)
+        guard let from = existingURL(for: note.id, in: activeURL) else { return }
+        let to = generateURL(for: note, in: archiveURL)
         moveFile(from: from, to: to)
+        markdownPathIndex[note.id] = to
         notifyChange()
     }
 
     func discardActive(_ note: Note) {
-        let url = noteURL(for: note.id, in: activeURL)
-        try? FileManager.default.removeItem(at: url)
+        if let url = existingURL(for: note.id, in: activeURL) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        markdownPathIndex.removeValue(forKey: note.id)
         notifyChange()
     }
 
     func restore(_ note: Note) {
-        let from = noteURL(for: note.id, in: archiveURL)
-        let to = noteURL(for: note.id, in: activeURL)
+        guard let from = existingURL(for: note.id, in: archiveURL) else { return }
+        let to = generateURL(for: note, in: activeURL)
         moveFile(from: from, to: to)
+        markdownPathIndex[note.id] = to
 
         // Force-expand on restore so the content is immediately visible.
         if var restored = read(to), restored.collapsed {
@@ -79,8 +97,10 @@ final class NoteStore {
     }
 
     func deleteForever(_ note: Note) {
-        let url = noteURL(for: note.id, in: archiveURL)
-        try? FileManager.default.removeItem(at: url)
+        if let url = existingURL(for: note.id, in: archiveURL) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        markdownPathIndex.removeValue(forKey: note.id)
         notifyChange()
     }
 
@@ -94,13 +114,18 @@ final class NoteStore {
         watcher?.stop()
         rootURL = newRoot
         format = newFormat
+        markdownPathIndex.removeAll()
         ensureDirectories()
 
         for note in active {
-            write(note, to: noteURL(for: note.id, in: activeURL))
+            let url = generateURL(for: note, in: activeURL)
+            write(note, to: url)
+            markdownPathIndex[note.id] = url
         }
         for note in archived {
-            write(note, to: noteURL(for: note.id, in: archiveURL))
+            let url = generateURL(for: note, in: archiveURL)
+            write(note, to: url)
+            markdownPathIndex[note.id] = url
         }
 
         startWatching()
@@ -127,18 +152,64 @@ final class NoteStore {
         watcher?.watch([activeURL, archiveURL])
     }
 
-    private func noteURL(for id: UUID, in dir: URL) -> URL {
-        dir.appendingPathComponent("\(id.uuidString).\(fileExtension)")
+    /// Returns the on-disk URL for a note that already exists in the given
+    /// directory, or nil if not found. JSON mode uses deterministic
+    /// `<uuid>.json` paths; Markdown mode looks up the cached path and falls
+    /// back to scanning the directory by frontmatter id.
+    private func existingURL(for id: UUID, in dir: URL) -> URL? {
+        switch format {
+        case .json:
+            let url = dir.appendingPathComponent("\(id.uuidString).json")
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        case .markdown:
+            if let cached = markdownPathIndex[id], cached.deletingLastPathComponent().path == dir.path,
+               FileManager.default.fileExists(atPath: cached.path) {
+                return cached
+            }
+            // Cold cache or stale entry: scan and rebuild for this dir.
+            return scanForId(id, in: dir)
+        }
+    }
+
+    /// Builds a fresh URL for a new save into the given directory.
+    private func generateURL(for note: Note, in dir: URL) -> URL {
+        switch format {
+        case .json:
+            return dir.appendingPathComponent("\(note.id.uuidString).json")
+        case .markdown:
+            let stamp = NoteStore.filenameFormatter.string(from: note.createdAt)
+            let suffix = String(note.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
+            let base = "\(stamp)-\(suffix)"
+            return dir.appendingPathComponent("\(base).md")
+        }
+    }
+
+    private func scanForId(_ id: UUID, in dir: URL) -> URL? {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        for url in files where url.pathExtension == fileExtension {
+            if let note = read(url), note.id == id {
+                markdownPathIndex[id] = url
+                return url
+            }
+        }
+        return nil
     }
 
     private func loadAll(from dir: URL) -> [Note] {
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return []
         }
-        return files.compactMap { url -> Note? in
-            guard url.pathExtension == fileExtension else { return nil }
-            return read(url)
+        var notes: [Note] = []
+        for url in files where url.pathExtension == fileExtension {
+            guard let note = read(url) else { continue }
+            if format == .markdown {
+                markdownPathIndex[note.id] = url
+            }
+            notes.append(note)
         }
+        return notes
     }
 
     private func read(_ url: URL) -> Note? {

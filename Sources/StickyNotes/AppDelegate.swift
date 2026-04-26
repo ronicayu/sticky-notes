@@ -14,9 +14,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var storagePathItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installMainMenu()
         setupMenuBar()
         registerHotkeys()
         restoreActiveNotes()
+    }
+
+    /// Even though we're an accessory (no Dock icon, no system menu bar),
+    /// installing a main menu lets standard key equivalents like ⌘C / ⌘V /
+    /// ⌘X / ⌘A / ⌘Z reach the focused text view via `performKeyEquivalent`.
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit Sticky Notes",
+                        action: #selector(NSApplication.terminate(_:)),
+                        keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo",
+                         action: Selector(("undo:")),
+                         keyEquivalent: "z")
+        let redoItem = editMenu.addItem(withTitle: "Redo",
+                                        action: Selector(("redo:")),
+                                        keyEquivalent: "Z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut",
+                         action: #selector(NSText.cut(_:)),
+                         keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy",
+                         action: #selector(NSText.copy(_:)),
+                         keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste",
+                         action: #selector(NSText.paste(_:)),
+                         keyEquivalent: "v")
+        let pastePlainItem = editMenu.addItem(withTitle: "Paste and Match Style",
+                                              action: #selector(NSTextView.pasteAsPlainText(_:)),
+                                              keyEquivalent: "V")
+        pastePlainItem.keyEquivalentModifierMask = [.command, .shift, .option]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Select All",
+                         action: #selector(NSText.selectAll(_:)),
+                         keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func setupMenuBar() {
