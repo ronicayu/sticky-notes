@@ -127,6 +127,15 @@ enum MarkdownStyler {
         let nsstring = plain as NSString
         let matches = regex.matches(in: plain, range: full)
 
+        // The bracket char ("x"/"X" or " ") has different glyph widths in
+        // SF, so checked vs unchecked markers normally consume different
+        // horizontal space — making body text after them visually
+        // misaligned. Compensate with negative kerning on the wider char.
+        let attrFont = baseFont()
+        let xWidth = ("x" as NSString).size(withAttributes: [.font: attrFont]).width
+        let spaceWidth = (" " as NSString).size(withAttributes: [.font: attrFont]).width
+        let widthDelta = xWidth - spaceWidth
+
         for match in matches {
             let bracketRange = match.range(at: 1)
             let bracket = nsstring.substring(with: bracketRange)
@@ -138,6 +147,13 @@ enum MarkdownStyler {
             // layout for natural width). The TodoTextView paints a real
             // checkbox over the same span.
             storage.addAttribute(.foregroundColor, value: NSColor.clear, range: match.range)
+
+            // Compress the trailing kern of "x" so its effective width
+            // matches a literal space — keeps body text aligned across
+            // checked/unchecked rows.
+            if isChecked && widthDelta > 0 {
+                storage.addAttribute(.kern, value: -widthDelta, range: bracketRange)
+            }
         }
     }
 
