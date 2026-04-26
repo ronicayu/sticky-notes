@@ -47,6 +47,10 @@ enum MarkdownStyler {
             applyBlock(line: line, range: lineRange, in: storage)
         }
 
+        // Checkbox lines: tag the "- [ ] " / "- [x] " prefix so the editor
+        // can hide it and overlay-draw a real checkbox.
+        applyCheckboxes(in: storage, full: full)
+
         // Inline runs. Order matters: bold first so italic regex skips `**`.
         applyInline(
             pattern: #"\*\*([^*\n]+?)\*\*"#,
@@ -111,6 +115,32 @@ enum MarkdownStyler {
         return selStart <= scopeEnd && selEnd >= scope.location
     }
 
+    // MARK: - Checkboxes
+
+    private static func applyCheckboxes(in storage: NSTextStorage, full: NSRange) {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"^[ \t]*-\s\[([ xX])\]\s"#,
+            options: [.anchorsMatchLines]
+        ) else { return }
+
+        let plain = storage.string
+        let nsstring = plain as NSString
+        let matches = regex.matches(in: plain, range: full)
+
+        for match in matches {
+            let bracketRange = match.range(at: 1)
+            let bracket = nsstring.substring(with: bracketRange)
+            let isChecked = bracket.lowercased() == "x"
+
+            storage.addAttribute(.checkboxRange, value: NSValue(range: match.range), range: match.range)
+            storage.addAttribute(.checkboxChecked, value: isChecked, range: match.range)
+            // Make the markdown source itself invisible (still counted in
+            // layout for natural width). The TodoTextView paints a real
+            // checkbox over the same span.
+            storage.addAttribute(.foregroundColor, value: NSColor.clear, range: match.range)
+        }
+    }
+
     // MARK: - Block
 
     private static func applyBlock(line: String, range: NSRange, in storage: NSTextStorage) {
@@ -121,7 +151,17 @@ enum MarkdownStyler {
         } else if line.hasPrefix("### ") {
             applyHeading(markerLen: 4, fontSize: baseFontSize + 1, weight: .semibold, lineRange: range, storage: storage)
         } else if line.hasPrefix("- ") || line.hasPrefix("* ") {
-            applyListItem(lineRange: range, storage: storage)
+            // Checkbox prefix is handled separately so it can render as a real
+            // checkbox; let applyCheckboxes own that range.
+            let isCheckboxLine = line.range(
+                of: #"^[ \t]*-\s\[([ xX])\]\s"#,
+                options: .regularExpression
+            ) != nil
+            if !isCheckboxLine {
+                applyListItem(lineRange: range, storage: storage)
+            }
+        } else if let prefixLen = orderedListMarkerLength(line) {
+            applyOrderedItem(lineRange: range, markerLength: prefixLen, storage: storage)
         }
     }
 
@@ -148,6 +188,26 @@ enum MarkdownStyler {
 
         let para = NSMutableParagraphStyle()
         para.headIndent = 14
+        para.firstLineHeadIndent = 0
+        storage.addAttribute(.paragraphStyle, value: para, range: lineRange)
+    }
+
+    /// Returns the number of characters in an ordered-list marker like
+    /// "1. " / "23. " at the start of `line`, or nil if there is none.
+    private static func orderedListMarkerLength(_ line: String) -> Int? {
+        guard let match = line.range(
+            of: #"^\d+\.\s"#,
+            options: .regularExpression
+        ) else { return nil }
+        return line.distance(from: match.lowerBound, to: match.upperBound)
+    }
+
+    private static func applyOrderedItem(lineRange: NSRange, markerLength: Int, storage: NSTextStorage) {
+        let markerRange = NSRange(location: lineRange.location, length: markerLength)
+        storage.addAttribute(.foregroundColor, value: markerColor, range: markerRange)
+
+        let para = NSMutableParagraphStyle()
+        para.headIndent = CGFloat(markerLength) * 8 // approximate; aligns wrap to text
         para.firstLineHeadIndent = 0
         storage.addAttribute(.paragraphStyle, value: para, range: lineRange)
     }

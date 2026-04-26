@@ -1,6 +1,6 @@
 import AppKit
 
-final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSLayoutManagerDelegate, NoteDragZoneDelegate, ColorPickerBarDelegate {
+final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSLayoutManagerDelegate, NoteDragZoneDelegate, ColorPickerBarDelegate, TodoTextViewDelegate {
     private var note: Note
     private let store: NoteStore
     private let onClosed: (UUID) -> Void
@@ -24,7 +24,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     private var dragZoneHeightConstraint: NSLayoutConstraint!
 
-    private let textView: NSTextView
+    private let textView: TodoTextView
     private let textStorage: NSTextStorage
     private let layoutManager: NSLayoutManager
     private let scrollView: NSScrollView
@@ -138,7 +138,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         container.heightTracksTextView = false
         layoutManager.addTextContainer(container)
 
-        textView = NSTextView(frame: .zero, textContainer: container)
+        textView = TodoTextView(frame: .zero, textContainer: container)
         textView.isRichText = false
         textView.allowsUndo = true
         textView.backgroundColor = .clear
@@ -272,6 +272,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         window.minSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         window.contentMinSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         textView.delegate = self
+        textView.todoDelegate = self
         titleField.delegate = self
         layoutManager.delegate = self
         dragZone.delegate = self
@@ -482,19 +483,113 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         return false
     }
 
-    /// Body editor key handling. Up arrow on the first line → jump to title.
+    /// Body editor key handling.
+    /// - Up arrow on the first line → jump to title.
+    /// - Enter inside a bullet/ordered/checkbox item → continue the list (or
+    ///   strip the marker if the current item is empty, exiting the list).
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard textView === self.textView else { return false }
-        guard commandSelector == #selector(NSResponder.moveUp(_:)) else { return false }
 
-        let selection = textView.selectedRange()
+        if commandSelector == #selector(NSResponder.moveUp(_:)) {
+            let selection = textView.selectedRange()
+            let str = textView.string as NSString
+            let firstNewline = str.range(of: "\n")
+            let onFirstLine = firstNewline.location == NSNotFound || selection.location <= firstNewline.location
+            guard onFirstLine else { return false }
+            focusTitle()
+            return true
+        }
+
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            return handleListContinuation()
+        }
+
+        return false
+    }
+
+    /// On Enter: if the current line is a list/checkbox item, either continue
+    /// the list with the next marker or — if the item is empty — strip the
+    /// marker and let the regular newline through to exit the list.
+    private func handleListContinuation() -> Bool {
         let str = textView.string as NSString
-        let firstNewline = str.range(of: "\n")
-        let onFirstLine = firstNewline.location == NSNotFound || selection.location <= firstNewline.location
-        guard onFirstLine else { return false }
+        let selection = textView.selectedRange()
+        let lineRange = str.lineRange(for: NSRange(location: selection.location, length: 0))
+        var lineText = str.substring(with: lineRange)
+        if lineText.hasSuffix("\n") { lineText.removeLast() }
+        let lineNS = lineText as NSString
 
-        focusTitle()
-        return true
+        // Checkbox: "[indent]- [ ] " or "[indent]- [x] "
+        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)-\s\[[ xX]\]\s(.*)$"#),
+           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
+            let indent = lineNS.substring(with: m.range(at: 1))
+            let rest = lineNS.substring(with: m.range(at: 2))
+            let prefixLen = lineNS.length - (rest as NSString).length
+            return continueOrExitList(
+                lineRange: lineRange,
+                prefixLen: prefixLen,
+                rest: rest,
+                continuation: "\(indent)- [ ] "
+            )
+        }
+
+        // Bullet: "- " or "* " (with optional indent)
+        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)([-*])\s(.*)$"#),
+           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
+            let indent = lineNS.substring(with: m.range(at: 1))
+            let bullet = lineNS.substring(with: m.range(at: 2))
+            let rest = lineNS.substring(with: m.range(at: 3))
+            let prefixLen = lineNS.length - (rest as NSString).length
+            return continueOrExitList(
+                lineRange: lineRange,
+                prefixLen: prefixLen,
+                rest: rest,
+                continuation: "\(indent)\(bullet) "
+            )
+        }
+
+        // Ordered: "1. ", "23. " (with optional indent)
+        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)(\d+)\.\s(.*)$"#),
+           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
+            let indent = lineNS.substring(with: m.range(at: 1))
+            let numStr = lineNS.substring(with: m.range(at: 2))
+            let rest = lineNS.substring(with: m.range(at: 3))
+            let next = (Int(numStr) ?? 0) + 1
+            let prefixLen = lineNS.length - (rest as NSString).length
+            return continueOrExitList(
+                lineRange: lineRange,
+                prefixLen: prefixLen,
+                rest: rest,
+                continuation: "\(indent)\(next). "
+            )
+        }
+
+        return false
+    }
+
+    private func continueOrExitList(lineRange: NSRange,
+                                     prefixLen: Int,
+                                     rest: String,
+                                     continuation: String) -> Bool {
+        let restTrimmed = rest.trimmingCharacters(in: .whitespaces)
+        let selection = textView.selectedRange()
+
+        if restTrimmed.isEmpty {
+            // Empty item — strip the marker so this Enter starts a new line
+            // outside the list. Return false so NSTextView handles the Enter.
+            let prefixRange = NSRange(location: lineRange.location, length: prefixLen)
+            guard textView.shouldChangeText(in: prefixRange, replacementString: "") else { return false }
+            textStorage.replaceCharacters(in: prefixRange, with: "")
+            textView.didChangeText()
+            return false
+        } else {
+            // Continue the list.
+            let insertion = "\n" + continuation
+            let insertRange = NSRange(location: selection.location, length: 0)
+            guard textView.shouldChangeText(in: insertRange, replacementString: insertion) else { return false }
+            textStorage.replaceCharacters(in: insertRange, with: insertion)
+            textView.didChangeText()
+            return true
+        }
     }
 
     // MARK: - Slash commands
@@ -766,6 +861,31 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         updateExpandButtonIcon()
         updateChromeVisibility()
         scheduleSave()
+    }
+
+    // MARK: - TodoTextViewDelegate
+
+    /// Flip the bracket character (`[ ]` ↔ `[x]`) inside the markdown source
+    /// for the checkbox at the given character index. The checkbox visual is
+    /// re-rendered automatically when MarkdownStyler runs in textDidChange.
+    func textViewDidToggleCheckbox(at charIndex: Int) {
+        let str = textStorage.string as NSString
+        guard charIndex < str.length else { return }
+
+        let lineRange = str.lineRange(for: NSRange(location: charIndex, length: 0))
+        let lineNS = str.substring(with: lineRange) as NSString
+        let bracketInLine = lineNS.range(of: "[")
+        guard bracketInLine.location != NSNotFound,
+              bracketInLine.location + 1 < lineNS.length else { return }
+
+        let bracketCharIdx = lineRange.location + bracketInLine.location + 1
+        let current = str.substring(with: NSRange(location: bracketCharIdx, length: 1))
+        let replacement = current.lowercased() == "x" ? " " : "x"
+
+        let range = NSRange(location: bracketCharIdx, length: 1)
+        guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
+        textStorage.replaceCharacters(in: range, with: replacement)
+        textView.didChangeText()
     }
 
     // MARK: - External change sync
