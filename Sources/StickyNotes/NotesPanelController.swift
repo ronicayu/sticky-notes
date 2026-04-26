@@ -282,15 +282,19 @@ final class NotesPanelCell: NSView {
     func configure(with note: Note) {
         dot.layer?.backgroundColor = NSColor(hex: note.color.bodyHex)?.cgColor
 
-        let trimmed = note.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            label.stringValue = "(empty note)"
-            label.textColor = NSColor.tertiaryLabelColor
-        } else {
-            // strip common markdown markers from preview line so it reads cleanly
-            let firstLine = trimmed.split(whereSeparator: \.isNewline).first.map(String.init) ?? trimmed
+        let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = note.content.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !title.isEmpty {
+            label.stringValue = String(title.prefix(160))
+            label.textColor = NSColor.labelColor
+        } else if !body.isEmpty {
+            let firstLine = body.split(whereSeparator: \.isNewline).first.map(String.init) ?? body
             label.stringValue = NotesPanelCell.stripMarkdown(String(firstLine.prefix(160)))
             label.textColor = NSColor.labelColor
+        } else {
+            label.stringValue = "(empty note)"
+            label.textColor = NSColor.tertiaryLabelColor
         }
         timeLabel.stringValue = NotesPanelCell.relativeFormatter.localizedString(for: note.updatedAt, relativeTo: Date())
     }

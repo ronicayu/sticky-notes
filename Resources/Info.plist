@@ -8,6 +8,8 @@
     <string>Sticky Notes</string>
     <key>CFBundleExecutable</key>
     <string>StickyNotes</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.ronica.stickynotes</string>
     <key>CFBundleInfoDictionaryVersion</key>

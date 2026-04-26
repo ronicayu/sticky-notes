@@ -6,6 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let noteStore = NoteStore()
     private var windowControllers: [UUID: NoteWindowController] = [:]
     private var notesPanelController: NotesPanelController?
+    private var notesHidden = false
+    private var hideAllItem: NSMenuItem!
 
     private var launchAtLoginItem: NSMenuItem!
     private var iCloudItem: NSMenuItem!
@@ -60,13 +62,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "Sticky Notes")
+            // Custom template image renders as the sticky-note silhouette and
+            // gets tinted automatically by the system (light/dark/click).
+            if let icon = NSImage(named: "MenuBarIcon") {
+                icon.isTemplate = true
+                button.image = icon
+            } else {
+                button.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "Sticky Notes")
+            }
         }
 
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(withTitle: "New Note  ⌘⇧S", action: #selector(newNote), keyEquivalent: "")
         menu.addItem(withTitle: "Notes  ⌘⇧L", action: #selector(showNotesPanel), keyEquivalent: "")
+        hideAllItem = NSMenuItem(title: "Hide All Notes  ⌘⇧H",
+                                  action: #selector(toggleHideAll),
+                                  keyEquivalent: "")
+        menu.addItem(hideAllItem)
         menu.addItem(.separator())
 
         launchAtLoginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
@@ -91,6 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        hideAllItem.title = (notesHidden ? "Show All Notes  ⌘⇧H" : "Hide All Notes  ⌘⇧H")
+        hideAllItem.isEnabled = !windowControllers.isEmpty
+
         launchAtLoginItem.state = LaunchAgent.isEnabled ? .on : .off
         launchAtLoginItem.isEnabled = LaunchAgent.isAvailable
         if !LaunchAgent.isAvailable {
@@ -127,6 +143,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         KeyboardShortcuts.onKeyDown(for: .notesPanel) { [weak self] in
             self?.showNotesPanel()
         }
+        KeyboardShortcuts.onKeyDown(for: .hideAll) { [weak self] in
+            self?.toggleHideAll()
+        }
+    }
+
+    @objc func toggleHideAll() {
+        guard !windowControllers.isEmpty else { return }
+        notesHidden.toggle()
+        if notesHidden {
+            for controller in windowControllers.values {
+                controller.window?.orderOut(nil)
+            }
+        } else {
+            for controller in windowControllers.values {
+                controller.window?.orderFront(nil)
+            }
+        }
     }
 
     private func restoreActiveNotes() {
@@ -136,9 +169,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func newNote() {
+        // Creating a new note while everything is hidden should bring all
+        // notes back so the new one isn't the only thing visible.
+        if notesHidden { toggleHideAll() }
         let note = Note.makeNew()
         noteStore.save(note)
         presentWindow(for: note)
+        // New notes start with the cursor in the title — that's where the
+        // user should be naming the thing first.
+        windowControllers[note.id]?.focusTitle()
     }
 
     @objc func showNotesPanel() {
@@ -236,7 +275,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        controller.focusEditor()
     }
 
     private func presentError(_ message: String, error: Error) {

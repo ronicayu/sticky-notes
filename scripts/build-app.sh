@@ -25,6 +25,15 @@ mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/${EXEC_NAME}"
 cp Resources/Info.plist "${APP_DIR}/Contents/Info.plist"
 
+# Generate icons on demand if missing.
+if [ ! -f Resources/AppIcon.icns ]; then
+    ./scripts/generate-icon.sh
+fi
+
+cp Resources/AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
+cp Resources/MenuBarIcon.png "${APP_DIR}/Contents/Resources/MenuBarIcon.png"
+cp Resources/MenuBarIcon@2x.png "${APP_DIR}/Contents/Resources/MenuBarIcon@2x.png"
+
 # Ad-hoc sign so macOS Gatekeeper at least accepts it after the user grants permission.
 codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || true
 

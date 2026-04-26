@@ -245,6 +245,7 @@ final class NoteStore {
     private func renderMarkdown(_ note: Note) -> String {
         let frontmatter: [(String, String)] = [
             ("id", note.id.uuidString),
+            ("title", note.title),
             ("color", note.color.rawValue),
             ("positionX", String(format: "%.2f", note.positionX)),
             ("positionY", String(format: "%.2f", note.positionY)),
@@ -261,6 +262,7 @@ final class NoteStore {
     private func parseMarkdown(_ raw: String, fallbackId: UUID?) -> Note? {
         let doc = MarkdownFile.parse(raw)
         let id: UUID = doc.value(for: "id").flatMap(UUID.init(uuidString:)) ?? fallbackId ?? UUID()
+        let title = doc.value(for: "title") ?? ""
         let color = doc.value(for: "color").flatMap(NoteColor.init(rawValue:)) ?? .yellow
         let positionX = Double(doc.value(for: "positionX") ?? "") ?? 200
         let positionY = Double(doc.value(for: "positionY") ?? "") ?? 200
@@ -271,6 +273,7 @@ final class NoteStore {
         let updatedAt = doc.value(for: "updated").flatMap(iso8601.date(from:)) ?? createdAt
         return Note(
             id: id,
+            title: title,
             content: doc.body,
             positionX: positionX,
             positionY: positionY,

@@ -46,6 +46,7 @@ enum NoteColor: String, Codable, CaseIterable {
 
 struct Note: Codable, Identifiable {
     let id: UUID
+    var title: String
     var content: String
     var positionX: Double
     var positionY: Double
@@ -56,6 +57,48 @@ struct Note: Codable, Identifiable {
     let createdAt: Date
     var updatedAt: Date
 
+    init(
+        id: UUID,
+        title: String = "",
+        content: String,
+        positionX: Double,
+        positionY: Double,
+        width: Double,
+        height: Double,
+        collapsed: Bool,
+        color: NoteColor,
+        createdAt: Date,
+        updatedAt: Date
+    ) {
+        self.id = id
+        self.title = title
+        self.content = content
+        self.positionX = positionX
+        self.positionY = positionY
+        self.width = width
+        self.height = height
+        self.collapsed = collapsed
+        self.color = color
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    /// Custom decoder so notes saved before `title` existed still decode.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        content = try c.decode(String.self, forKey: .content)
+        positionX = try c.decode(Double.self, forKey: .positionX)
+        positionY = try c.decode(Double.self, forKey: .positionY)
+        width = try c.decode(Double.self, forKey: .width)
+        height = try c.decode(Double.self, forKey: .height)
+        collapsed = (try? c.decode(Bool.self, forKey: .collapsed)) ?? false
+        color = (try? c.decode(NoteColor.self, forKey: .color)) ?? .yellow
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+    }
+
     static func makeNew() -> Note {
         let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
         let w = 240.0, h = 200.0
@@ -64,6 +107,7 @@ struct Note: Codable, Identifiable {
         let now = Date()
         return Note(
             id: UUID(),
+            title: "",
             content: "",
             positionX: x,
             positionY: y,
