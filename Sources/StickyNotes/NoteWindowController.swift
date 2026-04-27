@@ -1,6 +1,6 @@
 import AppKit
 
-final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSLayoutManagerDelegate, NoteDragZoneDelegate, ColorPickerBarDelegate, TodoTextViewDelegate {
+final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSLayoutManagerDelegate, NoteDragZoneDelegate, TodoTextViewDelegate {
     private var note: Note
     private let store: NoteStore
     private let onClosed: (UUID) -> Void
@@ -8,10 +8,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private let dragZone: NoteDragZone
     private let expandButton: NSButton
     private let trashButton: NSButton
+    private let colorButton: NSButton
     private let titleField: FlushLeftTextField    // editable; visible expanded
     private let titleLabel: CenteredTitleLabel    // read-only; visible collapsed
     private let dateLabel: NSTextField
-    private let colorPicker: ColorPickerBar
     private let footerView: NSView
     /// Container that holds titleField + scrollView + footer. We collapse the
     /// note by forcing this view's height to 0; otherwise its subviews'
@@ -95,6 +95,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             symbol: "trash",
             tooltip: "Archive note"
         )
+        colorButton = NoteWindowController.makeChromeButton(
+            symbol: "tshirt.fill",
+            tooltip: "Change color"
+        )
 
         // Two title surfaces:
         // - titleField: editable NSTextField shown when the note is expanded
@@ -167,20 +171,17 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         scrollView.autohidesScrollers = true
         scrollView.documentView = textView
 
-        // Footer: relative date (left) + color picker (right).
+        // Footer: relative date only — color is now changed via the t-shirt
+        // button in the chrome row.
         dateLabel = NSTextField(labelWithString: "")
         dateLabel.translatesAutoresizingMaskIntoConstraints = false
         dateLabel.font = NSFont.systemFont(ofSize: 10, weight: .regular)
         dateLabel.textColor = NSColor.black.withAlphaComponent(0.40)
         dateLabel.lineBreakMode = .byClipping
 
-        colorPicker = ColorPickerBar(currentColor: note.color)
-        colorPicker.translatesAutoresizingMaskIntoConstraints = false
-
         footerView = NSView()
         footerView.translatesAutoresizingMaskIntoConstraints = false
         footerView.addSubview(dateLabel)
-        footerView.addSubview(colorPicker)
 
         backgroundView.addSubview(bodyContainer)
         backgroundView.addSubview(dragZone)
@@ -188,10 +189,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         bodyContainer.addSubview(scrollView)
         bodyContainer.addSubview(footerView)
         dragZone.addSubview(titleLabel)
+        dragZone.addSubview(colorButton)
         dragZone.addSubview(expandButton)
         dragZone.addSubview(trashButton)
-
-        let pickerSize = colorPicker.intrinsicContentSize
 
         let initialChromeHeight: CGFloat = note.collapsed
             ? NoteWindowController.collapsedHeight
@@ -216,12 +216,18 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             bodyContainer.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor),
 
             // Top-right buttons in the drag zone (visible only when focused).
+            // Order from right to left: trash, color (t-shirt), expand.
             trashButton.trailingAnchor.constraint(equalTo: dragZone.trailingAnchor, constant: -7),
             trashButton.centerYAnchor.constraint(equalTo: dragZone.centerYAnchor),
             trashButton.widthAnchor.constraint(equalToConstant: 13),
             trashButton.heightAnchor.constraint(equalToConstant: 13),
 
-            expandButton.trailingAnchor.constraint(equalTo: trashButton.leadingAnchor, constant: -6),
+            colorButton.trailingAnchor.constraint(equalTo: trashButton.leadingAnchor, constant: -6),
+            colorButton.centerYAnchor.constraint(equalTo: dragZone.centerYAnchor),
+            colorButton.widthAnchor.constraint(equalToConstant: 13),
+            colorButton.heightAnchor.constraint(equalToConstant: 13),
+
+            expandButton.trailingAnchor.constraint(equalTo: colorButton.leadingAnchor, constant: -6),
             expandButton.centerYAnchor.constraint(equalTo: dragZone.centerYAnchor),
             expandButton.widthAnchor.constraint(equalToConstant: 13),
             expandButton.heightAnchor.constraint(equalToConstant: 13),
@@ -251,12 +257,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             footerView.heightAnchor.constraint(equalToConstant: 16),
 
             dateLabel.leadingAnchor.constraint(equalTo: footerView.leadingAnchor),
-            dateLabel.centerYAnchor.constraint(equalTo: footerView.centerYAnchor),
-
-            colorPicker.trailingAnchor.constraint(equalTo: footerView.trailingAnchor),
-            colorPicker.centerYAnchor.constraint(equalTo: footerView.centerYAnchor),
-            colorPicker.widthAnchor.constraint(equalToConstant: pickerSize.width),
-            colorPicker.heightAnchor.constraint(equalToConstant: pickerSize.height)
+            dateLabel.trailingAnchor.constraint(lessThanOrEqualTo: footerView.trailingAnchor),
+            dateLabel.centerYAnchor.constraint(equalTo: footerView.centerYAnchor)
         ])
 
         window.contentView = backgroundView
@@ -276,12 +278,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         titleField.delegate = self
         layoutManager.delegate = self
         dragZone.delegate = self
-        colorPicker.delegate = self
 
         expandButton.target = self
         expandButton.action = #selector(toggleCollapse)
         trashButton.target = self
         trashButton.action = #selector(closeNote)
+        colorButton.target = self
+        colorButton.action = #selector(showColorMenu)
 
         backgroundView.onHoverChange = { [weak self] hovering in
             self?.isHovering = hovering
@@ -390,13 +393,48 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         performToggleCollapse()
     }
 
-    // MARK: - ColorPickerBarDelegate
+    // MARK: - Color picker
 
-    func colorPicker(_ bar: ColorPickerBar, didSelect color: NoteColor) {
+    @objc private func showColorMenu() {
+        let menu = NSMenu()
+        for color in NoteColor.allCases {
+            let item = NSMenuItem(
+                title: color.displayName,
+                action: #selector(pickColor(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = color.rawValue
+            item.image = NoteWindowController.colorSwatch(for: color)
+            if color == note.color { item.state = .on }
+            menu.addItem(item)
+        }
+        let p = NSPoint(x: colorButton.bounds.minX, y: colorButton.bounds.maxY + 4)
+        menu.popUp(positioning: nil, at: p, in: colorButton)
+    }
+
+    @objc private func pickColor(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let color = NoteColor(rawValue: raw) else { return }
         note.color = color
         backgroundView.layer?.backgroundColor = NSColor(hex: color.bodyHex)?.cgColor
-        colorPicker.currentColor = color
         scheduleSave()
+    }
+
+    private static func colorSwatch(for color: NoteColor) -> NSImage {
+        return NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
+            let path = NSBezierPath(
+                roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+                xRadius: 3,
+                yRadius: 3
+            )
+            NSColor(hex: color.bodyHex)?.setFill()
+            path.fill()
+            NSColor.black.withAlphaComponent(0.18).setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+            return true
+        }
     }
 
     // MARK: - NSWindowDelegate

@@ -8,6 +8,7 @@ final class Settings {
         static let useICloud = "useICloud"
         static let launchAtLogin = "launchAtLogin"
         static let obsidianVaultPath = "obsidianVaultPath"
+        static let defaultNoteColor = "defaultNoteColor"
     }
 
     private init() {}
@@ -31,6 +32,16 @@ final class Settings {
             return (v?.isEmpty ?? true) ? nil : v
         }
         set { defaults.set(newValue, forKey: Keys.obsidianVaultPath) }
+    }
+
+    /// Color applied to a newly-created note. Defaults to yellow.
+    var defaultNoteColor: NoteColor {
+        get {
+            guard let raw = defaults.string(forKey: Keys.defaultNoteColor),
+                  let color = NoteColor(rawValue: raw) else { return .yellow }
+            return color
+        }
+        set { defaults.set(newValue.rawValue, forKey: Keys.defaultNoteColor) }
     }
 
     static var iCloudAvailable: Bool {

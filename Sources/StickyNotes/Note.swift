@@ -114,7 +114,7 @@ struct Note: Codable, Identifiable {
             width: w,
             height: h,
             collapsed: false,
-            color: .yellow,
+            color: Settings.shared.defaultNoteColor,
             createdAt: now,
             updatedAt: now
         )

@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var vaultItem: NSMenuItem!
     private var clearVaultItem: NSMenuItem!
     private var storagePathItem: NSMenuItem!
+    private var defaultColorItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -82,6 +83,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(hideAllItem)
         menu.addItem(.separator())
 
+        defaultColorItem = NSMenuItem(title: "Default Color", action: nil, keyEquivalent: "")
+        defaultColorItem.submenu = makeDefaultColorSubmenu()
+        menu.addItem(defaultColorItem)
+
         launchAtLoginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         menu.addItem(launchAtLoginItem)
 
@@ -103,9 +108,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
     }
 
+    private func makeDefaultColorSubmenu() -> NSMenu {
+        let submenu = NSMenu(title: "Default Color")
+        for color in NoteColor.allCases {
+            let item = NSMenuItem(
+                title: color.displayName,
+                action: #selector(setDefaultColor(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = color.rawValue
+            item.image = AppDelegate.colorSwatch(for: color)
+            submenu.addItem(item)
+        }
+        return submenu
+    }
+
+    private static func colorSwatch(for color: NoteColor) -> NSImage {
+        return NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
+            let path = NSBezierPath(
+                roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+                xRadius: 3,
+                yRadius: 3
+            )
+            NSColor(hex: color.bodyHex)?.setFill()
+            path.fill()
+            NSColor.black.withAlphaComponent(0.18).setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+            return true
+        }
+    }
+
+    @objc func setDefaultColor(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let color = NoteColor(rawValue: raw) else { return }
+        Settings.shared.defaultNoteColor = color
+    }
+
     func menuWillOpen(_ menu: NSMenu) {
         hideAllItem.title = (notesHidden ? "Show All Notes  ⌘⇧H" : "Hide All Notes  ⌘⇧H")
         hideAllItem.isEnabled = !windowControllers.isEmpty
+
+        if let submenu = defaultColorItem.submenu {
+            let current = Settings.shared.defaultNoteColor
+            for item in submenu.items {
+                if let raw = item.representedObject as? String,
+                   let color = NoteColor(rawValue: raw) {
+                    item.state = color == current ? .on : .off
+                }
+            }
+        }
 
         launchAtLoginItem.state = LaunchAgent.isEnabled ? .on : .off
         launchAtLoginItem.isEnabled = LaunchAgent.isAvailable
