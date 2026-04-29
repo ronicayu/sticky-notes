@@ -95,10 +95,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             symbol: "trash",
             tooltip: "Archive note"
         )
-        colorButton = NoteWindowController.makeChromeButton(
-            symbol: "tshirt.fill",
-            tooltip: "Change color"
-        )
+        colorButton = NoteWindowController.makeColorButton(currentColor: note.color)
 
         // Two title surfaces:
         // - titleField: editable NSTextField shown when the note is expanded
@@ -330,6 +327,37 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     private static let chromeSymbolConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
 
+    /// Color-picker button — a small filled swatch of the note's current color
+    /// surrounded by a thin border, drawn directly so it isn't dependent on
+    /// any specific SF Symbol availability across macOS versions.
+    private static func makeColorButton(currentColor: NoteColor) -> NSButton {
+        let button = NSButton()
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.image = colorButtonImage(for: currentColor)
+        button.toolTip = "Change color"
+        button.alphaValue = 0
+        return button
+    }
+
+    private static func colorButtonImage(for color: NoteColor) -> NSImage {
+        return NSImage(size: NSSize(width: 11, height: 11), flipped: false) { rect in
+            let path = NSBezierPath(
+                roundedRect: rect.insetBy(dx: 0.75, dy: 0.75),
+                xRadius: 2.5,
+                yRadius: 2.5
+            )
+            NSColor(hex: color.bodyHex)?.setFill()
+            path.fill()
+            NSColor.black.withAlphaComponent(0.55).setStroke()
+            path.lineWidth = 1.0
+            path.stroke()
+            return true
+        }
+    }
+
     private static func makeChromeButton(symbol: String, tooltip: String) -> NSButton {
         let button = NSButton()
         button.translatesAutoresizingMaskIntoConstraints = false
@@ -418,6 +446,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
               let color = NoteColor(rawValue: raw) else { return }
         note.color = color
         backgroundView.layer?.backgroundColor = NSColor(hex: color.bodyHex)?.cgColor
+        colorButton.image = NoteWindowController.colorButtonImage(for: color)
         scheduleSave()
     }
 
@@ -481,6 +510,25 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             preCollapseHeight = frame.size.height
         }
         scheduleSave()
+    }
+
+    /// macOS sometimes resizes borderless+resizable windows when the display
+    /// configuration changes (e.g. an external monitor is plugged in). Snap
+    /// the frame back to the persisted dimensions so a collapsed note never
+    /// blows up to the full screen width.
+    func windowDidChangeScreen(_ notification: Notification) {
+        guard let window = window else { return }
+        let storedWidth = CGFloat(note.width)
+        let storedHeight: CGFloat = note.collapsed
+            ? NoteWindowController.collapsedHeight
+            : CGFloat(note.height)
+        var frame = window.frame
+        if abs(frame.size.width - storedWidth) < 0.5 &&
+           abs(frame.size.height - storedHeight) < 0.5 { return }
+        frame.origin.y += frame.size.height - storedHeight
+        frame.size.width = storedWidth
+        frame.size.height = storedHeight
+        window.setFrame(frame, display: true, animate: false)
     }
 
     // MARK: - NSTextViewDelegate

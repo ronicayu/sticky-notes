@@ -4,6 +4,15 @@ final class NoteWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
+    /// Don't let AppKit auto-fit the window when the display configuration
+    /// changes (e.g. an external monitor is plugged in). The default
+    /// implementation can resize a borderless+resizable window — including
+    /// snapping it to the new screen's full width — which trashes the
+    /// user-chosen size of a collapsed sticky note.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        return frameRect
+    }
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
