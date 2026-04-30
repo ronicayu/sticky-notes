@@ -101,7 +101,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             symbol: "trash",
             tooltip: "Archive note"
         )
-        colorButton = NoteWindowController.makeColorButton(currentColor: note.color)
+        colorButton = NoteWindowController.makeChromeButton(
+            symbol: "paintpalette",
+            tooltip: "Change color"
+        )
         labelButton = NoteWindowController.makeChromeButton(
             symbol: "tag",
             tooltip: "Add or edit labels"
@@ -361,37 +364,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     private static let chromeSymbolConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
 
-    /// Color-picker button — a small filled swatch of the note's current color
-    /// surrounded by a thin border, drawn directly so it isn't dependent on
-    /// any specific SF Symbol availability across macOS versions.
-    private static func makeColorButton(currentColor: NoteColor) -> NSButton {
-        let button = NSButton()
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .inline
-        button.isBordered = false
-        button.imagePosition = .imageOnly
-        button.image = colorButtonImage(for: currentColor)
-        button.toolTip = "Change color"
-        button.alphaValue = 0
-        return button
-    }
-
-    private static func colorButtonImage(for color: NoteColor) -> NSImage {
-        return NSImage(size: NSSize(width: 11, height: 11), flipped: false) { rect in
-            let path = NSBezierPath(
-                roundedRect: rect.insetBy(dx: 0.75, dy: 0.75),
-                xRadius: 2.5,
-                yRadius: 2.5
-            )
-            NSColor(hex: color.bodyHex)?.setFill()
-            path.fill()
-            NSColor.black.withAlphaComponent(0.55).setStroke()
-            path.lineWidth = 1.0
-            path.stroke()
-            return true
-        }
-    }
-
     private static func makeChromeButton(symbol: String, tooltip: String) -> NSButton {
         let button = NSButton()
         button.translatesAutoresizingMaskIntoConstraints = false
@@ -482,7 +454,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
               let color = NoteColor(rawValue: raw) else { return }
         note.color = color
         backgroundView.layer?.backgroundColor = NSColor(hex: color.bodyHex)?.cgColor
-        colorButton.image = NoteWindowController.colorButtonImage(for: color)
         scheduleSave()
     }
 
