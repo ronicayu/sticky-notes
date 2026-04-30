@@ -102,7 +102,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             tooltip: "Archive note"
         )
         colorButton = NoteWindowController.makeChromeButton(
-            symbol: "paintpalette",
+            symbol: "paintbrush.fill",
             tooltip: "Change color"
         )
         labelButton = NoteWindowController.makeChromeButton(
@@ -370,8 +370,14 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         button.bezelStyle = .inline
         button.isBordered = false
         button.imagePosition = .imageOnly
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
+        // Mark the symbol as a template so contentTintColor always wins over
+        // any default multicolor / hierarchical rendering the symbol ships
+        // with — otherwise icons like `paintpalette` render in their built-in
+        // colors and effectively disappear against pastel note backgrounds.
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
             .withSymbolConfiguration(chromeSymbolConfig)
+        image?.isTemplate = true
+        button.image = image
         button.contentTintColor = NoteWindowController.chromeColor
         button.toolTip = tooltip
         button.alphaValue = 0
@@ -380,8 +386,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     private func updateExpandButtonIcon() {
         let symbol = note.collapsed ? "chevron.down" : "chevron.up"
-        expandButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Collapse / expand")?
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Collapse / expand")?
             .withSymbolConfiguration(NoteWindowController.chromeSymbolConfig)
+        image?.isTemplate = true
+        expandButton.image = image
     }
 
     /// Chrome buttons appear only when the note is expanded AND focused (or
