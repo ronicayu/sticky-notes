@@ -68,6 +68,12 @@ enum MarkdownFile {
 
     private static func quoteIfNeeded(_ value: String) -> String {
         if value.isEmpty { return "\"\"" }
+        // Values shaped like a YAML flow list (`[a, b, c]`) and flow map
+        // (`{a: 1}`) are valid raw YAML — pass them through verbatim instead
+        // of escaping into a string. Everything else with risky punctuation
+        // gets the quote treatment.
+        if value.first == "[" && value.last == "]" { return value }
+        if value.first == "{" && value.last == "}" { return value }
         let needsQuote = value.contains(":")
             || value.contains("#")
             || value.first == " "

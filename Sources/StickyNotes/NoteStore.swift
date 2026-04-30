@@ -96,6 +96,15 @@ final class NoteStore {
         notifyChange()
     }
 
+    /// Union of every label across active + archived notes, normalized and
+     /// sorted alphabetically. Used by autocomplete + the chrome label menu.
+    func allLabels() -> [String] {
+        var seen = Set<String>()
+        for note in loadActive() { seen.formUnion(note.labels) }
+        for note in loadArchived() { seen.formUnion(note.labels) }
+        return seen.sorted()
+    }
+
     func deleteForever(_ note: Note) {
         if let url = existingURL(for: note.id, in: archiveURL) {
             try? FileManager.default.removeItem(at: url)
@@ -243,10 +252,12 @@ final class NoteStore {
     // MARK: - Markdown serialization
 
     private func renderMarkdown(_ note: Note) -> String {
+        let labelsField = "[" + note.labels.joined(separator: ", ") + "]"
         let frontmatter: [(String, String)] = [
             ("id", note.id.uuidString),
             ("title", note.title),
             ("color", note.color.rawValue),
+            ("labels", labelsField),
             ("positionX", String(format: "%.2f", note.positionX)),
             ("positionY", String(format: "%.2f", note.positionY)),
             ("width", String(format: "%.2f", note.width)),
@@ -264,6 +275,7 @@ final class NoteStore {
         let id: UUID = doc.value(for: "id").flatMap(UUID.init(uuidString:)) ?? fallbackId ?? UUID()
         let title = doc.value(for: "title") ?? ""
         let color = doc.value(for: "color").flatMap(NoteColor.init(rawValue:)) ?? .yellow
+        let labels = parseLabelsList(doc.value(for: "labels"))
         let positionX = Double(doc.value(for: "positionX") ?? "") ?? 200
         let positionY = Double(doc.value(for: "positionY") ?? "") ?? 200
         let width = Double(doc.value(for: "width") ?? "") ?? 240
@@ -281,9 +293,24 @@ final class NoteStore {
             height: height,
             collapsed: collapsed,
             color: color,
+            labels: labels,
             createdAt: createdAt,
             updatedAt: updatedAt
         )
+    }
+
+    /// Parse a flat YAML inline-list value like `[a, b, c]`. Tolerates missing
+    /// brackets and stray quotes — frontmatter is hand-edited often.
+    private func parseLabelsList(_ raw: String?) -> [String] {
+        guard var s = raw?.trimmingCharacters(in: .whitespaces), !s.isEmpty else { return [] }
+        if s.hasPrefix("[") { s.removeFirst() }
+        if s.hasSuffix("]") { s.removeLast() }
+        return s.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }
+            .compactMap { token -> String? in
+                let n = NoteLabel.normalize(token)
+                return n.isEmpty ? nil : n
+            }
     }
 
     private func idFromFilename(_ url: URL) -> UUID? {

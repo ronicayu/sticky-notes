@@ -13,6 +13,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private let titleLabel: CenteredTitleLabel    // read-only; visible collapsed
     private let dateLabel: NSTextField
     private let footerView: NSView
+    private let labelButton: NSButton
+    private let labelStack: NSStackView
+    private let labelPanel = LabelCompletionPanel()
+    /// Character index of the `#` that triggered the active autocomplete
+    /// session, if any. Cleared when the panel is dismissed.
+    private var labelTriggerStart: Int?
     /// Container that holds titleField + scrollView + footer. We collapse the
     /// note by forcing this view's height to 0; otherwise its subviews'
     /// constraints would keep dictating the window's minimum content height.
@@ -96,6 +102,17 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             tooltip: "Archive note"
         )
         colorButton = NoteWindowController.makeColorButton(currentColor: note.color)
+        labelButton = NoteWindowController.makeChromeButton(
+            symbol: "tag",
+            tooltip: "Add or edit labels"
+        )
+        labelStack = NSStackView()
+        labelStack.translatesAutoresizingMaskIntoConstraints = false
+        labelStack.orientation = .horizontal
+        labelStack.spacing = 4
+        labelStack.alignment = .centerY
+        labelStack.distribution = .gravityAreas
+        labelStack.setHuggingPriority(.defaultLow, for: .horizontal)
 
         // Two title surfaces:
         // - titleField: editable NSTextField shown when the note is expanded
@@ -179,6 +196,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         footerView = NSView()
         footerView.translatesAutoresizingMaskIntoConstraints = false
         footerView.addSubview(dateLabel)
+        footerView.addSubview(labelStack)
+        footerView.addSubview(labelButton)
 
         backgroundView.addSubview(bodyContainer)
         backgroundView.addSubview(dragZone)
@@ -251,11 +270,19 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             footerView.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor, constant: 14),
             footerView.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor, constant: -14),
             footerView.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor, constant: -10),
-            footerView.heightAnchor.constraint(equalToConstant: 16),
+            footerView.heightAnchor.constraint(equalToConstant: 18),
 
             dateLabel.leadingAnchor.constraint(equalTo: footerView.leadingAnchor),
-            dateLabel.trailingAnchor.constraint(lessThanOrEqualTo: footerView.trailingAnchor),
-            dateLabel.centerYAnchor.constraint(equalTo: footerView.centerYAnchor)
+            dateLabel.centerYAnchor.constraint(equalTo: footerView.centerYAnchor),
+
+            labelButton.trailingAnchor.constraint(equalTo: footerView.trailingAnchor),
+            labelButton.centerYAnchor.constraint(equalTo: footerView.centerYAnchor),
+            labelButton.widthAnchor.constraint(equalToConstant: 13),
+            labelButton.heightAnchor.constraint(equalToConstant: 13),
+
+            labelStack.leadingAnchor.constraint(equalTo: dateLabel.trailingAnchor, constant: 6),
+            labelStack.trailingAnchor.constraint(lessThanOrEqualTo: labelButton.leadingAnchor, constant: -6),
+            labelStack.centerYAnchor.constraint(equalTo: footerView.centerYAnchor)
         ])
 
         window.contentView = backgroundView
@@ -282,6 +309,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         trashButton.action = #selector(closeNote)
         colorButton.target = self
         colorButton.action = #selector(showColorMenu)
+        labelButton.target = self
+        labelButton.action = #selector(showLabelMenu)
+
+        labelPanel.onAccept = { [weak self] item in
+            self?.acceptLabelCompletion(item)
+        }
 
         backgroundView.onHoverChange = { [weak self] hovering in
             self?.isHovering = hovering
@@ -291,6 +324,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
         updateDateLabel()
         updateChromeVisibility(animated: false)
+        rebuildLabelChips()
         MarkdownStyler.apply(to: textView)
         refreshMarkerVisibility()
 
@@ -390,10 +424,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
                 ctx.duration = 0.16
                 trashButton.animator().alphaValue = target
                 expandButton.animator().alphaValue = target
+                labelButton.animator().alphaValue = target
             }
         } else {
             trashButton.alphaValue = target
             expandButton.alphaValue = target
+            labelButton.alphaValue = target
         }
     }
 
@@ -483,6 +519,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     func windowDidResignKey(_ notification: Notification) {
         updateAlpha()
         updateChromeVisibility()
+        hideLabelCompletion()
         if pendingExternalContent != nil {
             pendingExternalContent = nil
             if let updated = store.loadNote(id: note.id),
@@ -540,10 +577,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         updateDateLabel()
         scheduleSave()
         detectSlashTrigger()
+        detectLabelTrigger()
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
         refreshMarkerVisibility()
+        // Caret moved away from the active `#word` → kill the panel.
+        if labelTriggerStart != nil { detectLabelTrigger() }
     }
 
     // MARK: - NSTextFieldDelegate (title)
@@ -575,6 +615,27 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     ///   strip the marker if the current item is empty, exiting the list).
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard textView === self.textView else { return false }
+
+        // While the autocomplete panel is up, arrow/enter/escape drive the
+        // panel instead of the editor.
+        if labelPanel.isVisible {
+            if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                labelPanel.selectNext()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                labelPanel.selectPrevious()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) ||
+               commandSelector == #selector(NSResponder.insertTab(_:)) {
+                if labelPanel.acceptSelection() { return true }
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                hideLabelCompletion()
+                return true
+            }
+        }
 
         if commandSelector == #selector(NSResponder.moveUp(_:)) {
             let selection = textView.selectedRange()
@@ -999,6 +1060,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             titleField.stringValue = updated.title
             titleLabel.text = updated.title
         }
+        if updated.labels != note.labels {
+            note.labels = updated.labels
+            rebuildLabelChips()
+        }
         if updated.content != note.content {
             note.content = updated.content
             let oldSelection = textView.selectedRange()
@@ -1011,6 +1076,212 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             let clamped = NSRange(location: min(oldSelection.location, len), length: 0)
             textView.setSelectedRange(clamped)
         }
+    }
+
+    // MARK: - Labels
+
+    private func rebuildLabelChips() {
+        for view in labelStack.arrangedSubviews {
+            labelStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        for label in note.labels {
+            let chip = LabelChipView(labelName: label)
+            chip.onRemove = { [weak self] in
+                self?.removeLabel(label)
+            }
+            labelStack.addArrangedSubview(chip)
+        }
+    }
+
+    private func addLabel(_ raw: String) {
+        let normalized = NoteLabel.normalize(raw)
+        guard !normalized.isEmpty, !note.labels.contains(normalized) else { return }
+        note.labels.append(normalized)
+        rebuildLabelChips()
+        scheduleSave()
+    }
+
+    private func removeLabel(_ name: String) {
+        guard let idx = note.labels.firstIndex(of: name) else { return }
+        note.labels.remove(at: idx)
+        rebuildLabelChips()
+        scheduleSave()
+    }
+
+    @objc private func showLabelMenu() {
+        let menu = NSMenu()
+        menu.font = NSFont.systemFont(ofSize: 12)
+
+        let known = store.allLabels()
+        let union = Array(Set(known).union(note.labels)).sorted()
+
+        if union.isEmpty {
+            let empty = NSMenuItem(title: "No labels yet", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            for label in union {
+                let item = NSMenuItem(
+                    title: "#\(label)",
+                    action: #selector(toggleLabelFromMenu(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = label
+                if note.labels.contains(label) { item.state = .on }
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(.separator())
+        let createItem = NSMenuItem(
+            title: "New Label…",
+            action: #selector(createLabelFromMenu),
+            keyEquivalent: ""
+        )
+        createItem.target = self
+        menu.addItem(createItem)
+
+        let p = NSPoint(x: labelButton.bounds.minX, y: labelButton.bounds.maxY + 4)
+        menu.popUp(positioning: nil, at: p, in: labelButton)
+    }
+
+    @objc private func toggleLabelFromMenu(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        if note.labels.contains(name) {
+            removeLabel(name)
+        } else {
+            addLabel(name)
+        }
+    }
+
+    @objc private func createLabelFromMenu() {
+        let alert = NSAlert()
+        alert.messageText = "New Label"
+        alert.informativeText = "Lowercase, no spaces. Other characters are stripped."
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
+        field.placeholderString = "label-name"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            addLabel(field.stringValue)
+        }
+    }
+
+    // MARK: - Label autocomplete
+
+    /// Look back from the caret for an active `#word` token and either show
+    /// or update the autocomplete panel. Dismiss it when the cursor leaves
+    /// the token's span.
+    private func detectLabelTrigger() {
+        let selection = textView.selectedRange()
+        guard selection.length == 0 else { hideLabelCompletion(); return }
+        let str = textView.string as NSString
+        let cursor = selection.location
+
+        var i = cursor - 1
+        while i >= 0 {
+            let ch = str.substring(with: NSRange(location: i, length: 1))
+            if ch == "#" {
+                let prevOK: Bool
+                if i == 0 {
+                    prevOK = true
+                } else {
+                    let prev = str.substring(with: NSRange(location: i - 1, length: 1))
+                    prevOK = (prev == " " || prev == "\t" || prev == "\n")
+                }
+                if prevOK {
+                    let typedLen = cursor - i - 1
+                    let typed = typedLen > 0
+                        ? str.substring(with: NSRange(location: i + 1, length: typedLen))
+                        : ""
+                    showLabelCompletion(at: i, typed: typed)
+                    return
+                }
+                hideLabelCompletion()
+                return
+            }
+            // Spaces / newlines end the token.
+            if ch == " " || ch == "\t" || ch == "\n" {
+                hideLabelCompletion()
+                return
+            }
+            i -= 1
+        }
+        hideLabelCompletion()
+    }
+
+    private func showLabelCompletion(at hashLocation: Int, typed: String) {
+        let normalizedQuery = NoteLabel.normalize(typed)
+        let known = store.allLabels()
+        let filtered: [String]
+        if normalizedQuery.isEmpty {
+            filtered = known
+        } else {
+            filtered = known.filter { $0.contains(normalizedQuery) }
+        }
+
+        var items: [LabelCompletionPanel.Item] = filtered.map { .existing($0) }
+        if !normalizedQuery.isEmpty && !known.contains(normalizedQuery) {
+            items.append(.create(normalizedQuery))
+        }
+        if items.isEmpty {
+            hideLabelCompletion()
+            return
+        }
+
+        labelTriggerStart = hashLocation
+        labelPanel.setItems(items)
+        positionLabelPanel(below: hashLocation)
+        if !labelPanel.isVisible {
+            labelPanel.orderFront(nil)
+        }
+    }
+
+    private func hideLabelCompletion() {
+        if labelPanel.isVisible { labelPanel.orderOut(nil) }
+        labelTriggerStart = nil
+    }
+
+    private func positionLabelPanel(below charIndex: Int) {
+        guard let win = textView.window, let container = textView.textContainer else { return }
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: charIndex, length: 1),
+            actualCharacterRange: nil
+        )
+        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
+        rect.origin.x += textView.textContainerOrigin.x
+        rect.origin.y += textView.textContainerOrigin.y
+        // Convert from textView (flipped) → window → screen.
+        let belowInTextView = NSPoint(x: rect.minX, y: rect.maxY + 2)
+        let inWindow = textView.convert(belowInTextView, to: nil)
+        let screenPoint = win.convertPoint(toScreen: inWindow)
+        var frame = labelPanel.frame
+        // Place panel so its TOP edge sits at the caret line.
+        frame.origin = NSPoint(x: screenPoint.x, y: screenPoint.y - frame.size.height)
+        labelPanel.setFrame(frame, display: false)
+    }
+
+    private func acceptLabelCompletion(_ item: LabelCompletionPanel.Item) {
+        guard let start = labelTriggerStart else { return }
+        let cursor = textView.selectedRange().location
+        let length = max(0, cursor - start)
+        guard start + length <= textStorage.length else {
+            hideLabelCompletion()
+            return
+        }
+        let range = NSRange(location: start, length: length)
+        if textView.shouldChangeText(in: range, replacementString: "") {
+            textStorage.replaceCharacters(in: range, with: "")
+            textView.didChangeText()
+            note.content = textView.string
+        }
+        addLabel(item.labelName)
+        hideLabelCompletion()
     }
 
     // MARK: - Persistence

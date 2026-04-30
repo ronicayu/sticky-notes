@@ -54,6 +54,7 @@ struct Note: Codable, Identifiable {
     var height: Double
     var collapsed: Bool
     var color: NoteColor
+    var labels: [String]
     let createdAt: Date
     var updatedAt: Date
 
@@ -67,6 +68,7 @@ struct Note: Codable, Identifiable {
         height: Double,
         collapsed: Bool,
         color: NoteColor,
+        labels: [String] = [],
         createdAt: Date,
         updatedAt: Date
     ) {
@@ -79,11 +81,12 @@ struct Note: Codable, Identifiable {
         self.height = height
         self.collapsed = collapsed
         self.color = color
+        self.labels = labels
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
 
-    /// Custom decoder so notes saved before `title` existed still decode.
+    /// Custom decoder so notes saved before newer fields existed still decode.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -95,6 +98,7 @@ struct Note: Codable, Identifiable {
         height = try c.decode(Double.self, forKey: .height)
         collapsed = (try? c.decode(Bool.self, forKey: .collapsed)) ?? false
         color = (try? c.decode(NoteColor.self, forKey: .color)) ?? .yellow
+        labels = (try? c.decode([String].self, forKey: .labels)) ?? []
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
@@ -115,8 +119,27 @@ struct Note: Codable, Identifiable {
             height: h,
             collapsed: false,
             color: Settings.shared.defaultNoteColor,
+            labels: [],
             createdAt: now,
             updatedAt: now
         )
+    }
+}
+
+/// Label name normalization shared between the autocomplete pipeline, the
+/// label menu, and the persisted frontmatter.
+enum NoteLabel {
+    /// Trim, drop a leading `#`, lowercase, collapse whitespace into `-`.
+    static func normalize(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        s = s.lowercased()
+        s = s.replacingOccurrences(
+            of: #"\s+"#,
+            with: "-",
+            options: .regularExpression
+        )
+        s = s.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+        return s
     }
 }
