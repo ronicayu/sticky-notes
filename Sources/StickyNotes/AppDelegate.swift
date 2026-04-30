@@ -75,6 +75,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+
+        let versionItem = NSMenuItem(
+            title: "Sticky Notes \(AppDelegate.appVersionString)",
+            action: nil,
+            keyEquivalent: ""
+        )
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        menu.addItem(.separator())
+
         menu.addItem(withTitle: "New Note  ⌘⇧S", action: #selector(newNote), keyEquivalent: "")
         menu.addItem(withTitle: "Notes  ⌘⇧L", action: #selector(showNotesPanel), keyEquivalent: "")
         hideAllItem = NSMenuItem(title: "Hide All Notes  ⌘⇧H",
@@ -122,6 +132,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             submenu.addItem(item)
         }
         return submenu
+    }
+
+    /// Version stamped into Info.plist by `scripts/build-app.sh`. Falls back
+    /// to "dev" when running from `swift run` (no bundle = no Info.plist).
+    private static var appVersionString: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        if let raw = info["CFBundleShortVersionString"] as? String,
+           !raw.isEmpty,
+           raw != "__APP_VERSION__" {
+            return "v\(raw)"
+        }
+        return "dev"
     }
 
     private static func colorSwatch(for color: NoteColor) -> NSImage {

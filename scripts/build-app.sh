@@ -25,6 +25,12 @@ mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/${EXEC_NAME}"
 cp Resources/Info.plist "${APP_DIR}/Contents/Info.plist"
 
+# Substitute the version placeholder in the copied Info.plist. Pass VERSION
+# explicitly (e.g. release.sh does this) or fall back to the latest git tag.
+APP_VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+APP_VERSION="${APP_VERSION:-0.0.0-dev}"
+sed -i '' "s|__APP_VERSION__|${APP_VERSION}|g" "${APP_DIR}/Contents/Info.plist"
+
 # Generate icons on demand if missing.
 if [ ! -f Resources/AppIcon.icns ]; then
     ./scripts/generate-icon.sh

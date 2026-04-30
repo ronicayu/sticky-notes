@@ -25,9 +25,10 @@ DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 ZIP_NAME="${APP_NAME}-${VERSION}.zip"
 DMG_STAGING="build/dmg-staging"
 
-# 1. Build the .app via the existing helper.
+# 1. Build the .app via the existing helper. Pass the trimmed version through
+#    so build-app.sh stamps it into Info.plist's CFBundleShortVersionString.
 echo "==> building ${APP_DIR}"
-./scripts/build-app.sh
+VERSION="${VERSION#v}" ./scripts/build-app.sh
 
 # 2. Stage the .app + a /Applications symlink so the DMG window shows the
 #    classic "drag StickyNotes here" install experience.
