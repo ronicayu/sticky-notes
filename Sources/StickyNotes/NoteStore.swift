@@ -20,6 +20,12 @@ final class NoteStore {
     /// archive/restore/delete. Populated by every load + save.
     private var markdownPathIndex: [UUID: URL] = [:]
 
+    /// Ids we've seen on disk in this process. If a save() targets a known
+    /// id whose active file has since vanished — an external agent or
+    /// another machine deleted it — we bail instead of resurrecting it.
+    /// Cleared in discardActive / deleteForever.
+    private var knownIds = Set<UUID>()
+
     var activeURL: URL { rootURL.appendingPathComponent("notes", isDirectory: true) }
     var archiveURL: URL { rootURL.appendingPathComponent("archive", isDirectory: true) }
 
@@ -46,9 +52,16 @@ final class NoteStore {
     }
 
     func save(_ note: Note) {
+        if knownIds.contains(note.id), existingURL(for: note.id, in: activeURL) == nil {
+            // Seen before but no active file now — externally deleted (or
+            // archived). Don't resurrect it here.
+            markdownPathIndex.removeValue(forKey: note.id)
+            return
+        }
         let url = existingURL(for: note.id, in: activeURL) ?? generateURL(for: note, in: activeURL)
         write(note, to: url)
         markdownPathIndex[note.id] = url
+        knownIds.insert(note.id)
         notifyChange()
     }
 
@@ -79,6 +92,7 @@ final class NoteStore {
             try? FileManager.default.removeItem(at: url)
         }
         markdownPathIndex.removeValue(forKey: note.id)
+        knownIds.remove(note.id)
         notifyChange()
     }
 
@@ -110,6 +124,7 @@ final class NoteStore {
             try? FileManager.default.removeItem(at: url)
         }
         markdownPathIndex.removeValue(forKey: note.id)
+        knownIds.remove(note.id)
         notifyChange()
     }
 
@@ -216,6 +231,7 @@ final class NoteStore {
             if format == .markdown {
                 markdownPathIndex[note.id] = url
             }
+            knownIds.insert(note.id)
             notes.append(note)
         }
         return notes

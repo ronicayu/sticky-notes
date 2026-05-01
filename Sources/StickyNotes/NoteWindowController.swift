@@ -37,6 +37,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private let backgroundView: HoverTrackingView
 
     private var saveWorkItem: DispatchWorkItem?
+    private var savingDisabled = false
     private var preCollapseHeight: CGFloat
     private var isHovering = false
     private var pendingExternalContent: String?
@@ -431,6 +432,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     @objc private func closeNote() {
+        savingDisabled = true
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
         let isEmpty = note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if isEmpty {
@@ -1279,13 +1283,26 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     // MARK: - Persistence
 
     private func scheduleSave() {
+        guard !savingDisabled else { return }
         saveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, !self.savingDisabled else { return }
             self.note.updatedAt = Date()
             self.store.save(self.note)
         }
         saveWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+    }
+
+    /// Tear down without persisting anything else. Used when the underlying
+    /// file disappeared externally (e.g. an agent processed and removed the
+    /// note) — without this guard, an in-flight debounced save would
+    /// resurrect the file right after `reconcileOpenWindows` closed the
+    /// window.
+    func closeAfterExternalDeletion() {
+        savingDisabled = true
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        window?.close()
     }
 }

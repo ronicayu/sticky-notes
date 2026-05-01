@@ -74,10 +74,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let activeIds = Set(active.map { $0.id })
 
         // Close windows whose underlying note is no longer active (archived
-        // or deleted on another machine).
+        // or deleted on another machine). Cancel pending debounced saves so
+        // an in-flight save can't resurrect a file that was just deleted.
         for id in Array(windowControllers.keys) where !activeIds.contains(id) {
             if let controller = windowControllers.removeValue(forKey: id) {
-                controller.window?.close()
+                controller.closeAfterExternalDeletion()
             }
         }
 
