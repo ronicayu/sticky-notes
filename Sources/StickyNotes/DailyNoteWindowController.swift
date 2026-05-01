@@ -229,7 +229,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private func loadCurrentFile() {
         currentDay = Calendar.current.startOfDay(for: Date())
         currentURL = DailyNote.resolvedURL(for: currentDay)
-        dateLabel.text = DailyNoteWindowController.dateFormatter.string(from: currentDay)
+        dateLabel.text = "Daily Note · " + DailyNoteWindowController.dateFormatter.string(from: currentDay)
 
         guard let url = currentURL else {
             lastLoadedContent = ""
