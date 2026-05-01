@@ -80,7 +80,17 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         let displayHeight: CGFloat = note.collapsed
             ? NoteWindowController.collapsedHeight
             : CGFloat(note.height)
-        let frame = NSRect(x: note.positionX, y: note.positionY, width: note.width, height: displayHeight)
+        let rawFrame = NSRect(x: note.positionX, y: note.positionY, width: note.width, height: displayHeight)
+        let frame = NoteWindow.clampToVisibleScreen(rawFrame)
+        if frame.origin != rawFrame.origin || frame.size != rawFrame.size {
+            self.note.positionX = Double(frame.origin.x)
+            self.note.positionY = Double(frame.origin.y)
+            self.note.width = Double(frame.size.width)
+            if !note.collapsed {
+                self.note.height = Double(frame.size.height)
+                self.preCollapseHeight = frame.size.height
+            }
+        }
         let window = NoteWindow(contentRect: frame)
 
         backgroundView = HoverTrackingView(frame: .zero)

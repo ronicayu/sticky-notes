@@ -13,6 +13,24 @@ final class NoteWindow: NSWindow {
         return frameRect
     }
 
+    /// Clamp a saved frame into the visible region of whichever screen it
+     /// overlaps most, so a note saved next to an external display still has
+     /// its drag zone reachable when the app reopens with that display gone.
+    static func clampToVisibleScreen(_ rect: NSRect) -> NSRect {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return rect }
+        func area(_ r: NSRect) -> CGFloat { max(0, r.width) * max(0, r.height) }
+        let best = screens.max(by: { area($0.visibleFrame.intersection(rect)) < area($1.visibleFrame.intersection(rect)) })
+            ?? NSScreen.main ?? screens[0]
+        let v = best.visibleFrame
+        var r = rect
+        r.size.width = min(r.size.width, v.size.width)
+        r.size.height = min(r.size.height, v.size.height)
+        r.origin.x = min(max(r.origin.x, v.minX), v.maxX - r.size.width)
+        r.origin.y = min(max(r.origin.y, v.minY), v.maxY - r.size.height)
+        return r
+    }
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,

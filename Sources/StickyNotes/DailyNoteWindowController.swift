@@ -49,12 +49,22 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         let displayHeight: CGFloat = state.collapsed
             ? DailyNoteWindowController.collapsedTotalHeight
             : CGFloat(state.height)
-        let frame = NSRect(
+        let rawFrame = NSRect(
             x: state.positionX,
             y: state.positionY,
             width: state.width,
             height: displayHeight
         )
+        let frame = NoteWindow.clampToVisibleScreen(rawFrame)
+        if frame.origin != rawFrame.origin || frame.size != rawFrame.size {
+            self.state.positionX = Double(frame.origin.x)
+            self.state.positionY = Double(frame.origin.y)
+            self.state.width = Double(frame.size.width)
+            if !state.collapsed {
+                self.state.height = Double(frame.size.height)
+                self.preCollapseHeight = frame.size.height
+            }
+        }
         let window = NoteWindow(contentRect: frame)
 
         backgroundView = HoverTrackingView(frame: .zero)
