@@ -177,19 +177,40 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     // MARK: - File I/O
 
     /// Resolve today's URL, load its body into the text view, and refresh
-    /// the date label. Empty file (or missing file) yields an empty editor.
+    /// the date label. If the file doesn't exist yet and a template is
+    /// configured, the rendered template seeds the body and is written to
+    /// disk immediately — so Obsidian sees the same file the user is
+    /// editing here, with the same template Obsidian itself would apply.
     private func loadCurrentFile() {
         currentDay = Calendar.current.startOfDay(for: Date())
         currentURL = DailyNote.resolvedURL(for: currentDay)
         dateLabel.text = DailyNoteWindowController.dateFormatter.string(from: currentDay)
 
-        let body: String = {
-            guard let url = currentURL,
-                  let raw = try? String(contentsOf: url, encoding: .utf8) else { return "" }
-            return raw
-        }()
-        lastLoadedContent = body
-        applyExternalBody(body)
+        guard let url = currentURL else {
+            lastLoadedContent = ""
+            applyExternalBody("")
+            return
+        }
+
+        if let raw = try? String(contentsOf: url, encoding: .utf8) {
+            lastLoadedContent = raw
+            applyExternalBody(raw)
+            return
+        }
+
+        // File doesn't exist yet. Seed from template if configured.
+        if let templated = DailyNote.renderedTemplate(for: currentDay, fileURL: url) {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? templated.write(to: url, atomically: true, encoding: .utf8)
+            lastLoadedContent = templated
+            applyExternalBody(templated)
+        } else {
+            lastLoadedContent = ""
+            applyExternalBody("")
+        }
     }
 
     /// Reload from disk if the underlying file changed externally.
@@ -317,6 +338,26 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         saveNow()  // flush against the previous URL if it's still valid
         loadCurrentFile()
         startWatching()
+    }
+
+    /// Re-seed today's note from the template if the file is currently
+    /// empty. Called when the template path setting changes — covers the
+    /// "I just configured a template, please apply it to today" case.
+    func templateDidChange() {
+        guard let url = currentURL else { return }
+        let body = textView.string
+        let isEmpty = body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard isEmpty else { return }
+
+        if let templated = DailyNote.renderedTemplate(for: currentDay, fileURL: url) {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? templated.write(to: url, atomically: true, encoding: .utf8)
+            lastLoadedContent = templated
+            applyExternalBody(templated)
+        }
     }
 
     // MARK: - Show / hide

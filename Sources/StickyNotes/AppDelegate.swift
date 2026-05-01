@@ -18,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var dailyNoteItem: NSMenuItem!
     private var dailyPatternItem: NSMenuItem!
     private var dailyClearItem: NSMenuItem!
+    private var dailyTemplateItem: NSMenuItem!
+    private var dailyTemplateClearItem: NSMenuItem!
     private var dailyNoteController: DailyNoteWindowController?
 
     private lazy var prefetcher = ICloudPrefetcher { [weak self] in
@@ -184,6 +186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dailyClearItem = NSMenuItem(title: "Clear Daily Note Pattern", action: #selector(clearDailyPattern), keyEquivalent: "")
         menu.addItem(dailyClearItem)
 
+        dailyTemplateItem = NSMenuItem(title: "Set Daily Note Template…", action: #selector(setDailyTemplate), keyEquivalent: "")
+        menu.addItem(dailyTemplateItem)
+
+        dailyTemplateClearItem = NSMenuItem(title: "Clear Daily Note Template", action: #selector(clearDailyTemplate), keyEquivalent: "")
+        menu.addItem(dailyTemplateClearItem)
+
         storagePathItem = NSMenuItem(title: "Show Storage Folder", action: #selector(revealStorage), keyEquivalent: "")
         menu.addItem(storagePathItem)
 
@@ -302,6 +310,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let dailyVisible = (dailyNoteController?.window?.isVisible ?? false)
         dailyNoteItem.title = dailyVisible ? "Hide Today's Daily Note" : "Show Today's Daily Note"
+
+        let templatePath = Settings.shared.dailyTemplatePath
+        dailyTemplateItem.isHidden = !(vaultActiveForDaily && pattern != nil)
+        dailyTemplateClearItem.isHidden = !(vaultActiveForDaily && pattern != nil && templatePath != nil)
+        if let path = templatePath {
+            let display = (path as NSString).lastPathComponent
+            dailyTemplateItem.title = "Daily Template: \(display)"
+            dailyTemplateItem.toolTip = path
+        } else {
+            dailyTemplateItem.title = "Set Daily Note Template…"
+            dailyTemplateItem.toolTip = nil
+        }
     }
 
     private func registerHotkeys() {
@@ -470,6 +490,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Settings.shared.dailyNotesPattern = nil
         dailyNoteController?.window?.orderOut(nil)
         dailyNoteController = nil
+    }
+
+    @objc func setDailyTemplate() {
+        guard let vault = Settings.shared.obsidianVaultPath else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose Daily Note Template"
+        panel.message = "Pick the markdown template applied when today's daily note doesn't exist yet. Tokens {{date}}, {{date:FMT}}, {{time}}, {{title}}, {{yesterday}}, {{tomorrow}} are expanded on insert."
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = []
+        panel.directoryURL = URL(fileURLWithPath: vault, isDirectory: true)
+        panel.prompt = "Use This Template"
+        guard let response = runOpenPanel(panel), response == .OK, let url = panel.urls.first else { return }
+
+        // Store as a vault-relative path when possible so the setting
+        // survives moving the vault to a different host folder.
+        let vaultPrefix = (vault as NSString).appendingPathComponent("") + "/"
+        let chosen = url.path
+        let stored = chosen.hasPrefix(vaultPrefix) ? String(chosen.dropFirst(vaultPrefix.count)) : chosen
+        Settings.shared.dailyTemplatePath = stored
+        dailyNoteController?.templateDidChange()
+    }
+
+    @objc func clearDailyTemplate() {
+        Settings.shared.dailyTemplatePath = nil
     }
 
     private func runOpenPanel(_ panel: NSOpenPanel) -> NSApplication.ModalResponse? {

@@ -10,6 +10,7 @@ final class Settings {
         static let obsidianVaultPath = "obsidianVaultPath"
         static let defaultNoteColor = "defaultNoteColor"
         static let dailyNotesPattern = "dailyNotesPattern"
+        static let dailyTemplatePath = "dailyTemplatePath"
     }
 
     private init() {}
@@ -45,6 +46,18 @@ final class Settings {
             return (v?.isEmpty ?? true) ? nil : v
         }
         set { defaults.set(newValue, forKey: Keys.dailyNotesPattern) }
+    }
+
+    /// Absolute or vault-relative path of the Obsidian template file used
+    /// when the daily note for today doesn't exist yet. Token expansion
+    /// (`{{date}}`, `{{date:FMT}}`, `{{time}}`, `{{title}}`, `{{yesterday}}`,
+    /// `{{tomorrow}}`) is applied to the template body before writing.
+    var dailyTemplatePath: String? {
+        get {
+            let v = defaults.string(forKey: Keys.dailyTemplatePath)
+            return (v?.isEmpty ?? true) ? nil : v
+        }
+        set { defaults.set(newValue, forKey: Keys.dailyTemplatePath) }
     }
 
     /// Color applied to a newly-created note. Defaults to yellow.
