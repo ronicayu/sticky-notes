@@ -267,7 +267,7 @@ final class NoteStore {
             ("updated", iso8601.string(from: note.updatedAt))
         ]
         let document = MarkdownFile.Document(frontmatter: frontmatter, body: note.content)
-        return MarkdownFile.serialize(document)
+        return MarkdownFile.serialize(document, forceQuoteKeys: ["title"])
     }
 
     private func parseMarkdown(_ raw: String, fallbackId: UUID?) -> Note? {

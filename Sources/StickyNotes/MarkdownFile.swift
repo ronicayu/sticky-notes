@@ -46,10 +46,11 @@ enum MarkdownFile {
         return Document(frontmatter: frontmatter, body: body)
     }
 
-    static func serialize(_ document: Document) -> String {
+    static func serialize(_ document: Document, forceQuoteKeys: Set<String> = []) -> String {
         var out = "\(separator)\n"
         for (key, value) in document.frontmatter {
-            out += "\(key): \(quoteIfNeeded(value))\n"
+            let serialized = forceQuoteKeys.contains(key) ? forceQuote(value) : quoteIfNeeded(value)
+            out += "\(key): \(serialized)\n"
         }
         out += "\(separator)\n\n"
         out += document.body
@@ -60,10 +61,41 @@ enum MarkdownFile {
         guard raw.count >= 2 else { return raw }
         let first = raw.first!
         let last = raw.last!
-        if (first == "\"" && last == "\"") || (first == "'" && last == "'") {
+        if first == "\"" && last == "\"" {
+            return unescapeDoubleQuoted(String(raw.dropFirst().dropLast()))
+        }
+        if first == "'" && last == "'" {
             return String(raw.dropFirst().dropLast())
         }
         return raw
+    }
+
+    private static func unescapeDoubleQuoted(_ inner: String) -> String {
+        var out = ""
+        out.reserveCapacity(inner.count)
+        var iter = inner.makeIterator()
+        while let ch = iter.next() {
+            if ch == "\\" {
+                if let next = iter.next() {
+                    switch next {
+                    case "n": out.append("\n")
+                    case "t": out.append("\t")
+                    case "r": out.append("\r")
+                    default:  out.append(next)
+                    }
+                }
+            } else {
+                out.append(ch)
+            }
+        }
+        return out
+    }
+
+    private static func forceQuote(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 
     private static func quoteIfNeeded(_ value: String) -> String {

@@ -135,7 +135,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         titleField.cell?.wraps = false
         titleField.cell?.isScrollable = true
         titleField.allowsDefaultTighteningForTruncation = true
-        titleField.isHidden = note.collapsed
 
         titleLabel = CenteredTitleLabel()
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
