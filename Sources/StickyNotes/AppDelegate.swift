@@ -16,11 +16,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var storagePathItem: NSMenuItem!
     private var defaultColorItem: NSMenuItem!
 
+    private lazy var prefetcher = ICloudPrefetcher { [weak self] in
+        // Manual nudge in case FSEvents missed the materialization.
+        self?.handleStoreChange()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
         setupMenuBar()
         registerHotkeys()
         restoreActiveNotes()
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleStoreChange),
+            name: NoteStore.didChange,
+            object: nil
+        )
+
+        prefetcher.start(at: noteStore.rootURL)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    /// Bring open windows in line with what's on disk. Triggered by
+    /// `NoteStore.didChange`, which fires both for our own writes (no-op here)
+    /// and for external file changes — Obsidian edits, files arriving via
+    /// iCloud Drive, archives created on another Mac, etc.
+    @objc private func handleStoreChange() {
+        DispatchQueue.main.async { [weak self] in
+            self?.reconcileOpenWindows()
+        }
+    }
+
+    private func reconcileOpenWindows() {
+        let active = noteStore.loadActive()
+        let activeIds = Set(active.map { $0.id })
+
+        // Close windows whose underlying note is no longer active (archived
+        // or deleted on another machine).
+        for id in Array(windowControllers.keys) where !activeIds.contains(id) {
+            if let controller = windowControllers.removeValue(forKey: id) {
+                controller.window?.close()
+            }
+        }
+
+        // Open windows for active notes that aren't visible yet (created on
+        // another machine and synced in).
+        for note in active where windowControllers[note.id] == nil {
+            presentWindow(for: note, activate: false)
+            if notesHidden {
+                windowControllers[note.id]?.window?.orderOut(nil)
+            }
+        }
     }
 
     /// Even though we're an accessory (no Dock icon, no system menu bar),
@@ -300,6 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         Settings.shared.useICloud = target
         noteStore.reconfigure(rootURL: newRoot, format: .json)
+        prefetcher.start(at: noteStore.rootURL)
     }
 
     @objc func chooseVault() {
@@ -314,6 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Settings.shared.obsidianVaultPath = url.path
             let newRoot = url.appendingPathComponent("StickyNotes", isDirectory: true)
             noteStore.reconfigure(rootURL: newRoot, format: .markdown)
+            prefetcher.start(at: noteStore.rootURL)
         }
     }
 
@@ -326,6 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             newRoot = Settings.localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
         }
         noteStore.reconfigure(rootURL: newRoot, format: .json)
+        prefetcher.start(at: noteStore.rootURL)
     }
 
     private func runOpenPanel(_ panel: NSOpenPanel) -> NSApplication.ModalResponse? {
@@ -337,10 +390,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([noteStore.activeURL])
     }
 
-    private func presentWindow(for note: Note) {
+    private func presentWindow(for note: Note, activate: Bool = true) {
         if let existing = windowControllers[note.id] {
             existing.showWindow(nil)
-            existing.window?.makeKeyAndOrderFront(nil)
+            if activate {
+                existing.window?.makeKeyAndOrderFront(nil)
+            } else {
+                existing.window?.orderFront(nil)
+            }
             return
         }
         let controller = NoteWindowController(note: note, store: noteStore) { [weak self] id in
@@ -348,8 +405,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         windowControllers[note.id] = controller
         controller.showWindow(nil)
-        controller.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if activate {
+            controller.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            // Sync-induced presentation: float the window in without yanking
+            // focus from whatever the user is doing.
+            controller.window?.orderFront(nil)
+        }
     }
 
     private func presentError(_ message: String, error: Error) {
