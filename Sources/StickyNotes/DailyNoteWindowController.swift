@@ -84,31 +84,40 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         textStorage = NSTextStorage()
         layoutManager = NSLayoutManager()
         textStorage.addLayoutManager(layoutManager)
-        let container = NSTextContainer(containerSize: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         container.widthTracksTextView = true
+        container.heightTracksTextView = false
         container.lineFragmentPadding = TodoTextView.leadingPaddingForCheckbox
         layoutManager.addTextContainer(container)
 
+        // NSScrollView's documentView relies on autoresizingMask, not Auto
+        // Layout — leave `translatesAutoresizingMaskIntoConstraints` at its
+        // default `true` and rely on `autoresizingMask` + min/maxSize so
+        // the text view resizes with the scroll view's clip view. Setting
+        // this to false (as an earlier draft did) leaves the text view
+        // sized at zero so clicks never land on real text positions.
         textView = TodoTextView(frame: .zero, textContainer: container)
-        textView.translatesAutoresizingMaskIntoConstraints = false
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.allowsUndo = true
         textView.isRichText = false
+        textView.allowsUndo = true
         textView.usesFindBar = false
         textView.smartInsertDeleteEnabled = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.backgroundColor = .clear
         textView.drawsBackground = false
-        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.textContainerInset = NSSize(width: 0, height: 4)
         textView.typingAttributes = [
             .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize),
             .foregroundColor: MarkdownStyler.bodyTextColor
         ]
         textView.insertionPointColor = MarkdownStyler.bodyTextColor
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
 
         scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
