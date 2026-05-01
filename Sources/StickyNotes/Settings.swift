@@ -9,6 +9,7 @@ final class Settings {
         static let launchAtLogin = "launchAtLogin"
         static let obsidianVaultPath = "obsidianVaultPath"
         static let defaultNoteColor = "defaultNoteColor"
+        static let dailyNotesPattern = "dailyNotesPattern"
     }
 
     private init() {}
@@ -32,6 +33,18 @@ final class Settings {
             return (v?.isEmpty ?? true) ? nil : v
         }
         set { defaults.set(newValue, forKey: Keys.obsidianVaultPath) }
+    }
+
+    /// Path template (relative to the vault root) for the Obsidian daily
+    /// note. Supports `{YYYY}` `{YY}` `{MM}` `{M}` `{DD}` `{D}` `{dddd}`
+    /// `{ddd}` tokens — e.g. `Daily/{YYYY}-{MM}-{DD}.md`. Empty / nil means
+    /// the daily-note feature is disabled.
+    var dailyNotesPattern: String? {
+        get {
+            let v = defaults.string(forKey: Keys.dailyNotesPattern)
+            return (v?.isEmpty ?? true) ? nil : v
+        }
+        set { defaults.set(newValue, forKey: Keys.dailyNotesPattern) }
     }
 
     /// Color applied to a newly-created note. Defaults to yellow.

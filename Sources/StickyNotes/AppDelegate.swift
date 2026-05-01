@@ -15,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var clearVaultItem: NSMenuItem!
     private var storagePathItem: NSMenuItem!
     private var defaultColorItem: NSMenuItem!
+    private var dailyNoteItem: NSMenuItem!
+    private var dailyPatternItem: NSMenuItem!
+    private var dailyClearItem: NSMenuItem!
+    private var dailyNoteController: DailyNoteWindowController?
 
     private lazy var prefetcher = ICloudPrefetcher { [weak self] in
         // Manual nudge in case FSEvents missed the materialization.
@@ -35,6 +39,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
 
         prefetcher.start(at: noteStore.rootURL)
+        restoreDailyNoteIfNeeded()
+    }
+
+    private func restoreDailyNoteIfNeeded() {
+        guard Settings.shared.obsidianVaultPath != nil,
+              Settings.shared.dailyNotesPattern != nil else { return }
+        let state = DailyNote.loadState()
+        guard state.visible else { return }
+        if dailyNoteController == nil {
+            dailyNoteController = DailyNoteWindowController()
+        }
+        dailyNoteController?.show()
     }
 
     deinit {
@@ -159,6 +175,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clearVaultItem = NSMenuItem(title: "Clear Obsidian Vault", action: #selector(clearVault), keyEquivalent: "")
         menu.addItem(clearVaultItem)
 
+        dailyNoteItem = NSMenuItem(title: "Show Today's Daily Note", action: #selector(toggleDailyNote), keyEquivalent: "")
+        menu.addItem(dailyNoteItem)
+
+        dailyPatternItem = NSMenuItem(title: "Set Daily Note Pattern…", action: #selector(setDailyPattern), keyEquivalent: "")
+        menu.addItem(dailyPatternItem)
+
+        dailyClearItem = NSMenuItem(title: "Clear Daily Note Pattern", action: #selector(clearDailyPattern), keyEquivalent: "")
+        menu.addItem(dailyClearItem)
+
         storagePathItem = NSMenuItem(title: "Show Storage Folder", action: #selector(revealStorage), keyEquivalent: "")
         menu.addItem(storagePathItem)
 
@@ -259,6 +284,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             vaultItem.toolTip = nil
             clearVaultItem.isHidden = true
         }
+
+        let vaultActiveForDaily = Settings.shared.obsidianVaultPath != nil
+        let pattern = Settings.shared.dailyNotesPattern
+        dailyPatternItem.isHidden = !vaultActiveForDaily
+        dailyClearItem.isHidden = !(vaultActiveForDaily && pattern != nil)
+        dailyNoteItem.isHidden = !(vaultActiveForDaily && pattern != nil)
+
+        if let pattern = pattern {
+            let preview = DailyNote.render(pattern, date: Date())
+            dailyPatternItem.title = "Daily Pattern: \(pattern)"
+            dailyPatternItem.toolTip = "Today resolves to: \(preview)"
+        } else {
+            dailyPatternItem.title = "Set Daily Note Pattern…"
+            dailyPatternItem.toolTip = nil
+        }
+
+        let dailyVisible = (dailyNoteController?.window?.isVisible ?? false)
+        dailyNoteItem.title = dailyVisible ? "Hide Today's Daily Note" : "Show Today's Daily Note"
     }
 
     private func registerHotkeys() {
@@ -366,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let newRoot = url.appendingPathComponent("StickyNotes", isDirectory: true)
             noteStore.reconfigure(rootURL: newRoot, format: .markdown)
             prefetcher.start(at: noteStore.rootURL)
+            dailyNoteController?.patternDidChange()
         }
     }
 
@@ -379,6 +423,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         noteStore.reconfigure(rootURL: newRoot, format: .json)
         prefetcher.start(at: noteStore.rootURL)
+
+        // Daily note feature requires a vault — tear down its window when
+        // the vault disappears.
+        dailyNoteController?.window?.orderOut(nil)
+        dailyNoteController = nil
+    }
+
+    @objc func toggleDailyNote() {
+        guard Settings.shared.obsidianVaultPath != nil,
+              Settings.shared.dailyNotesPattern != nil else { return }
+        if let controller = dailyNoteController, controller.window?.isVisible == true {
+            controller.window?.orderOut(nil)
+            return
+        }
+        if dailyNoteController == nil {
+            dailyNoteController = DailyNoteWindowController()
+        }
+        dailyNoteController?.show()
+    }
+
+    @objc func setDailyPattern() {
+        let alert = NSAlert()
+        alert.messageText = "Daily note path pattern"
+        alert.informativeText = """
+        Path inside the vault. Tokens: {YYYY} {YY} {MM} {M} {DD} {D} {dddd} {ddd}.
+        Example: Daily/{YYYY}-{MM}-{DD}.md
+        """
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 22))
+        input.stringValue = Settings.shared.dailyNotesPattern ?? "Daily/{YYYY}-{MM}-{DD}.md"
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            let value = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            Settings.shared.dailyNotesPattern = value.isEmpty ? nil : value
+            // If a controller is already showing, point it at the new path.
+            dailyNoteController?.patternDidChange()
+        }
+    }
+
+    @objc func clearDailyPattern() {
+        Settings.shared.dailyNotesPattern = nil
+        dailyNoteController?.window?.orderOut(nil)
+        dailyNoteController = nil
     }
 
     private func runOpenPanel(_ panel: NSOpenPanel) -> NSApplication.ModalResponse? {

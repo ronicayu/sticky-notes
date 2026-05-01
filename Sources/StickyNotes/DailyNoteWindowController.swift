@@ -1,0 +1,387 @@
+import AppKit
+
+/// Singleton floating window pinned to today's Obsidian daily note. Reads
+/// and writes the underlying `.md` as raw markdown — no frontmatter
+/// injection — so Obsidian and other plugins remain authoritative for
+/// formatting. Window chrome (position / size / color) is persisted to
+/// `<vault>/StickyNotes/_daily.json` via `DailyNote.saveState`.
+final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, TodoTextViewDelegate {
+
+    private var state: DailyNoteState
+    private var currentURL: URL?
+    private var currentDay: Date  // start-of-day for the URL we're showing
+    private var lastLoadedContent: String = ""
+
+    private let dragZone: NoteDragZone
+    private let dateLabel: CenteredTitleLabel
+    private let closeButton: NSButton
+    private let backgroundView: HoverTrackingView
+    private let textView: TodoTextView
+    private let textStorage: NSTextStorage
+    private let layoutManager: NSLayoutManager
+    private let scrollView: NSScrollView
+
+    private var saveWorkItem: DispatchWorkItem?
+    private var fileWatcher: FileWatcher?
+    private var midnightTimer: Timer?
+    private var pendingExternalContent: String?
+
+    private static let chromeHeight: CGFloat = 26
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d"
+        f.locale = Locale.autoupdatingCurrent
+        return f
+    }()
+
+    init() {
+        self.state = DailyNote.loadState()
+        self.currentDay = Calendar.current.startOfDay(for: Date())
+
+        let frame = NSRect(
+            x: state.positionX,
+            y: state.positionY,
+            width: state.width,
+            height: state.height
+        )
+        let window = NoteWindow(contentRect: frame)
+
+        backgroundView = HoverTrackingView(frame: .zero)
+        backgroundView.wantsLayer = true
+        backgroundView.layer?.cornerRadius = 12
+        backgroundView.layer?.masksToBounds = true
+        backgroundView.layer?.backgroundColor = NSColor(hex: state.color.bodyHex)?.cgColor
+
+        dragZone = NoteDragZone()
+        dragZone.translatesAutoresizingMaskIntoConstraints = false
+
+        dateLabel = CenteredTitleLabel(frame: .zero)
+        dateLabel.translatesAutoresizingMaskIntoConstraints = false
+        dateLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        dateLabel.textColor = NSColor.black.withAlphaComponent(0.55)
+        dateLabel.placeholder = ""
+
+        closeButton = NSButton()
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.bezelStyle = .inline
+        closeButton.isBordered = false
+        let closeImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Hide daily note")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        closeImage?.isTemplate = true
+        closeButton.image = closeImage
+        closeButton.contentTintColor = NSColor.black.withAlphaComponent(0.55)
+        closeButton.toolTip = "Hide"
+
+        textStorage = NSTextStorage()
+        layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(containerSize: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        container.lineFragmentPadding = TodoTextView.leadingPaddingForCheckbox
+        layoutManager.addTextContainer(container)
+
+        textView = TodoTextView(frame: .zero, textContainer: container)
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.allowsUndo = true
+        textView.isRichText = false
+        textView.usesFindBar = false
+        textView.smartInsertDeleteEnabled = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize),
+            .foregroundColor: MarkdownStyler.bodyTextColor
+        ]
+        textView.insertionPointColor = MarkdownStyler.bodyTextColor
+
+        scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.documentView = textView
+
+        super.init(window: window)
+        window.delegate = self
+        textView.delegate = self
+        textView.todoDelegate = self
+
+        setupLayout()
+        closeButton.target = self
+        closeButton.action = #selector(hideNote)
+        dragZone.delegate = nil  // double-click could toggle collapse later
+
+        loadCurrentFile()
+        startWatching()
+        scheduleMidnightRollover()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        midnightTimer?.invalidate()
+        fileWatcher?.stop()
+    }
+
+    // MARK: - Layout
+
+    private func setupLayout() {
+        guard let window = self.window else { return }
+        let content = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        backgroundView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(backgroundView)
+        backgroundView.addSubview(dragZone)
+        backgroundView.addSubview(dateLabel)
+        backgroundView.addSubview(closeButton)
+        backgroundView.addSubview(scrollView)
+
+        window.contentView = content
+        NSLayoutConstraint.activate([
+            backgroundView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            backgroundView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            backgroundView.topAnchor.constraint(equalTo: content.topAnchor),
+            backgroundView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+
+            dragZone.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor),
+            dragZone.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor),
+            dragZone.topAnchor.constraint(equalTo: backgroundView.topAnchor),
+            dragZone.heightAnchor.constraint(equalToConstant: DailyNoteWindowController.chromeHeight),
+
+            dateLabel.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 30),
+            dateLabel.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
+            dateLabel.topAnchor.constraint(equalTo: dragZone.topAnchor),
+            dateLabel.bottomAnchor.constraint(equalTo: dragZone.bottomAnchor),
+
+            closeButton.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -8),
+            closeButton.centerYAnchor.constraint(equalTo: dragZone.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 14),
+            closeButton.heightAnchor.constraint(equalToConstant: 14),
+
+            scrollView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 6),
+            scrollView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -6),
+            scrollView.topAnchor.constraint(equalTo: dragZone.bottomAnchor, constant: 2),
+            scrollView.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor, constant: -8)
+        ])
+    }
+
+    // MARK: - File I/O
+
+    /// Resolve today's URL, load its body into the text view, and refresh
+    /// the date label. Empty file (or missing file) yields an empty editor.
+    private func loadCurrentFile() {
+        currentDay = Calendar.current.startOfDay(for: Date())
+        currentURL = DailyNote.resolvedURL(for: currentDay)
+        dateLabel.text = DailyNoteWindowController.dateFormatter.string(from: currentDay)
+
+        let body: String = {
+            guard let url = currentURL,
+                  let raw = try? String(contentsOf: url, encoding: .utf8) else { return "" }
+            return raw
+        }()
+        lastLoadedContent = body
+        applyExternalBody(body)
+    }
+
+    /// Reload from disk if the underlying file changed externally.
+    private func reloadIfExternallyChanged() {
+        guard let url = currentURL else { return }
+        let body = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        if body == lastLoadedContent { return }
+
+        if let win = window, win.isKeyWindow,
+           win.firstResponder === textView {
+            // Defer the merge until the user steps away — overwriting an
+            // active edit would be jarring.
+            pendingExternalContent = body
+            return
+        }
+        lastLoadedContent = body
+        applyExternalBody(body)
+    }
+
+    private func applyExternalBody(_ body: String) {
+        let oldSelection = textView.selectedRange()
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        textStorage.replaceCharacters(in: fullRange, with: body)
+        MarkdownStyler.apply(to: textView)
+        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
+        let len = textStorage.length
+        let clamped = NSRange(location: min(oldSelection.location, len), length: 0)
+        textView.setSelectedRange(clamped)
+    }
+
+    private func scheduleSave() {
+        saveWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveNow() }
+        saveWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    private func saveNow() {
+        guard let url = currentURL else { return }
+        let body = textView.string
+        if body == lastLoadedContent { return }
+
+        // Make sure the parent folder exists — Obsidian creates it lazily;
+        // we should too rather than failing the first write.
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        do {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            lastLoadedContent = body
+        } catch {
+            // Best-effort — the next debounce will retry.
+        }
+    }
+
+    // MARK: - Watching
+
+    private func startWatching() {
+        fileWatcher?.stop()
+        guard let url = currentURL else { return }
+        let parent = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let watcher = FileWatcher { [weak self] in
+            self?.reloadIfExternallyChanged()
+        }
+        watcher.watch([parent])
+        fileWatcher = watcher
+    }
+
+    // MARK: - Midnight rollover
+
+    private func scheduleMidnightRollover() {
+        midnightTimer?.invalidate()
+        let calendar = Calendar.current
+        guard let next = calendar.nextDate(
+            after: Date(),
+            matching: DateComponents(hour: 0, minute: 0, second: 1),
+            matchingPolicy: .strict
+        ) else { return }
+        let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
+            self?.handleMidnight()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        midnightTimer = timer
+    }
+
+    private func handleMidnight() {
+        // Flush any pending edits to the old day's file before swapping.
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        saveNow()
+
+        loadCurrentFile()
+        startWatching()
+        scheduleMidnightRollover()
+    }
+
+    // MARK: - State persistence
+
+    private func persistChrome() {
+        guard let frame = window?.frame else { return }
+        state.positionX = Double(frame.origin.x)
+        state.positionY = Double(frame.origin.y)
+        state.width = Double(frame.size.width)
+        state.height = Double(frame.size.height)
+        DailyNote.saveState(state)
+    }
+
+    private func persistVisibility(_ visible: Bool) {
+        state.visible = visible
+        DailyNote.saveState(state)
+    }
+
+    func setColor(_ color: NoteColor) {
+        state.color = color
+        backgroundView.layer?.backgroundColor = NSColor(hex: color.bodyHex)?.cgColor
+        DailyNote.saveState(state)
+    }
+
+    /// Re-resolve the URL when the user changes the pattern at runtime.
+    func patternDidChange() {
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        saveNow()  // flush against the previous URL if it's still valid
+        loadCurrentFile()
+        startWatching()
+    }
+
+    // MARK: - Show / hide
+
+    func show() {
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        persistVisibility(true)
+    }
+
+    @objc private func hideNote() {
+        // Flush before disappearing so an immediate reopen sees fresh content.
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        saveNow()
+        window?.orderOut(nil)
+        persistVisibility(false)
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowDidMove(_ notification: Notification) { persistChrome() }
+    func windowDidResize(_ notification: Notification) { persistChrome() }
+
+    func windowDidResignKey(_ notification: Notification) {
+        if pendingExternalContent != nil {
+            pendingExternalContent = nil
+            reloadIfExternallyChanged()
+        }
+    }
+
+    // MARK: - Text editing
+
+    func textDidChange(_ notification: Notification) {
+        MarkdownStyler.apply(to: textView)
+        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
+        scheduleSave()
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
+    }
+
+    // MARK: - TodoTextViewDelegate
+
+    func textViewDidToggleCheckbox(at charIndex: Int) {
+        // Locate the bracket between `[` and `]` on the same line and flip
+        // its character. Mirrors the editing path used for regular notes.
+        let nsString = textStorage.string as NSString
+        let lineRange = nsString.lineRange(for: NSRange(location: charIndex, length: 0))
+        let line = nsString.substring(with: lineRange)
+        guard let openIdx = line.firstIndex(of: "["),
+              let closeIdx = line.firstIndex(of: "]"),
+              line.distance(from: openIdx, to: closeIdx) >= 2 else { return }
+        let bracketCharIdx = line.index(after: openIdx)
+        let absoluteCharIdx = lineRange.location + line.distance(from: line.startIndex, to: bracketCharIdx)
+        let current = (line[bracketCharIdx])
+        let replacement = (current == " ") ? "x" : " "
+        let replaceRange = NSRange(location: absoluteCharIdx, length: 1)
+        guard textView.shouldChangeText(in: replaceRange, replacementString: replacement) else { return }
+        textStorage.replaceCharacters(in: replaceRange, with: replacement)
+        textView.didChangeText()
+        MarkdownStyler.apply(to: textView)
+        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
+        scheduleSave()
+    }
+}
