@@ -513,7 +513,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private func updateAlpha() {
         guard let window = window else { return }
         let isKey = window.isKeyWindow
-        let target: CGFloat = (isKey || isHovering) ? NoteWindowController.activeAlpha : NoteWindowController.blurAlpha
+        let active = !note.collapsed || isKey || isHovering
+        let target: CGFloat = active ? NoteWindowController.activeAlpha : NoteWindowController.blurAlpha
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
             window.animator().alphaValue = target
@@ -988,6 +989,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         }
         updateExpandButtonIcon()
         updateChromeVisibility()
+        updateAlpha()
         scheduleSave()
     }
 
