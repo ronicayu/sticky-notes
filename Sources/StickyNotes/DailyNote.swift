@@ -10,10 +10,40 @@ struct DailyNoteState: Codable {
     var height: Double
     var colorRaw: String
     var visible: Bool
+    var collapsed: Bool
 
     var color: NoteColor {
         get { NoteColor(rawValue: colorRaw) ?? .yellow }
         set { colorRaw = newValue.rawValue }
+    }
+
+    init(
+        positionX: Double,
+        positionY: Double,
+        width: Double,
+        height: Double,
+        colorRaw: String,
+        visible: Bool,
+        collapsed: Bool
+    ) {
+        self.positionX = positionX
+        self.positionY = positionY
+        self.width = width
+        self.height = height
+        self.colorRaw = colorRaw
+        self.visible = visible
+        self.collapsed = collapsed
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        positionX = try c.decode(Double.self, forKey: .positionX)
+        positionY = try c.decode(Double.self, forKey: .positionY)
+        width = try c.decode(Double.self, forKey: .width)
+        height = try c.decode(Double.self, forKey: .height)
+        colorRaw = try c.decode(String.self, forKey: .colorRaw)
+        visible = (try? c.decode(Bool.self, forKey: .visible)) ?? false
+        collapsed = (try? c.decode(Bool.self, forKey: .collapsed)) ?? false
     }
 
     static var defaultState: DailyNoteState {
@@ -23,7 +53,8 @@ struct DailyNoteState: Codable {
             width: 340,
             height: 380,
             colorRaw: NoteColor.yellow.rawValue,
-            visible: false
+            visible: false,
+            collapsed: false
         )
     }
 }

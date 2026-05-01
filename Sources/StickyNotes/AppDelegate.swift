@@ -337,15 +337,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func toggleHideAll() {
-        guard !windowControllers.isEmpty else { return }
+        let dailyVisible = dailyNoteController?.window?.isVisible ?? false
+        guard !windowControllers.isEmpty || dailyVisible else { return }
         notesHidden.toggle()
         if notesHidden {
             for controller in windowControllers.values {
                 controller.window?.orderOut(nil)
             }
+            dailyNoteController?.window?.orderOut(nil)
         } else {
             for controller in windowControllers.values {
                 controller.window?.orderFront(nil)
+            }
+            // Only restore the daily note if it was visible before — its
+            // own state.visible flag is the source of truth.
+            if DailyNote.loadState().visible {
+                dailyNoteController?.window?.orderFront(nil)
             }
         }
     }

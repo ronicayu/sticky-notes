@@ -404,11 +404,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
                 ctx.duration = 0.16
                 trashButton.animator().alphaValue = target
                 expandButton.animator().alphaValue = target
+                colorButton.animator().alphaValue = target
                 labelButton.animator().alphaValue = target
             }
         } else {
             trashButton.alphaValue = target
             expandButton.alphaValue = target
+            colorButton.alphaValue = target
             labelButton.alphaValue = target
         }
     }

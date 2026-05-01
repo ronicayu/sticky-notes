@@ -5,7 +5,7 @@ import AppKit
 /// injection — so Obsidian and other plugins remain authoritative for
 /// formatting. Window chrome (position / size / color) is persisted to
 /// `<vault>/StickyNotes/_daily.json` via `DailyNote.saveState`.
-final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, TodoTextViewDelegate {
+final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, TodoTextViewDelegate, NoteDragZoneDelegate {
 
     private var state: DailyNoteState
     private var currentURL: URL?
@@ -15,6 +15,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private let dragZone: NoteDragZone
     private let dateLabel: CenteredTitleLabel
     private let closeButton: NSButton
+    private let collapseButton: NSButton
     private let backgroundView: HoverTrackingView
     private let textView: TodoTextView
     private let textStorage: NSTextStorage
@@ -26,7 +27,13 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private var midnightTimer: Timer?
     private var pendingExternalContent: String?
 
+    /// Height used when expanding back from a collapsed state. Captured at
+    /// collapse time, since while collapsed the live window frame is just
+    /// the chrome strip.
+    private var preCollapseHeight: CGFloat
+
     private static let chromeHeight: CGFloat = 26
+    private static let collapsedTotalHeight: CGFloat = 26
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "EEE, MMM d"
@@ -37,12 +44,16 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     init() {
         self.state = DailyNote.loadState()
         self.currentDay = Calendar.current.startOfDay(for: Date())
+        self.preCollapseHeight = CGFloat(state.height)
 
+        let displayHeight: CGFloat = state.collapsed
+            ? DailyNoteWindowController.collapsedTotalHeight
+            : CGFloat(state.height)
         let frame = NSRect(
             x: state.positionX,
             y: state.positionY,
             width: state.width,
-            height: state.height
+            height: displayHeight
         )
         let window = NoteWindow(contentRect: frame)
 
@@ -61,16 +72,14 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         dateLabel.textColor = NSColor.black.withAlphaComponent(0.55)
         dateLabel.placeholder = ""
 
-        closeButton = NSButton()
-        closeButton.translatesAutoresizingMaskIntoConstraints = false
-        closeButton.bezelStyle = .inline
-        closeButton.isBordered = false
-        let closeImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Hide daily note")?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
-        closeImage?.isTemplate = true
-        closeButton.image = closeImage
-        closeButton.contentTintColor = NSColor.black.withAlphaComponent(0.55)
-        closeButton.toolTip = "Hide"
+        closeButton = DailyNoteWindowController.makeChromeButton(
+            symbol: "xmark",
+            tooltip: "Hide"
+        )
+        collapseButton = DailyNoteWindowController.makeChromeButton(
+            symbol: state.collapsed ? "chevron.down" : "chevron.up",
+            tooltip: "Collapse / expand"
+        )
 
         textStorage = NSTextStorage()
         layoutManager = NSLayoutManager()
@@ -117,11 +126,32 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         setupLayout()
         closeButton.target = self
         closeButton.action = #selector(hideNote)
-        dragZone.delegate = nil  // double-click could toggle collapse later
+        collapseButton.target = self
+        collapseButton.action = #selector(toggleCollapse)
+        dragZone.delegate = self
 
         loadCurrentFile()
         startWatching()
         scheduleMidnightRollover()
+        // Match the on-disk collapsed flag without animating — the window
+        // already opened at the right height so this is just sizing the
+        // scroll view side of things.
+        if state.collapsed { applyCollapse(true, animated: false) }
+    }
+
+    private static func makeChromeButton(symbol: String, tooltip: String) -> NSButton {
+        let button = NSButton()
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        image?.isTemplate = true
+        button.image = image
+        button.contentTintColor = NSColor.black.withAlphaComponent(0.55)
+        button.toolTip = tooltip
+        return button
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -143,6 +173,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         backgroundView.addSubview(dragZone)
         backgroundView.addSubview(dateLabel)
         backgroundView.addSubview(closeButton)
+        backgroundView.addSubview(collapseButton)
         backgroundView.addSubview(scrollView)
 
         window.contentView = content
@@ -158,14 +189,19 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
             dragZone.heightAnchor.constraint(equalToConstant: DailyNoteWindowController.chromeHeight),
 
             dateLabel.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 30),
-            dateLabel.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
+            dateLabel.trailingAnchor.constraint(equalTo: collapseButton.leadingAnchor, constant: -8),
             dateLabel.topAnchor.constraint(equalTo: dragZone.topAnchor),
             dateLabel.bottomAnchor.constraint(equalTo: dragZone.bottomAnchor),
 
             closeButton.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -8),
             closeButton.centerYAnchor.constraint(equalTo: dragZone.centerYAnchor),
-            closeButton.widthAnchor.constraint(equalToConstant: 14),
-            closeButton.heightAnchor.constraint(equalToConstant: 14),
+            closeButton.widthAnchor.constraint(equalToConstant: 13),
+            closeButton.heightAnchor.constraint(equalToConstant: 13),
+
+            collapseButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
+            collapseButton.centerYAnchor.constraint(equalTo: dragZone.centerYAnchor),
+            collapseButton.widthAnchor.constraint(equalToConstant: 13),
+            collapseButton.heightAnchor.constraint(equalToConstant: 13),
 
             scrollView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 6),
             scrollView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -6),
@@ -369,6 +405,51 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         persistVisibility(true)
     }
 
+    // MARK: - Collapse / expand
+
+    @objc private func toggleCollapse() {
+        let target = !state.collapsed
+        if target {
+            // Capture the live expanded height so a later expand restores it.
+            if let frame = window?.frame {
+                preCollapseHeight = frame.size.height
+                state.height = Double(frame.size.height)
+            }
+        }
+        state.collapsed = target
+        applyCollapse(target, animated: true)
+        DailyNote.saveState(state)
+    }
+
+    func dragZoneDidDoubleClick() { toggleCollapse() }
+
+    private func applyCollapse(_ collapsed: Bool, animated: Bool) {
+        guard let window = window else { return }
+        scrollView.isHidden = collapsed
+        backgroundView.layer?.cornerRadius = collapsed ? 5 : 12
+
+        let chevronSymbol = collapsed ? "chevron.down" : "chevron.up"
+        if let image = NSImage(systemSymbolName: chevronSymbol, accessibilityDescription: "Collapse / expand")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold)) {
+            image.isTemplate = true
+            collapseButton.image = image
+        }
+
+        var frame = window.frame
+        let target: CGFloat = collapsed
+            ? DailyNoteWindowController.collapsedTotalHeight
+            : preCollapseHeight
+        // Keep the top edge anchored so a collapse pulls the bottom up
+        // rather than the title sliding off-screen.
+        frame.origin.y += frame.size.height - target
+        frame.size.height = target
+        if animated {
+            window.animator().setFrame(frame, display: true)
+        } else {
+            window.setFrame(frame, display: true)
+        }
+    }
+
     @objc private func hideNote() {
         // Flush before disappearing so an immediate reopen sees fresh content.
         saveWorkItem?.cancel()
@@ -381,7 +462,19 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     // MARK: - NSWindowDelegate
 
     func windowDidMove(_ notification: Notification) { persistChrome() }
-    func windowDidResize(_ notification: Notification) { persistChrome() }
+    func windowDidResize(_ notification: Notification) {
+        if state.collapsed {
+            // Don't overwrite `state.height` (the expanded height) with the
+            // collapsed strip's height — only persist position changes.
+            guard let frame = window?.frame else { return }
+            state.positionX = Double(frame.origin.x)
+            state.positionY = Double(frame.origin.y)
+            state.width = Double(frame.size.width)
+            DailyNote.saveState(state)
+        } else {
+            persistChrome()
+        }
+    }
 
     func windowDidResignKey(_ notification: Notification) {
         if pendingExternalContent != nil {
