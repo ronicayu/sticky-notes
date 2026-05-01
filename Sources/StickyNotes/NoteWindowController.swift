@@ -102,7 +102,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             tooltip: "Archive note"
         )
         colorButton = NoteWindowController.makeChromeButton(
-            symbol: "paintbrush.fill",
+            symbol: "paintpalette",
             tooltip: "Change color"
         )
         labelButton = NoteWindowController.makeChromeButton(
