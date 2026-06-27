@@ -152,6 +152,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         loadCurrentFile()
         startWatching()
         scheduleMidnightRollover()
+        observeWake()
         // Match the on-disk collapsed flag without animating — the window
         // already opened at the right height so this is just sizing the
         // scroll view side of things.
@@ -178,6 +179,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     deinit {
         midnightTimer?.invalidate()
         fileWatcher?.stop()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     // MARK: - Layout
@@ -364,6 +366,35 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         scheduleMidnightRollover()
     }
 
+    /// Swap to today's note if the calendar day advanced since we last
+    /// resolved the file. The midnight `Timer` doesn't fire while the Mac
+    /// sleeps, so a machine that slept through midnight keeps showing the
+    /// old day until something forces a re-resolve. Cheap no-op when the
+    /// day is unchanged.
+    private func rolloverIfNeeded() {
+        let today = Calendar.current.startOfDay(for: Date())
+        guard today != currentDay else { return }
+        handleMidnight()
+    }
+
+    private func observeWake() {
+        // Waking is exactly when the missed-midnight case surfaces — roll
+        // over immediately so an always-open window catches up without
+        // waiting for the next reopen, and re-arm the timer (the prior one
+        // may have fired late or been coalesced during sleep).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleWake() {
+        rolloverIfNeeded()
+        scheduleMidnightRollover()
+    }
+
     // MARK: - State persistence
 
     private func persistChrome() {
@@ -418,6 +449,10 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     // MARK: - Show / hide
 
     func show() {
+        // Re-resolve in case the day rolled over while hidden (the
+        // belt-and-suspenders companion to the midnight timer and wake
+        // observer — covers a reopen that races ahead of either).
+        rolloverIfNeeded()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
