@@ -161,6 +161,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
+        // Text size follows the platform convention rather than hiding in
+        // Settings — it is the shortcut people already know.
+        let viewMenuItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Bigger Text", action: #selector(increaseTextSize), keyEquivalent: "+")
+        viewMenu.addItem(withTitle: "Smaller Text", action: #selector(decreaseTextSize), keyEquivalent: "-")
+        viewMenu.addItem(withTitle: "Actual Size", action: #selector(resetTextSize), keyEquivalent: "0")
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -647,6 +657,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
            let url = WikiLink.obsidianURL(vaultPath: vault, target: target) {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: - Text size
+
+    @objc func increaseTextSize() { adjustTextSize(by: 1) }
+    @objc func decreaseTextSize() { adjustTextSize(by: -1) }
+    @objc func resetTextSize() { applyTextSize(Settings.defaultBodyFontSize) }
+
+    private func adjustTextSize(by delta: CGFloat) {
+        applyTextSize(Settings.shared.bodyFontSize + delta)
+    }
+
+    /// One size for every note — a per-note size would be a setting nobody
+    /// asked for and a lot of state to keep straight.
+    private func applyTextSize(_ size: CGFloat) {
+        let clamped = Settings.clampFontSize(size)
+        guard clamped != Settings.shared.bodyFontSize else { return }
+        Settings.shared.bodyFontSize = clamped
+        for controller in windowControllers.values {
+            controller.applyAppearanceColors()
+        }
+        dailyNoteController?.restyleForTextSize()
     }
 
     // MARK: - Undo

@@ -486,6 +486,13 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         DailyNote.saveState(state)
     }
 
+    /// Re-apply styling after the shared text size changes.
+    func restyleForTextSize() {
+        textView.font = NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize)
+        MarkdownStyler.apply(to: textView)
+        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
+    }
+
     func dragZoneDidClick() {
         guard DailyNote.loadState().collapsed else { return }
         dragZoneDidDoubleClick()

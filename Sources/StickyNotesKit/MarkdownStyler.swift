@@ -29,7 +29,20 @@ extension MarkdownStyler {
 /// regex-based approach this replaced mis-handled nested emphasis (`***x***`),
 /// escaped markers (`\*x\*`), and markers inside code spans.
 enum MarkdownStyler {
-    static let baseFontSize: CGFloat = 13
+    /// Body text size. Follows the user's ⌘+ / ⌘- choice; heading sizes and
+    /// the code font are derived from it so the whole note scales together.
+    static var baseFontSize: CGFloat { Settings.shared.bodyFontSize }
+
+    /// Spacing that keeps multi-line notes from reading as a wall of text.
+    static let lineHeightMultiple: CGFloat = 1.14
+    static let paragraphSpacing: CGFloat = 4
+
+    static func bodyParagraphStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineHeightMultiple = lineHeightMultiple
+        style.paragraphSpacing = paragraphSpacing
+        return style
+    }
 
     /// Exported so other views can match the body text tone (cursor, typing
     /// attrs). Computed rather than stored: note windows paint their own paper
@@ -72,7 +85,8 @@ enum MarkdownStyler {
         // Reset baseline (clears prior markers/attributes).
         storage.setAttributes([
             .font: baseFont(),
-            .foregroundColor: bodyColor
+            .foregroundColor: bodyColor,
+            .paragraphStyle: bodyParagraphStyle()
         ], range: full)
 
         let source = storage.string
@@ -581,5 +595,50 @@ private struct StylingVisitor: MarkupWalker {
             }
         }
         return NSRange(location: lr.location, length: len)
+    }
+}
+
+/// Collapses glyphs tagged `mdHidden` to nothing.
+///
+/// The `mdHidden` attribute only marks text; something has to act on it, and
+/// that is a layout manager delegate. `NoteWindowController` implements this
+/// itself for the editor; this standalone version is for read-only surfaces —
+/// like the quick switcher's preview — that should show a note the way it
+/// reads, not the way its markdown is written.
+final class HiddenMarkerLayoutDelegate: NSObject, NSLayoutManagerDelegate {
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+        properties props: UnsafePointer<NSLayoutManager.GlyphProperty>,
+        characterIndexes charIndexes: UnsafePointer<Int>,
+        font aFont: NSFont,
+        forGlyphRange glyphRange: NSRange
+    ) -> Int {
+        guard let storage = layoutManager.textStorage else { return 0 }
+
+        var modified = false
+        var newProps = [NSLayoutManager.GlyphProperty](repeating: .null, count: glyphRange.length)
+        for i in 0..<glyphRange.length {
+            var prop = props[i]
+            let charIndex = charIndexes[i]
+            if charIndex < storage.length,
+               storage.attributes(at: charIndex, effectiveRange: nil)[.mdHidden] != nil {
+                prop = .null
+                modified = true
+            }
+            newProps[i] = prop
+        }
+        guard modified else { return 0 }
+
+        newProps.withUnsafeBufferPointer { buffer in
+            layoutManager.setGlyphs(
+                glyphs,
+                properties: buffer.baseAddress!,
+                characterIndexes: charIndexes,
+                font: aFont,
+                forGlyphRange: glyphRange
+            )
+        }
+        return glyphRange.length
     }
 }

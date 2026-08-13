@@ -222,7 +222,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         textView.drawsBackground = false
         // Inset 0 horizontally so the body text starts at the same x as the
         // flush-left title field — they should appear visually left-aligned.
-        textView.textContainerInset = NSSize(width: 0, height: 4)
+        // Breathing room: text was flush against the window edge, and the
+        // last line sat on the bottom border. The horizontal inset stays 0
+        // because the checkbox gutter already provides the left margin.
+        textView.textContainerInset = NSSize(width: 0, height: 8)
         textView.typingAttributes = [
             .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize),
             .foregroundColor: MarkdownStyler.bodyTextColor

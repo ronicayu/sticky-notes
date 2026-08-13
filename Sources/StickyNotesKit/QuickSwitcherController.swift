@@ -30,6 +30,13 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "")
+    private let previewTextView = TodoTextView()
+    private let previewLayoutDelegate = HiddenMarkerLayoutDelegate()
+    private let previewScroll = NSScrollView()
+    /// A plain view, not an NSBox: a separator box carries an intrinsic
+    /// height for a *horizontal* rule, which fights a vertical divider's
+    /// constraints and collapses the whole palette.
+    private let previewDivider = NSView()
 
     /// Every candidate, loaded once per invocation. Re-reading the store on
     /// each keystroke would be wasted work — the cache makes it cheap, but the
@@ -156,6 +163,27 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
 
+        // Preview pane: the one-line excerpt isn't enough to choose between
+        // similar results in a long note. Read-only, styled with the same
+        // markdown pass the editor uses so it looks like the real note.
+        previewTextView.layoutManager?.delegate = previewLayoutDelegate
+        previewTextView.isEditable = false
+        previewTextView.isSelectable = false
+        previewTextView.drawsBackground = false
+        previewTextView.textContainerInset = NSSize(width: 6, height: 8)
+        previewTextView.isVerticallyResizable = true
+        previewTextView.autoresizingMask = [.width]
+
+        previewScroll.translatesAutoresizingMaskIntoConstraints = false
+        previewScroll.documentView = previewTextView
+        previewScroll.hasVerticalScroller = false
+        previewScroll.drawsBackground = false
+        previewScroll.borderType = .noBorder
+
+        previewDivider.translatesAutoresizingMaskIntoConstraints = false
+        previewDivider.wantsLayer = true
+        previewDivider.layer?.backgroundColor = NSColor.separatorColor.cgColor
+
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.font = NSFont.systemFont(ofSize: 11)
         statusLabel.textColor = .tertiaryLabelColor
@@ -165,6 +193,8 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
         container.addSubview(searchField)
         container.addSubview(divider)
         container.addSubview(scrollView)
+        container.addSubview(previewDivider)
+        container.addSubview(previewScroll)
         container.addSubview(statusLabel)
 
         NSLayoutConstraint.activate([
@@ -177,9 +207,19 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
             divider.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 12),
 
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor),
             scrollView.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -4),
+            scrollView.widthAnchor.constraint(equalTo: container.widthAnchor, multiplier: 0.55),
+
+            previewDivider.leadingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            previewDivider.topAnchor.constraint(equalTo: divider.bottomAnchor),
+            previewDivider.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -4),
+            previewDivider.widthAnchor.constraint(equalToConstant: 1),
+
+            previewScroll.leadingAnchor.constraint(equalTo: previewDivider.trailingAnchor),
+            previewScroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            previewScroll.topAnchor.constraint(equalTo: divider.bottomAnchor),
+            previewScroll.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -4),
 
             statusLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             statusLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
@@ -212,6 +252,7 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             tableView.scrollRowToVisible(0)
         }
+        updatePreview()
         updateStatus(query: query)
     }
 
@@ -238,6 +279,7 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
         let next = max(0, min(results.count - 1, (current < 0 ? 0 : current) + delta))
         tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
         tableView.scrollRowToVisible(next)
+        updatePreview()
     }
 
     @objc private func rowClicked() {
@@ -283,6 +325,31 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { true }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updatePreview()
+    }
+
+    /// Render the selected note into the preview pane.
+    private func updatePreview() {
+        let row = tableView.selectedRow
+        guard row >= 0, row < results.count, let storage = previewTextView.textStorage else {
+            previewTextView.string = ""
+            return
+        }
+        let note = results[row].note
+        let heading = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = heading.isEmpty ? note.content : "# \(heading)\n\n\(note.content)"
+
+        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: text)
+        MarkdownStyler.apply(to: storage)
+        // Nothing is focused in a preview, so every marker should be hidden —
+        // it should read like the note, not like its source.
+        MarkdownStyler.updateMarkerVisibility(in: storage, selection: NSRange(location: NSNotFound, length: 0))
+    }
+
+    /// Text currently shown in the preview — used by tests.
+    var previewText: String { previewTextView.string }
 }
 
 // MARK: - Panel

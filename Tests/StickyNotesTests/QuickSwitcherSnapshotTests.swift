@@ -175,6 +175,59 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
         XCTAssertNil(chosen, "whitespace is not a title — no untitled note should be created")
     }
 
+    // MARK: - Preview pane
+
+    func testThePreviewShowsTheSelectedNote() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+
+        controller.search("groceries")
+        XCTAssertTrue(controller.previewText.contains("oat milk"),
+                      "preview should show the note body, got: \(controller.previewText)")
+    }
+
+    func testThePreviewIncludesTheTitle() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+
+        controller.search("groceries")
+        XCTAssertTrue(controller.previewText.contains("Groceries"))
+    }
+
+    func testThePreviewIsEmptyWhenNothingMatches() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+
+        controller.search("no-such-note-anywhere")
+        XCTAssertEqual(controller.previewText, "")
+    }
+
+    func testThePreviewFollowsTheQuery() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+
+        controller.search("groceries")
+        let first = controller.previewText
+        controller.search("standup")
+        XCTAssertNotEqual(controller.previewText, first)
+        XCTAssertTrue(controller.previewText.contains("vault migration"))
+    }
+
+    func testAnUntitledNoteStillPreviews() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+
+        controller.search("dentist")
+        XCTAssertTrue(controller.previewText.contains("dentist"))
+    }
+
+    func testPreviewRendersWithTheSwitcher() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+        controller.search("groceries")
+        try render(controller, to: "quick-switcher-preview.png")
+    }
+
     func testPreparingAgainPicksUpNotesAddedSince() throws {
         let store = seededStore()
         let controller = QuickSwitcherController(store: store, onChoose: { _ in })

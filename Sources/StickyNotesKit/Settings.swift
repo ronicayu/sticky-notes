@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 final class Settings {
@@ -12,6 +13,7 @@ final class Settings {
         static let dailyNotesPattern = "dailyNotesPattern"
         static let dailyTemplatePath = "dailyTemplatePath"
         static let hiddenLabels = "hiddenLabels"
+        static let bodyFontSize = "bodyFontSize"
     }
 
     private init() {}
@@ -75,6 +77,26 @@ final class Settings {
         let hidden = hiddenLabels
         guard !hidden.isEmpty else { return false }
         return note.labels.contains { hidden.contains($0) }
+    }
+
+    /// Body text size, shared by every note. The one preference here that
+    /// earns its place: reading comfort is an accessibility need, and the
+    /// ⌘+ / ⌘- convention already exists on the platform.
+    var bodyFontSize: CGFloat {
+        get {
+            let stored = defaults.double(forKey: Keys.bodyFontSize)
+            guard stored > 0 else { return Settings.defaultBodyFontSize }
+            return Settings.clampFontSize(CGFloat(stored))
+        }
+        set { defaults.set(Double(Settings.clampFontSize(newValue)), forKey: Keys.bodyFontSize) }
+    }
+
+    static let defaultBodyFontSize: CGFloat = 13
+    static let minBodyFontSize: CGFloat = 11
+    static let maxBodyFontSize: CGFloat = 18
+
+    static func clampFontSize(_ size: CGFloat) -> CGFloat {
+        min(max(size, minBodyFontSize), maxBodyFontSize)
     }
 
     /// Color applied to a newly-created note. Defaults to yellow.
