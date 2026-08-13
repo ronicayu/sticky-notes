@@ -19,6 +19,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// Anchor for the new-note cascade. Reset when the last note is closed so
     /// a fresh desk starts from the top again.
     private var lastNewNoteFrame: NSRect?
+    private let toasts = ToastController()
 
     private lazy var prefetcher = ICloudPrefetcher { [weak self] in
         // Manual nudge in case FSEvents missed the materialization.
@@ -142,7 +143,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         let editMenuItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Undo", action: #selector(undoLastAction(_:)), keyEquivalent: "z")
         let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
         redoItem.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(.separator())
@@ -320,8 +321,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     @objc func toggleHideAll() {
         let dailyVisible = dailyNoteController?.window?.isVisible ?? false
         guard !windowControllers.isEmpty || dailyVisible else { return }
+
+        let wasVisible = windowControllers.values.filter { $0.window?.isVisible == true }.count
         notesHidden.toggle()
         applyVisibility()
+
+        if notesHidden {
+            offerUndoForHiding(count: wasVisible, label: nil) { [weak self] in
+                guard let self = self, self.notesHidden else { return }
+                self.notesHidden = false
+                self.applyVisibility()
+            }
+        } else {
+            toasts.dismiss()
+        }
     }
 
     /// Single place that decides which note windows are on screen. "Hide all"
@@ -410,9 +423,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     @objc private func toggleLabelVisibility(_ sender: NSMenuItem) {
         guard let label = sender.representedObject as? String else { return }
         var hidden = Settings.shared.hiddenLabels
-        if hidden.contains(label) { hidden.remove(label) } else { hidden.insert(label) }
+        let hiding = !hidden.contains(label)
+
+        let affected = windowControllers.values.filter {
+            $0.labels.contains(label) && $0.window?.isVisible == true
+        }.count
+
+        if hiding { hidden.insert(label) } else { hidden.remove(label) }
         Settings.shared.hiddenLabels = hidden
         applyVisibility()
+
+        guard hiding else { toasts.dismiss(); return }
+        offerUndoForHiding(count: affected, label: label) { [weak self] in
+            guard let self = self else { return }
+            var current = Settings.shared.hiddenLabels
+            current.remove(label)
+            Settings.shared.hiddenLabels = current
+            self.applyVisibility()
+        }
     }
 
     @objc private func showAllLabels() {
@@ -621,6 +649,36 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
+    // MARK: - Undo
+
+    /// Archiving makes a note vanish with no recourse short of opening the
+    /// panel and hunting for it. Offer to put it back.
+    private func offerUndoForArchive(of note: Note) {
+        toasts.show(Toast(message: Toast.archivedMessage(noteName: NoteSearch.summary(of: note))) { [weak self] in
+            guard let self = self else { return }
+            self.noteStore.restore(note)
+            self.focusNote(id: note.id)
+        })
+    }
+
+    /// Hiding notes looks identical to them crashing. Same treatment.
+    private func offerUndoForHiding(count: Int, label: String?, restore: @escaping () -> Void) {
+        guard count > 0 else { return }
+        toasts.show(Toast(
+            message: Toast.hiddenMessage(count: count, label: label),
+            undoTitle: "Show",
+            undo: restore
+        ))
+    }
+
+    /// ⌘Z with a toast on screen undoes that action. Routed through the main
+    /// menu so it works no matter which of our windows has focus.
+    @objc func undoLastAction(_ sender: Any?) {
+        if toasts.performUndo() { return }
+        // Nothing pending — let the focused text view handle its own undo.
+        NSApp.sendAction(Selector(("undo:")), to: nil, from: sender)
+    }
+
     // MARK: - Storage health
 
     /// Swap the menu-bar icon for a warning and expose the failing file while
@@ -766,6 +824,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         let controller = NoteWindowController(note: note, store: noteStore) { [weak self] id in
             self?.windowControllers.removeValue(forKey: id)
+        }
+        controller.onArchived = { [weak self] archived in
+            self?.offerUndoForArchive(of: archived)
         }
         windowControllers[note.id] = controller
         controller.showWindow(nil)

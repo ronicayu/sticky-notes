@@ -396,13 +396,17 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     @objc private func deleteSelected() {
         guard mode == .archived, let note = selectedNote() else { return }
 
+        // Deleting moves the note to Trash for 30 days. The old copy said
+        // "permanently", which stopped being true — and a warning that
+        // overstates the danger teaches people to ignore warnings.
+        let summary = NoteSearch.summary(of: note)
         let alert = NSAlert()
-        alert.messageText = "Delete this note permanently?"
-        alert.informativeText = NoteSearch.summary(of: note).isEmpty ? "(empty note)" : NoteSearch.summary(of: note)
+        alert.messageText = "Move to Trash?"
+        alert.informativeText = (summary.isEmpty ? "(empty note)" : summary)
+            + "\n\nNotes stay in Trash for 30 days, and can be put back from the Trash tab."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
         if alert.runModal() == .alertFirstButtonReturn {
             store.deleteForever(note)
         }

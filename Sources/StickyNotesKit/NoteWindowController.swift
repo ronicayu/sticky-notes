@@ -4,6 +4,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private var note: Note
     private let store: NoteStore
     private let onClosed: (UUID) -> Void
+    /// Called when the user archives this note, with everything needed to put
+    /// it back exactly where it was.
+    var onArchived: ((Note) -> Void)?
 
     /// Labels currently on this note. Read by the app delegate to decide
     /// whether the window belongs on screen under the label filter.
@@ -505,7 +508,14 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         if isEmpty {
             store.discardActive(note)
         } else {
+            // Capture the frame first: the window is about to close, and
+            // undo should restore the note where it actually sat.
+            if let frame = window?.frame {
+                note.positionX = Double(frame.origin.x)
+                note.positionY = Double(frame.origin.y)
+            }
             store.archive(note)
+            onArchived?(note)
         }
         window?.close()
         onClosed(note.id)

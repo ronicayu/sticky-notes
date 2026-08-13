@@ -66,7 +66,9 @@ final class NoteWindow: NSWindow {
         case "x": selector = Selector(("cut:"))
         case "v": selector = shift ? Selector(("pasteAsPlainText:")) : Selector(("paste:"))
         case "a": selector = Selector(("selectAll:"))
-        case "z": selector = shift ? Selector(("redo:")) : Selector(("undo:"))
+        // Undo goes to the app delegate first so a pending undo toast wins;
+        // it falls back to the text view's own undo when there isn't one.
+        case "z": selector = shift ? Selector(("redo:")) : Selector(("undoLastAction:"))
         default: selector = nil
         }
 
