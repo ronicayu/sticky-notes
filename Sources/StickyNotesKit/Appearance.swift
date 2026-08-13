@@ -27,6 +27,23 @@ enum Appearance {
         }
     }
 
+    /// True when the user has asked for less animation. Fades still happen —
+    /// they just happen instantly, which is what Reduce Motion asks for.
+    static var reduceMotion: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// Duration for a decorative fade, respecting Reduce Motion.
+    static func animationDuration(_ preferred: TimeInterval) -> TimeInterval {
+        reduceMotion ? 0 : preferred
+    }
+
+    /// Notes fade when they lose focus. Under Reduce Transparency that reads
+    /// as a rendering bug, so stay fully opaque instead.
+    static var allowsFadedNotes: Bool {
+        !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+    }
+
     private static var observer: NSKeyValueObservation?
 }
 

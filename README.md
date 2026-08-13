@@ -32,16 +32,27 @@ Built with AppKit. Two dependencies: [`KeyboardShortcuts`](https://github.com/si
 - **Launch at login** — toggle from Settings.
 - **Recoverable delete** — "Delete permanently" moves a note to a **Trash** tab in the notes panel, where it stays put-back-able for 30 days before being swept on launch.
 - **Conflict-safe sync** — when two Macs edit the same note before syncing, the versions are merged rather than one silently winning: the newest leads and every other version's text is appended under a dated divider. Labels are unioned.
+- **Accessibility** — icon-only controls carry VoiceOver labels, and Reduce Motion and Reduce Transparency are respected: animations become instant, and unfocused notes stay fully opaque.
 - **Local-first storage** — notes are plain files under `~/Library/Application Support/StickyNotes/` (or your iCloud Drive folder / Obsidian vault).
 
 ## Install
 
 Grab the latest `StickyNotes.app` from the [Releases](../../releases) page, drag it into `/Applications`, and launch it.
 
-Because the app is ad-hoc signed (no Apple Developer account), macOS will block the first launch. Either:
+Because the released build is ad-hoc signed (no Apple Developer account), macOS will block the first launch. Either:
 
 - Right-click the app → **Open** → confirm, or
 - Open **System Settings → Privacy & Security**, scroll down, and click **"Open Anyway"** for StickyNotes.
+
+If you do have a Developer ID, `build-app.sh` will sign and notarize properly, and that block goes away:
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+NOTARY_PROFILE=notary-profile \
+./scripts/build-app.sh
+```
+
+(`NOTARY_PROFILE` comes from `xcrun notarytool store-credentials`. Omit it to sign without notarizing.)
 
 The first time you trigger a global hotkey, macOS may also ask you to grant input monitoring or accessibility permissions.
 

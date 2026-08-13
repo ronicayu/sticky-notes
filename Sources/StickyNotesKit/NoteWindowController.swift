@@ -152,6 +152,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         titleField.translatesAutoresizingMaskIntoConstraints = false
         titleField.stringValue = note.title
         titleField.placeholderString = "Title"
+        titleField.setAccessibilityLabel("Note title")
         titleField.font = NoteWindowController.titleExpandedFont
         titleField.textColor = MarkdownStyler.bodyTextColor
         titleField.isBordered = false
@@ -427,6 +428,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         button.image = image
         button.contentTintColor = NoteWindowController.chromeColor
         button.toolTip = tooltip
+        // Icon-only buttons have no title for VoiceOver to read.
+        button.setAccessibilityLabel(tooltip)
+        button.setAccessibilityRole(.button)
         button.alphaValue = 0
         return button
     }
@@ -448,7 +452,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         let target: CGFloat = shouldShow ? 1.0 : 0
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.16
+                ctx.duration = Appearance.animationDuration(0.16)
                 trashButton.animator().alphaValue = target
                 expandButton.animator().alphaValue = target
                 colorButton.animator().alphaValue = target
@@ -639,9 +643,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         guard let window = window else { return }
         let isKey = window.isKeyWindow
         let active = !note.collapsed || isKey || isHovering
-        let target: CGFloat = active ? NoteWindowController.activeAlpha : NoteWindowController.blurAlpha
+        let faded = !active && Appearance.allowsFadedNotes
+        let target: CGFloat = faded ? NoteWindowController.blurAlpha : NoteWindowController.activeAlpha
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
+            ctx.duration = Appearance.animationDuration(0.18)
             window.animator().alphaValue = target
         }
     }
@@ -1106,7 +1111,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             let newHeight = NoteWindowController.collapsedHeight
             frame.origin.y += frame.size.height - newHeight
             frame.size.height = newHeight
-            window.setFrame(frame, display: true, animate: true)
+            window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
         } else {
             titleLabel.isHidden = true
             bodyContainer.isHidden = false
@@ -1118,7 +1123,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             let newHeight = preCollapseHeight
             frame.origin.y -= newHeight - frame.size.height
             frame.size.height = newHeight
-            window.setFrame(frame, display: true, animate: true)
+            window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
             note.height = Double(newHeight)
         }
         updateExpandButtonIcon()

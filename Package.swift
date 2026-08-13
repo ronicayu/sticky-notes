@@ -26,7 +26,10 @@ let package = Package(
         ),
         .testTarget(
             name: "StickyNotesTests",
-            dependencies: ["StickyNotesKit"],
+            dependencies: [
+                "StickyNotesKit",
+                .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")
+            ],
             path: "Tests/StickyNotesTests"
         )
     ]

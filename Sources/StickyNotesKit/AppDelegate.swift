@@ -62,6 +62,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         prefetcher.start(at: noteStore.rootURL)
         restoreDailyNoteIfNeeded()
+
+        // A first launch showing an empty screen looks like a failed one.
+        if let welcome = WelcomeNote.makeIfNeeded(store: noteStore) {
+            presentWindow(for: welcome)
+        }
     }
 
     private func restoreDailyNoteIfNeeded() {

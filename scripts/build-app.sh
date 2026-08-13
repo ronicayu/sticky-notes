@@ -40,8 +40,37 @@ cp Resources/AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
 cp Resources/MenuBarIcon.png "${APP_DIR}/Contents/Resources/MenuBarIcon.png"
 cp Resources/MenuBarIcon@2x.png "${APP_DIR}/Contents/Resources/MenuBarIcon@2x.png"
 
-# Ad-hoc sign so macOS Gatekeeper at least accepts it after the user grants permission.
-codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || true
+# Signing.
+#
+# With a Developer ID identity in SIGN_IDENTITY the app is signed properly and,
+# when notarization credentials are also present, submitted to Apple. Without
+# them we fall back to ad-hoc signing, which still runs but leaves macOS
+# showing the "unidentified developer" block on first launch.
+#
+#   SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+#   NOTARY_PROFILE=notary-profile   # from: xcrun notarytool store-credentials
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+    echo "==> signing with ${SIGN_IDENTITY}"
+    codesign --force --deep --options runtime --timestamp \
+             --sign "${SIGN_IDENTITY}" "${APP_DIR}"
+
+    if [ -n "${NOTARY_PROFILE:-}" ]; then
+        ZIP_PATH="build/${APP_NAME}.zip"
+        echo "==> notarizing (waits on Apple, usually a few minutes)"
+        ditto -c -k --keepParent "${APP_DIR}" "${ZIP_PATH}"
+        xcrun notarytool submit "${ZIP_PATH}" \
+              --keychain-profile "${NOTARY_PROFILE}" --wait
+        # Staple so the app validates without a network round trip.
+        xcrun stapler staple "${APP_DIR}"
+        rm -f "${ZIP_PATH}"
+        echo "==> notarized and stapled"
+    else
+        echo "==> signed but not notarized (set NOTARY_PROFILE to notarize)"
+    fi
+else
+    echo "==> ad-hoc signing (set SIGN_IDENTITY for a distributable build)"
+    codesign --force --deep --sign - "${APP_DIR}" >/dev/null 2>&1 || true
+fi
 
 echo "==> done: ${APP_DIR}"
 echo
