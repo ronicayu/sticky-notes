@@ -83,7 +83,65 @@ final class TodoTextView: NSTextView {
             todoDelegate?.textViewDidToggleCheckbox(at: charIdx)
             return
         }
+        if handleLinkClick(at: viewPoint, event: event) { return }
         super.mouseDown(with: event)
+    }
+
+    /// Open a link on ⌘-click, or on a plain click when this editor doesn't
+    /// have focus. Clicking a link in the note you're editing places the caret
+    /// instead — the same split Obsidian uses, so a link never fights you for
+    /// a click while you're writing.
+    private func handleLinkClick(at point: NSPoint, event: NSEvent) -> Bool {
+        let commandHeld = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+        let focused = window?.firstResponder === self
+        guard commandHeld || !focused else { return false }
+
+        guard let storage = textStorage, let lm = layoutManager, let tc = textContainer else { return false }
+        let container = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        var fraction: CGFloat = 0
+        let glyph = lm.glyphIndex(for: container, in: tc, fractionOfDistanceThroughGlyph: &fraction)
+        guard glyph < lm.numberOfGlyphs else { return false }
+        let index = lm.characterIndexForGlyph(at: glyph)
+        guard index < storage.length else { return false }
+
+        guard let value = storage.attribute(.link, at: index, effectiveRange: nil) else { return false }
+        let url = (value as? URL) ?? (value as? String).flatMap(URL.init(string:))
+        guard let url = url else { return false }
+        NSWorkspace.shared.open(url)
+        return true
+    }
+
+    /// Pasting a URL over selected text turns the selection into a markdown
+    /// link rather than replacing it — the usual reason to paste a URL onto
+    /// words is to link them.
+    override func paste(_ sender: Any?) {
+        let selection = selectedRange()
+        guard selection.length > 0,
+              let pasted = NSPasteboard.general.string(forType: .string)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              isLinkLike(pasted) else {
+            super.paste(sender)
+            return
+        }
+
+        let selected = (string as NSString).substring(with: selection)
+        // Don't nest a link inside a link.
+        guard !selected.contains("]("), !isLinkLike(selected) else {
+            super.paste(sender)
+            return
+        }
+
+        let replacement = "[\(selected)](\(pasted))"
+        guard shouldChangeText(in: selection, replacementString: replacement) else { return }
+        textStorage?.replaceCharacters(in: selection, with: replacement)
+        didChangeText()
+        setSelectedRange(NSRange(location: selection.location + (replacement as NSString).length, length: 0))
+    }
+
+    private func isLinkLike(_ candidate: String) -> Bool {
+        guard !candidate.contains(" "), !candidate.contains("\n") else { return false }
+        guard let url = URL(string: candidate), let scheme = url.scheme else { return false }
+        return !scheme.isEmpty && url.host != nil
     }
 
     // MARK: - Markdown shortcuts

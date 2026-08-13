@@ -12,6 +12,11 @@ extension NSAttributedString.Key {
     static let mdHidden = NSAttributedString.Key("mdHidden")
 }
 
+/// Colors and metrics shared by the styler and the views that host it.
+extension MarkdownStyler {
+    static let linkColor = NSColor(srgbRed: 0.13, green: 0.38, blue: 0.78, alpha: 1.0)
+}
+
 /// WYSIWYG markdown styling for an `NSTextView`. Applies live styling, tracks
 /// marker ranges so the layout manager can hide them when the cursor is not
 /// editing that element, à la Obsidian / TickTick live-preview.
@@ -62,6 +67,29 @@ enum MarkdownStyler {
         // regex pass — it has app-specific kerning + foreground-clear semantics
         // that don't belong in the AST walk.
         applyCheckboxes(in: storage, full: full)
+
+        // Bare URLs aren't links to CommonMark without the autolink extension,
+        // but people type them constantly. Detect them separately, skipping
+        // anything the AST already turned into a link.
+        applyBareURLs(in: storage, full: full)
+    }
+
+    private static func applyBareURLs(in storage: NSTextStorage, full: NSRange) {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return
+        }
+        for match in detector.matches(in: storage.string, range: full) {
+            guard let url = match.url else { continue }
+            if storage.attribute(.link, at: match.range.location, effectiveRange: nil) != nil { continue }
+            // Inside a code span the text is deliberately literal.
+            if let font = storage.attribute(.font, at: match.range.location, effectiveRange: nil) as? NSFont,
+               font.fontDescriptor.symbolicTraits.contains(.monoSpace) { continue }
+            storage.addAttributes([
+                .link: url,
+                .foregroundColor: linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ], range: match.range)
+        }
     }
 
     /// Sets/removes `mdHidden` on every tagged marker range based on whether the
@@ -358,6 +386,53 @@ private struct StylingVisitor: MarkupWalker {
             .strikethroughColor: MarkdownStyler.bodyTextColor
         ])
         descendInto(strike)
+    }
+
+    /// `[text](url)` — the visible text keeps link styling, while the brackets
+    /// and the destination hide together when the caret is elsewhere, so a
+    /// note reads as prose until you go to edit the link.
+    mutating func visitLink(_ link: Markdown.Link) {
+        guard let range = link.range, let nsr = table.nsRange(range) else {
+            descendInto(link)
+            return
+        }
+        let text = source.substring(with: nsr)
+        guard text.hasPrefix("["), let closeBracket = text.range(of: "](") else {
+            descendInto(link)
+            return
+        }
+
+        let leadLength = 1
+        let trailStart = text.distance(from: text.startIndex, to: closeBracket.lowerBound)
+        let trailLength = (text as NSString).length - trailStart
+        guard trailLength > 0, nsr.length > leadLength + trailLength else {
+            descendInto(link)
+            return
+        }
+
+        let scope = NSValue(range: nsr)
+        markMarker(NSRange(location: nsr.location, length: leadLength), scope: scope)
+        markMarker(NSRange(location: nsr.location + trailStart, length: trailLength), scope: scope)
+
+        let inner = NSRange(location: nsr.location + leadLength, length: trailStart - leadLength)
+        if inner.length > 0 {
+            var attrs: [NSAttributedString.Key: Any] = [
+                .foregroundColor: MarkdownStyler.linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ]
+            if let destination = link.destination, let url = URL(string: destination) {
+                attrs[.link] = url
+            }
+            storage.addAttributes(attrs, range: inner)
+        }
+        descendInto(link)
+    }
+
+    private func markMarker(_ range: NSRange, scope: NSValue) {
+        storage.addAttributes([
+            .foregroundColor: MarkdownStyler.markerColor,
+            .mdMarkerScope: scope
+        ], range: range)
     }
 
     mutating func visitInlineCode(_ code: InlineCode) {
