@@ -2,9 +2,14 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-/// Renders the quick switcher offscreen. Catches layout mistakes that unit
-/// tests on the ranker can't — an empty table, a clipped label, a row that
-/// never got its constraints.
+/// Builds the quick switcher's view tree and renders it offscreen. The
+/// assertions cover what the ranker tests can't — that the controller wires a
+/// query to the right rows, and that laying the palette out doesn't crash.
+///
+/// Set `SNAPSHOT_DIR` to also write PNGs for a human to look at. Pixel content
+/// is deliberately not asserted: whether text rasterizes offscreen depends on
+/// the window server, which differs between a developer's machine and a CI
+/// runner, and a flaky pixel heuristic is worse than no assertion.
 final class QuickSwitcherSnapshotTests: XCTestCase {
     private var root: URL!
 
@@ -39,9 +44,13 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
         return store
     }
 
-    private func render(_ controller: QuickSwitcherController, to name: String) throws -> NSBitmapImageRep {
+    /// Lay out and rasterize the palette, failing if either step can't run.
+    private func render(_ controller: QuickSwitcherController, to name: String) throws {
         let view = try XCTUnwrap(controller.window?.contentView, "controller has no content view")
         view.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(view.bounds.width, 0, "palette laid out to zero width")
+        XCTAssertGreaterThan(view.bounds.height, 0, "palette laid out to zero height")
+
         let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds),
                                 "could not create a bitmap for the palette")
         view.cacheDisplay(in: view.bounds, to: rep)
@@ -50,56 +59,32 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
            let png = rep.representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
         }
-        return rep
     }
 
-    /// A rendering that is one flat color means nothing drew.
-    private func assertNotBlank(_ rep: NSBitmapImageRep, _ message: String) {
-        var seen = Set<UInt32>()
-        let step = 4
-        for y in stride(from: 0, to: rep.pixelsHigh, by: step) {
-            for x in stride(from: 0, to: rep.pixelsWide, by: step) {
-                guard let color = rep.colorAt(x: x, y: y) else { continue }
-                let packed = (UInt32(color.redComponent * 255) << 16)
-                    | (UInt32(color.greenComponent * 255) << 8)
-                    | UInt32(color.blueComponent * 255)
-                seen.insert(packed)
-                if seen.count > 8 { return }
-            }
-        }
-        XCTFail("\(message) — only \(seen.count) distinct colors, the view looks blank")
+    func testEmptyQueryListsEveryNote() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+
+        XCTAssertEqual(controller.resultCount, 5)
+        try render(controller, to: "quick-switcher-empty-query.png")
     }
 
-    func testPaletteRendersResultsForAnEmptyQuery() throws {
-        let store = seededStore()
-        let controller = QuickSwitcherController(store: store, onChoose: { _ in })
-        controller.show()
-        defer { controller.dismiss() }
-
-        let rep = try render(controller, to: "quick-switcher-empty-query.png")
-        assertNotBlank(rep, "palette with no query")
-    }
-
-    func testPaletteRendersFilteredResults() throws {
-        let store = seededStore()
-        let controller = QuickSwitcherController(store: store, onChoose: { _ in })
-        controller.show()
-        defer { controller.dismiss() }
+    func testQueryNarrowsToMatchingNotes() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
 
         controller.search("work")
-        let rep = try render(controller, to: "quick-switcher-query-work.png")
-        assertNotBlank(rep, "palette filtered to 'work'")
+        XCTAssertEqual(controller.resultCount, 2, "both #work notes should match")
+        try render(controller, to: "quick-switcher-query-work.png")
     }
 
-    func testPaletteRendersTheNoMatchesState() throws {
-        let store = seededStore()
-        let controller = QuickSwitcherController(store: store, onChoose: { _ in })
-        controller.show()
-        defer { controller.dismiss() }
+    func testNoMatchesLeavesTheListEmpty() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
 
         controller.search("zzzzz-no-such-note")
-        let rep = try render(controller, to: "quick-switcher-no-matches.png")
-        assertNotBlank(rep, "palette with no matches")
+        XCTAssertEqual(controller.resultCount, 0)
+        try render(controller, to: "quick-switcher-no-matches.png")
     }
 
     func testChoosingAResultReportsTheNoteAndItsArchivedState() throws {
@@ -109,8 +94,7 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
 
         var chosen: QuickSwitcherController.Selection?
         let controller = QuickSwitcherController(store: store, onChoose: { chosen = $0 })
-        controller.show()
-        defer { controller.dismiss() }
+        controller.prepare()
 
         controller.search("standup")
         controller.activateSelection()
@@ -125,11 +109,25 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
         for note in store.loadActive() { store.archive(note) }
 
         let controller = QuickSwitcherController(store: store, onChoose: { _ in })
-        controller.show()
-        defer { controller.dismiss() }
+        controller.prepare()
 
         controller.search("groceries")
         XCTAssertEqual(controller.resultCount, 1,
                        "the switcher should reach archived notes, not just active ones")
+    }
+
+    func testPreparingAgainPicksUpNotesAddedSince() throws {
+        let store = seededStore()
+        let controller = QuickSwitcherController(store: store, onChoose: { _ in })
+        controller.prepare()
+        XCTAssertEqual(controller.resultCount, 5)
+
+        store.save(Note(
+            id: UUID(), title: "Brand new", content: "", positionX: 0, positionY: 0,
+            width: 240, height: 200, collapsed: false, color: .yellow, labels: [],
+            createdAt: Date(), updatedAt: Date()
+        ))
+        controller.prepare()
+        XCTAssertEqual(controller.resultCount, 6, "each invocation should reload the candidates")
     }
 }

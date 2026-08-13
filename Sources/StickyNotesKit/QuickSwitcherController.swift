@@ -59,14 +59,21 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     // MARK: - Presentation
 
     func show() {
-        reloadCandidates()
-        searchField.stringValue = ""
-        runQuery("")
+        prepare()
         positionOnActiveScreen()
 
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(searchField)
+    }
+
+    /// Reload the candidate notes and reset to an empty query, without
+    /// presenting. Split out from `show()` so the palette's contents can be
+    /// built and inspected without taking over the screen.
+    func prepare() {
+        reloadCandidates()
+        searchField.stringValue = ""
+        runQuery("")
     }
 
     func dismiss() {
