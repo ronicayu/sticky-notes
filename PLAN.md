@@ -4,25 +4,30 @@ A phased implementation plan for making this app dramatically better. Each phase
 
 ## Status
 
-**Done: Phase 0, Phase 1, and most of Phase 2.** 245 tests, CI green.
+**All phases implemented.** 362 tests, no build warnings, release bundle builds.
 
 | Phase | State |
 |-------|-------|
 | 0 Foundations | ✅ test target + CI, note cache, storage-error surfacing |
 | 1 Search | ✅ quick switcher, panel search/filter/sort, label show-hide |
-| 2 Editor | ◑ links, editor shortcuts, task counts done — **images (2.2) and wiki links not started** |
-| 3 Capture | ⬜ not started |
-| 4 Windows | ⬜ not started |
-| 5 Data safety | ⬜ not started |
-| 6 Distribution | ⬜ not started |
+| 2 Editor | ✅ links, wiki links, attachments, editor shortcuts, task counts |
+| 3 Capture | ✅ clipboard hotkey, Services entry, `stickynotes://` scheme |
+| 4 Windows | ✅ dark mode, edge snapping, arrange, per-note float level |
+| 5 Data safety | ✅ conflict merging, recoverable trash with a panel tab |
+| 6 Distribution | ✅ welcome note, accessibility, signing + notarization in the build script |
 
 Bugs found and fixed along the way, each with a regression test:
 
 - Nested emphasis (`***x***`) rendered italic-only — `Emphasis` replaced the font `Strong` had set instead of merging traits.
 - Saving the Nth note into a vault re-read the other N-1 looking for an id that wasn't there. 500 saves took ~30s; now ~0.5s.
 - Archive and restore silently did nothing when the storage path went through a symlink — `contentsOfDirectory` resolves symlinks, so directory paths compared as strings never matched.
+- iCloud conflict versions were ignored entirely, so whatever a second Mac wrote was discarded on the next read.
 
-Still open from the phases below: the collapsed-note task badge (2.3), images (2.2), and wiki links (2.1).
+## Deliberately not done
+
+- **Inline image rendering.** Pasting an image saves it and inserts a Markdown reference, but the image isn't drawn in the editor. The note body *is* the saved file, and `NSTextView` only draws attachments at a real attachment character — rendering inline means the editor's string stops being the saved content, which is a change to the save path and deserves its own pass.
+- **Auto-update.** Notarization is wired up; a Sparkle-style update feed is not. It needs a hosting decision first.
+- **The deferred ideas below** (templates, reminders, note graph, iOS companion, AI assist).
 
 ## Context: what exists today
 
