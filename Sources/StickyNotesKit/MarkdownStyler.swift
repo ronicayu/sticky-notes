@@ -72,6 +72,41 @@ enum MarkdownStyler {
         // but people type them constantly. Detect them separately, skipping
         // anything the AST already turned into a link.
         applyBareURLs(in: storage, full: full)
+        applyWikiLinks(in: storage, full: full)
+    }
+
+    /// `[[Some Note]]` — Obsidian's link syntax, which CommonMark sees as
+    /// nested bracket text. Encoded as a `stickynotes-wiki:` URL so the click
+    /// handler can decide between opening one of our notes and handing off to
+    /// Obsidian.
+    private static func applyWikiLinks(in storage: NSTextStorage, full: NSRange) {
+        guard let regex = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+)\]\]"#) else { return }
+        let ns = storage.string as NSString
+
+        for match in regex.matches(in: storage.string, range: full) {
+            let whole = match.range
+            let inner = match.range(at: 1)
+            // A wiki link inside a code span is literal text.
+            if let font = storage.attribute(.font, at: whole.location, effectiveRange: nil) as? NSFont,
+               font.fontDescriptor.symbolicTraits.contains(.monoSpace) { continue }
+
+            let target = ns.substring(with: inner)
+            guard let url = WikiLink.url(for: target) else { continue }
+
+            let scope = NSValue(range: whole)
+            for marker in [NSRange(location: whole.location, length: 2),
+                           NSRange(location: whole.location + whole.length - 2, length: 2)] {
+                storage.addAttributes([
+                    .foregroundColor: markerColor,
+                    .mdMarkerScope: scope
+                ], range: marker)
+            }
+            storage.addAttributes([
+                .link: url,
+                .foregroundColor: linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ], range: inner)
+        }
     }
 
     private static func applyBareURLs(in storage: NSTextStorage, full: NSRange) {

@@ -40,6 +40,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             name: NoteStore.healthDidChange,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWikiLinkClick(_:)),
+            name: TodoTextView.didClickWikiLink,
+            object: nil
+        )
 
         prefetcher.start(at: noteStore.rootURL)
         restoreDailyNoteIfNeeded()
@@ -409,6 +415,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     @objc func revealStorage() {
         NSWorkspace.shared.activateFileViewerSelecting([noteStore.activeURL])
+    }
+
+    /// A `[[wiki link]]` points at one of our notes when a title matches;
+    /// otherwise it's probably a note elsewhere in the vault, so hand it to
+    /// Obsidian rather than doing nothing.
+    @objc private func handleWikiLinkClick(_ notification: Notification) {
+        guard let target = notification.userInfo?["target"] as? String else { return }
+
+        if let match = WikiLink.resolve(target, in: noteStore.loadActive()) {
+            focusNote(id: match.id)
+            return
+        }
+        if let archived = WikiLink.resolve(target, in: noteStore.loadArchived()) {
+            noteStore.restore(archived)
+            focusNote(id: archived.id)
+            return
+        }
+        if let vault = Settings.shared.obsidianVaultPath,
+           let url = WikiLink.obsidianURL(vaultPath: vault, target: target) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: - Storage health

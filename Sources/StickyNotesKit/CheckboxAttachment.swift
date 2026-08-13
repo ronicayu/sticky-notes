@@ -107,14 +107,38 @@ final class TodoTextView: NSTextView {
         guard let value = storage.attribute(.link, at: index, effectiveRange: nil) else { return false }
         let url = (value as? URL) ?? (value as? String).flatMap(URL.init(string:))
         guard let url = url else { return false }
+
+        // Wiki links need the note store to resolve, which the text view has
+        // no business knowing about — hand them to whoever is listening.
+        if let target = WikiLink.target(of: url) {
+            NotificationCenter.default.post(
+                name: TodoTextView.didClickWikiLink,
+                object: self,
+                userInfo: ["target": target]
+            )
+            return true
+        }
         NSWorkspace.shared.open(url)
         return true
     }
 
+    /// Posted when a `[[wiki link]]` is clicked. `userInfo["target"]` is the
+    /// note name it points at.
+    static let didClickWikiLink = Notification.Name("TodoTextView.didClickWikiLink")
+
     /// Pasting a URL over selected text turns the selection into a markdown
     /// link rather than replacing it — the usual reason to paste a URL onto
     /// words is to link them.
+    /// Turn pasteboard contents into an attachment and return the markdown to
+    /// insert, or nil to let the paste proceed normally. Set by the controller,
+    /// which owns the store the file has to be written next to.
+    var attachmentHandler: ((NSPasteboard) -> String?)?
+
     override func paste(_ sender: Any?) {
+        if let markdown = attachmentHandler?(NSPasteboard.general) {
+            insertAsParagraph(markdown)
+            return
+        }
         let selection = selectedRange()
         guard selection.length > 0,
               let pasted = NSPasteboard.general.string(forType: .string)?
@@ -136,6 +160,22 @@ final class TodoTextView: NSTextView {
         textStorage?.replaceCharacters(in: selection, with: replacement)
         didChangeText()
         setSelectedRange(NSRange(location: selection.location + (replacement as NSString).length, length: 0))
+    }
+
+    /// Drop the reference on its own line — an image sitting mid-sentence
+    /// reads as a mistake.
+    private func insertAsParagraph(_ markdown: String) {
+        let selection = selectedRange()
+        let ns = string as NSString
+        var prefix = ""
+        if selection.location > 0, ns.character(at: selection.location - 1) != 0x0A {
+            prefix = "\n"
+        }
+        let text = prefix + markdown + "\n"
+        guard shouldChangeText(in: selection, replacementString: text) else { return }
+        textStorage?.replaceCharacters(in: selection, with: text)
+        didChangeText()
+        setSelectedRange(NSRange(location: selection.location + (text as NSString).length, length: 0))
     }
 
     private func isLinkLike(_ candidate: String) -> Bool {

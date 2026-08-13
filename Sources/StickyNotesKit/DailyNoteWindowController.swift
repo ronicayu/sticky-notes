@@ -6,6 +6,11 @@ import AppKit
 /// formatting. Window chrome (position / size / color) is persisted to
 /// `<vault>/StickyNotes/_daily.json` via `DailyNote.saveState`.
 final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, TodoTextViewDelegate, NoteDragZoneDelegate {
+    /// Only used to locate the attachments folder. The daily note itself is a
+    /// vault file rather than a stored note, but its pasted images belong in
+    /// the same place as everyone else's.
+    private lazy var attachmentStore = NoteStore()
+
 
     private var state: DailyNoteState
     private var currentURL: URL?
@@ -141,6 +146,10 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         window.delegate = self
         textView.delegate = self
         textView.todoDelegate = self
+        textView.attachmentHandler = { [weak self] pasteboard in
+            guard let self = self else { return nil }
+            return Attachments.handlePaste(pasteboard, for: self.attachmentStore)
+        }
 
         setupLayout()
         closeButton.target = self

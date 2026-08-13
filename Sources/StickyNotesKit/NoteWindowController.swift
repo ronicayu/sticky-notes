@@ -9,6 +9,18 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// whether the window belongs on screen under the label filter.
     var labels: [String] { note.labels }
 
+    /// The collapsed title bar is all you can see of a collapsed note, so a
+    /// task list shows its remaining count there. Every path that changes the
+    /// title or the body routes through here so the two can't drift apart.
+    private func refreshCollapsedTitle() {
+        guard let progress = MarkdownEditing.checkboxProgress(in: note.content) else {
+            titleLabel.text = note.title
+            return
+        }
+        let count = "\(progress.done)/\(progress.total)"
+        titleLabel.text = note.title.isEmpty ? count : "\(note.title)   \(count)"
+    }
+
     private let dragZone: NoteDragZone
     private let expandButton: NSButton
     private let trashButton: NSButton
@@ -316,6 +328,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         window.contentMinSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         textView.delegate = self
         textView.todoDelegate = self
+        textView.attachmentHandler = { [weak self] pasteboard in
+            guard let self = self else { return nil }
+            return Attachments.handlePaste(pasteboard, for: self.store)
+        }
         titleField.delegate = self
         layoutManager.delegate = self
         dragZone.delegate = self
@@ -571,6 +587,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     func textDidChange(_ notification: Notification) {
         note.content = textView.string
+        refreshCollapsedTitle()
         MarkdownStyler.apply(to: textView)
         refreshMarkerVisibility()
         updateDateLabel()
@@ -590,7 +607,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     func controlTextDidChange(_ obj: Notification) {
         guard let field = obj.object as? NSTextField, field === titleField else { return }
         note.title = titleField.stringValue
-        titleLabel.text = titleField.stringValue
+        refreshCollapsedTitle()
         updateDateLabel()
         scheduleSave()
         detectTitleSlashTrigger()
@@ -899,7 +916,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         )
         titleField.stringValue = newValue
         note.title = newValue
-        titleLabel.text = newValue
+        refreshCollapsedTitle()
 
         if let editor = titleField.currentEditor() {
             let newPos = loc + (cmd.replacement as NSString).length
@@ -986,7 +1003,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             }
             preCollapseHeight = frame.size.height
 
-            titleLabel.text = note.title
+            refreshCollapsedTitle()
             titleLabel.isHidden = false
             bodyContainer.isHidden = true
             bodyHeightZeroConstraint.isActive = true
@@ -1066,7 +1083,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         if updated.title != note.title {
             note.title = updated.title
             titleField.stringValue = updated.title
-            titleLabel.text = updated.title
+            refreshCollapsedTitle()
         }
         if updated.labels != note.labels {
             note.labels = updated.labels
