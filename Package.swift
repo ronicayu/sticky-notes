@@ -9,13 +9,25 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-markdown", from: "0.4.0")
     ],
     targets: [
-        .executableTarget(
-            name: "StickyNotes",
+        // All app code lives here so the test target can import it. The
+        // executable is only the NSApplication bootstrap.
+        .target(
+            name: "StickyNotesKit",
             dependencies: [
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
                 .product(name: "Markdown", package: "swift-markdown")
             ],
+            path: "Sources/StickyNotesKit"
+        ),
+        .executableTarget(
+            name: "StickyNotes",
+            dependencies: ["StickyNotesKit"],
             path: "Sources/StickyNotes"
+        ),
+        .testTarget(
+            name: "StickyNotesTests",
+            dependencies: ["StickyNotesKit"],
+            path: "Tests/StickyNotesTests"
         )
     ]
 )

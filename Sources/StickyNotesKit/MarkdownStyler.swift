@@ -33,6 +33,12 @@ enum MarkdownStyler {
     /// `updateMarkerVisibility(in:selection:)` to apply the hidden flag.
     static func apply(to textView: NSTextView) {
         guard let storage = textView.textStorage else { return }
+        apply(to: storage)
+    }
+
+    /// Storage-level entry point. Split out from `apply(to:)` so styling can be
+    /// exercised without a view hierarchy.
+    static func apply(to storage: NSTextStorage) {
         let full = NSRange(location: 0, length: storage.length)
         guard full.length > 0 else { return }
 
@@ -337,16 +343,12 @@ private struct StylingVisitor: MarkupWalker {
     // MARK: Inline
 
     mutating func visitStrong(_ strong: Strong) {
-        applyInlineMarker(node: strong, markerLen: 2, innerAttrs: [
-            .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize, weight: .bold)
-        ])
+        applyInlineMarker(node: strong, markerLen: 2, fontTraits: .bold)
         descendInto(strong)
     }
 
     mutating func visitEmphasis(_ emphasis: Emphasis) {
-        applyInlineMarker(node: emphasis, markerLen: 1, innerAttrs: [
-            .font: MarkdownStyler.italicFont(size: MarkdownStyler.baseFontSize)
-        ])
+        applyInlineMarker(node: emphasis, markerLen: 1, fontTraits: .italic)
         descendInto(emphasis)
     }
 
@@ -375,13 +377,23 @@ private struct StylingVisitor: MarkupWalker {
         )
     }
 
-    private func applyInlineMarker(node: Markup, markerLen: Int, innerAttrs: [NSAttributedString.Key: Any]) {
+    private func applyInlineMarker(
+        node: Markup,
+        markerLen: Int,
+        innerAttrs: [NSAttributedString.Key: Any] = [:],
+        fontTraits: NSFontDescriptor.SymbolicTraits = []
+    ) {
         guard let range = node.range, let nsr = table.nsRange(range) else { return }
         guard nsr.length >= markerLen * 2 else { return }
-        applyInlineMarkerRange(nsr, markerLen: markerLen, innerAttrs: innerAttrs)
+        applyInlineMarkerRange(nsr, markerLen: markerLen, innerAttrs: innerAttrs, fontTraits: fontTraits)
     }
 
-    private func applyInlineMarkerRange(_ nsr: NSRange, markerLen: Int, innerAttrs: [NSAttributedString.Key: Any]) {
+    private func applyInlineMarkerRange(
+        _ nsr: NSRange,
+        markerLen: Int,
+        innerAttrs: [NSAttributedString.Key: Any] = [:],
+        fontTraits: NSFontDescriptor.SymbolicTraits = []
+    ) {
         let scope = NSValue(range: nsr)
         let lead  = NSRange(location: nsr.location, length: markerLen)
         let trail = NSRange(location: nsr.location + nsr.length - markerLen, length: markerLen)
@@ -395,11 +407,29 @@ private struct StylingVisitor: MarkupWalker {
         ], range: trail)
 
         let innerLen = nsr.length - markerLen * 2
-        if innerLen > 0 {
-            storage.addAttributes(
-                innerAttrs,
-                range: NSRange(location: nsr.location + markerLen, length: innerLen)
-            )
+        guard innerLen > 0 else { return }
+        let inner = NSRange(location: nsr.location + markerLen, length: innerLen)
+        if !innerAttrs.isEmpty {
+            storage.addAttributes(innerAttrs, range: inner)
+        }
+        if !fontTraits.isEmpty {
+            addFontTraits(fontTraits, in: inner)
+        }
+    }
+
+    /// Merge symbolic traits into whatever font each sub-run already carries,
+    /// rather than overwriting it. Nested emphasis (`***x***`) visits Strong
+    /// then Emphasis over the same text; replacing the font would drop the
+    /// outer trait and render bold-italic as italic.
+    private func addFontTraits(_ traits: NSFontDescriptor.SymbolicTraits, in range: NSRange) {
+        storage.enumerateAttribute(.font, in: range, options: []) { value, subrange, _ in
+            let current = (value as? NSFont) ?? MarkdownStyler.baseFont()
+            var merged = current.fontDescriptor.symbolicTraits
+            merged.formUnion(traits)
+            let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
+            if let font = NSFont(descriptor: descriptor, size: current.pointSize) {
+                storage.addAttribute(.font, value: font, range: subrange)
+            }
         }
     }
 

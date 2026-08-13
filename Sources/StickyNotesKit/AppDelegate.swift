@@ -1,7 +1,9 @@
 import AppKit
 import KeyboardShortcuts
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SettingsCoordinator {
+public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SettingsCoordinator {
+    public override init() { super.init() }
+
     private var statusItem: NSStatusItem!
     private let noteStore = NoteStore()
     private var windowControllers: [UUID: NoteWindowController] = [:]
@@ -17,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Settin
         self?.handleStoreChange()
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    public func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
         setupMenuBar()
         registerHotkeys()
@@ -190,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, Settin
         return "dev"
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
+    public func menuWillOpen(_ menu: NSMenu) {
         hideAllItem.title = (notesHidden ? "Show All Notes  ⌘⇧H" : "Hide All Notes  ⌘⇧H")
         hideAllItem.isEnabled = !windowControllers.isEmpty
 

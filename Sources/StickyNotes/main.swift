@@ -1,4 +1,5 @@
 import AppKit
+import StickyNotesKit
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
