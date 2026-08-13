@@ -170,6 +170,31 @@ final class NoteStoreTests: XCTestCase {
         }
     }
 
+    /// `contentsOfDirectory(at:)` returns URLs with symlinks resolved, so a
+    /// listed file's parent can be `/private/var/…` while the directory we
+    /// asked about is `/var/…`. Comparing those as strings made archive and
+    /// restore silently do nothing for any storage path behind a symlink —
+    /// which includes the standard temporary directory.
+    func testArchiveAndRestoreWorkWhenTheStoragePathGoesThroughASymlink() throws {
+        for format in bothFormats {
+            let store = makeStore(format)
+            let note = makeNote()
+            store.save(note)
+
+            // Reading first is what populated the index with resolved URLs.
+            _ = store.loadActive()
+            _ = store.loadArchived()
+
+            store.archive(note)
+            XCTAssertTrue(store.loadActive().isEmpty, "\(format): archive silently did nothing")
+            XCTAssertEqual(store.loadArchived().count, 1, "\(format)")
+
+            store.restore(note)
+            XCTAssertEqual(store.loadActive().count, 1, "\(format): restore silently did nothing")
+            XCTAssertTrue(store.loadArchived().isEmpty, "\(format)")
+        }
+    }
+
     // MARK: - External deletion (regression guard for 9e14f9d)
 
     func testSaveDoesNotResurrectANoteDeletedOnDisk() throws {

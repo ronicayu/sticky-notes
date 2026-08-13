@@ -14,6 +14,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var storageWarningItem: NSMenuItem!
     private var dailyNoteController: DailyNoteWindowController?
     private var settingsController: SettingsWindowController?
+    private var quickSwitcher: QuickSwitcherController?
 
     private lazy var prefetcher = ICloudPrefetcher { [weak self] in
         // Manual nudge in case FSEvents missed the materialization.
@@ -161,6 +162,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         // Daily actions on top — these are the things you do, not configure.
         menu.addItem(withTitle: "New Note  ⌘⇧S", action: #selector(newNote), keyEquivalent: "")
+        menu.addItem(withTitle: "Find Note…  ⌘⇧F", action: #selector(toggleQuickSwitcher), keyEquivalent: "")
         menu.addItem(withTitle: "Notes  ⌘⇧L", action: #selector(showNotesPanel), keyEquivalent: "")
         hideAllItem = NSMenuItem(title: "Hide All Notes  ⌘⇧H",
                                   action: #selector(toggleHideAll),
@@ -223,6 +225,34 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         KeyboardShortcuts.onKeyDown(for: .hideAll) { [weak self] in
             self?.toggleHideAll()
         }
+        KeyboardShortcuts.onKeyDown(for: .quickSwitcher) { [weak self] in
+            self?.toggleQuickSwitcher()
+        }
+    }
+
+    /// Pressing the hotkey again while the palette is up closes it, so the
+    /// same chord opens and dismisses.
+    @objc func toggleQuickSwitcher() {
+        if quickSwitcher?.isVisible == true {
+            quickSwitcher?.dismiss()
+            return
+        }
+        if quickSwitcher == nil {
+            quickSwitcher = QuickSwitcherController(store: noteStore) { [weak self] selection in
+                self?.reveal(selection)
+            }
+        }
+        quickSwitcher?.show()
+    }
+
+    /// Bring the chosen note to the front, un-hiding and un-archiving as
+    /// needed — picking a result should always end with the note on screen.
+    private func reveal(_ selection: QuickSwitcherController.Selection) {
+        if selection.wasArchived, let note = noteStore.loadNote(id: selection.id, archived: true) {
+            noteStore.restore(note)
+        }
+        if notesHidden { toggleHideAll() }
+        focusNote(id: selection.id)
     }
 
     @objc func toggleHideAll() {

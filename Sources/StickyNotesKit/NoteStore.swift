@@ -211,6 +211,17 @@ final class NoteStore {
     /// call `loadActive()` read fresh data rather than what we just replaced.
     /// Used for changes that move or remove files, and for external changes
     /// reported by the watcher, where we can't know what else shifted.
+    /// Canonical key for a directory.
+    ///
+    /// `contentsOfDirectory(at:)` hands back URLs with symlinks resolved, so a
+    /// listed file's parent is `/private/var/…` while the directory we asked
+    /// about is `/var/…`. Comparing or keying on raw paths makes those two
+    /// look like different directories — which silently broke archive and
+    /// restore for any storage path behind a symlink.
+    private func dirKey(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
     private func notifyChange() {
         invalidateCache()
         notifyObservers()
@@ -228,13 +239,13 @@ final class NoteStore {
     /// Replace-or-append a note in a warm cache. A cold cache is left cold —
     /// a single note is not a directory listing.
     private func upsertInCache(_ note: Note, dir: URL) {
-        guard var notes = cache[dir.path] else { return }
+        guard var notes = cache[dirKey(dir)] else { return }
         if let index = notes.firstIndex(where: { $0.id == note.id }) {
             notes[index] = note
         } else {
             notes.append(note)
         }
-        cache[dir.path] = notes
+        cache[dirKey(dir)] = notes
     }
 
     private func ensureDirectories() {
@@ -260,7 +271,7 @@ final class NoteStore {
             let url = dir.appendingPathComponent("\(id.uuidString).json")
             return FileManager.default.fileExists(atPath: url.path) ? url : nil
         case .markdown:
-            if let cached = markdownPathIndex[id], cached.deletingLastPathComponent().path == dir.path,
+            if let cached = markdownPathIndex[id], dirKey(cached.deletingLastPathComponent()) == dirKey(dir),
                FileManager.default.fileExists(atPath: cached.path) {
                 return cached
             }
@@ -268,7 +279,7 @@ final class NoteStore {
             // note isn't here. (The `fileExists` check above still catches an
             // entry whose file was deleted since we indexed it, which is what
             // keeps the no-resurrect guard working.)
-            if indexedDirs.contains(dir.path) { return nil }
+            if indexedDirs.contains(dirKey(dir)) { return nil }
             // Cold index: scan and rebuild for this dir.
             return scanForId(id, in: dir)
         }
@@ -299,12 +310,12 @@ final class NoteStore {
             markdownPathIndex[note.id] = url
             if note.id == id { match = url }
         }
-        indexedDirs.insert(dir.path)
+        indexedDirs.insert(dirKey(dir))
         return match
     }
 
     private func loadAll(from dir: URL) -> [Note] {
-        if let cached = cache[dir.path] { return cached }
+        if let cached = cache[dirKey(dir)] { return cached }
 
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return []
@@ -318,8 +329,8 @@ final class NoteStore {
             knownIds.insert(note.id)
             notes.append(note)
         }
-        cache[dir.path] = notes
-        indexedDirs.insert(dir.path)
+        cache[dirKey(dir)] = notes
+        indexedDirs.insert(dirKey(dir))
         return notes
     }
 
