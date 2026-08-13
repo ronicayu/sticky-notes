@@ -11,6 +11,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var notesHidden = false
     private var hideAllItem: NSMenuItem!
     private var dailyNoteItem: NSMenuItem!
+    private var storageWarningItem: NSMenuItem!
     private var dailyNoteController: DailyNoteWindowController?
     private var settingsController: SettingsWindowController?
 
@@ -29,6 +30,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             self,
             selector: #selector(handleStoreChange),
             name: NoteStore.didChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(refreshStorageHealth),
+            name: NoteStore.healthDidChange,
             object: nil
         )
 
@@ -129,14 +136,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            // Custom template image renders as the sticky-note silhouette and
-            // gets tinted automatically by the system (light/dark/click).
-            if let icon = NSImage(named: "MenuBarIcon") {
-                icon.isTemplate = true
-                button.image = icon
-            } else {
-                button.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "Sticky Notes")
-            }
+            applyNormalMenuBarIcon(to: button)
         }
 
         let menu = NSMenu()
@@ -149,6 +149,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         )
         versionItem.isEnabled = false
         menu.addItem(versionItem)
+
+        // Hidden unless a write has actually failed; see refreshStorageHealth.
+        storageWarningItem = NSMenuItem(title: "",
+                                        action: #selector(showStorageFailure),
+                                        keyEquivalent: "")
+        storageWarningItem.isHidden = true
+        menu.addItem(storageWarningItem)
+
         menu.addItem(.separator())
 
         // Daily actions on top — these are the things you do, not configure.
@@ -304,6 +312,62 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     @objc func revealStorage() {
         NSWorkspace.shared.activateFileViewerSelecting([noteStore.activeURL])
+    }
+
+    // MARK: - Storage health
+
+    /// Swap the menu-bar icon for a warning and expose the failing file while
+    /// notes aren't reaching disk. A silently failed save looks identical to a
+    /// successful one, so this is the only signal the user gets.
+    @objc private func refreshStorageHealth() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let button = self.statusItem?.button else { return }
+            if let failure = self.noteStore.lastFailure {
+                button.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
+                                       accessibilityDescription: "Sticky Notes — can't save")
+                button.image?.isTemplate = true
+                button.toolTip = "Sticky Notes can't save to \(failure.fileName)"
+                self.storageWarningItem.title = "⚠︎ Couldn't save \(failure.fileName)"
+                self.storageWarningItem.isHidden = false
+            } else {
+                self.applyNormalMenuBarIcon(to: button)
+                button.toolTip = nil
+                self.storageWarningItem.isHidden = true
+            }
+        }
+    }
+
+    /// Custom template image renders as the sticky-note silhouette and gets
+    /// tinted automatically by the system (light/dark/click).
+    private func applyNormalMenuBarIcon(to button: NSStatusBarButton) {
+        if let icon = NSImage(named: "MenuBarIcon") {
+            icon.isTemplate = true
+            button.image = icon
+        } else {
+            button.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "Sticky Notes")
+        }
+    }
+
+    @objc private func showStorageFailure() {
+        guard let failure = noteStore.lastFailure else { return }
+        let alert = NSAlert()
+        alert.messageText = "Couldn't save \(failure.fileName)"
+        alert.informativeText = """
+        \(failure.error.localizedDescription)
+
+        The note is still open and its text is safe — it just isn't on disk \
+        yet. Sticky Notes keeps retrying as you edit. Check that the storage \
+        folder exists and the disk isn't full.
+
+        Location: \(failure.url.deletingLastPathComponent().path)
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Show Storage Folder")
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            revealStorage()
+        }
     }
 
     // MARK: - SettingsCoordinator

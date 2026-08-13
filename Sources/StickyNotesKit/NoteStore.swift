@@ -5,8 +5,27 @@ enum StorageFormat {
     case markdown   // Obsidian vault — `.md` with YAML frontmatter
 }
 
+/// A write or move that failed twice. Surfaced to the user rather than
+/// swallowed — a full disk or a revoked vault permission would otherwise look
+/// exactly like a note that saved fine.
+struct StorageFailure {
+    let url: URL
+    let error: Error
+    let date: Date
+
+    var fileName: String { url.lastPathComponent }
+}
+
 final class NoteStore {
     static let didChange = Notification.Name("NoteStore.didChange")
+
+    /// Posted when `lastFailure` changes in either direction — a new failure,
+    /// or a later write succeeding and clearing it.
+    static let healthDidChange = Notification.Name("NoteStore.healthDidChange")
+
+    /// The most recent unrecovered storage failure, or nil when writes are
+    /// landing. Read by the menu bar to decide whether to show a warning.
+    private(set) var lastFailure: StorageFailure?
 
     private(set) var rootURL: URL
     private(set) var format: StorageFormat
@@ -81,7 +100,9 @@ final class NoteStore {
             return
         }
         let url = existingURL(for: note.id, in: activeURL) ?? generateURL(for: note, in: activeURL)
-        write(note, to: url)
+        // Nothing reached disk — don't record the path or cache the note as
+        // saved, so the next attempt retries from a clean slate.
+        guard write(note, to: url) else { return }
         markdownPathIndex[note.id] = url
         knownIds.insert(note.id)
 
@@ -109,7 +130,7 @@ final class NoteStore {
     func archive(_ note: Note) {
         guard let from = existingURL(for: note.id, in: activeURL) else { return }
         let to = generateURL(for: note, in: archiveURL)
-        moveFile(from: from, to: to)
+        guard moveFile(from: from, to: to) else { return }
         markdownPathIndex[note.id] = to
         notifyChange()
     }
@@ -126,7 +147,7 @@ final class NoteStore {
     func restore(_ note: Note) {
         guard let from = existingURL(for: note.id, in: archiveURL) else { return }
         let to = generateURL(for: note, in: activeURL)
-        moveFile(from: from, to: to)
+        guard moveFile(from: from, to: to) else { return }
         markdownPathIndex[note.id] = to
 
         // Force-expand on restore so the content is immediately visible.
@@ -313,21 +334,66 @@ final class NoteStore {
         }
     }
 
-    private func write(_ note: Note, to url: URL) {
-        switch format {
-        case .json:
-            guard let data = try? encoder.encode(note) else { return }
-            try? data.write(to: url, options: .atomic)
-        case .markdown:
-            let raw = renderMarkdown(note)
-            try? raw.write(to: url, atomically: true, encoding: .utf8)
+    /// Write a note, retrying once. Most failures here are transient — a sync
+    /// agent holding the file, or the containing directory having just been
+    /// moved — so a second attempt after recreating the directory usually
+    /// lands. A failure that survives the retry is reported, not dropped.
+    @discardableResult
+    private func write(_ note: Note, to url: URL) -> Bool {
+        do {
+            try writeOnce(note, to: url)
+            recordSuccess()
+            return true
+        } catch {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            do {
+                try writeOnce(note, to: url)
+                recordSuccess()
+                return true
+            } catch {
+                recordFailure(url: url, error: error)
+                return false
+            }
         }
     }
 
-    private func moveFile(from: URL, to: URL) {
+    private func writeOnce(_ note: Note, to url: URL) throws {
+        switch format {
+        case .json:
+            try encoder.encode(note).write(to: url, options: .atomic)
+        case .markdown:
+            try renderMarkdown(note).write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    @discardableResult
+    private func moveFile(from: URL, to: URL) -> Bool {
         let fm = FileManager.default
         try? fm.removeItem(at: to)
-        try? fm.moveItem(at: from, to: to)
+        do {
+            try fm.moveItem(at: from, to: to)
+            recordSuccess()
+            return true
+        } catch {
+            recordFailure(url: to, error: error)
+            return false
+        }
+    }
+
+    // MARK: - Health
+
+    private func recordFailure(url: URL, error: Error) {
+        lastFailure = StorageFailure(url: url, error: error, date: Date())
+        NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
+    }
+
+    private func recordSuccess() {
+        guard lastFailure != nil else { return }
+        lastFailure = nil
+        NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
     }
 
     // MARK: - Markdown serialization
