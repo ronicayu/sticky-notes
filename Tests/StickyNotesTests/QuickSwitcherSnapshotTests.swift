@@ -92,16 +92,18 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
         let archived = try XCTUnwrap(store.loadActive().first(where: { $0.title == "Standup" }))
         store.archive(archived)
 
-        var chosen: QuickSwitcherController.Selection?
+        var chosen: QuickSwitcherController.Outcome?
         let controller = QuickSwitcherController(store: store, onChoose: { chosen = $0 })
         controller.prepare()
 
         controller.search("standup")
         controller.activateSelection()
 
-        XCTAssertEqual(chosen?.id, archived.id)
-        XCTAssertEqual(chosen?.wasArchived, true,
-                       "the caller has to restore an archived note before focusing it")
+        guard case let .open(id, wasArchived)? = chosen else {
+            return XCTFail("expected an open outcome, got \(String(describing: chosen))")
+        }
+        XCTAssertEqual(id, archived.id)
+        XCTAssertTrue(wasArchived, "the caller has to restore an archived note before focusing it")
     }
 
     func testArchivedNotesAreSearchable() throws {
@@ -114,6 +116,63 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
         controller.search("groceries")
         XCTAssertEqual(controller.resultCount, 1,
                        "the switcher should reach archived notes, not just active ones")
+    }
+
+    /// A search that finds nothing is itself a capture intent.
+    func testReturnOnNoMatchesAsksForANewNote() throws {
+        var chosen: QuickSwitcherController.Outcome?
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { chosen = $0 })
+        controller.prepare()
+
+        controller.search("dentist appointment friday")
+        XCTAssertEqual(controller.resultCount, 0, "precondition: nothing should match")
+        controller.activateSelection()
+
+        guard case let .create(title)? = chosen else {
+            return XCTFail("expected a create outcome, got \(String(describing: chosen))")
+        }
+        XCTAssertEqual(title, "dentist appointment friday",
+                       "what was typed should become the new note's title")
+    }
+
+    func testCreatingIsAvailableEvenWhenSomethingMatched() throws {
+        var chosen: QuickSwitcherController.Outcome?
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { chosen = $0 })
+        controller.prepare()
+
+        controller.search("Groceries")
+        XCTAssertGreaterThan(controller.resultCount, 0, "precondition: something should match")
+        controller.createFromQuery()
+
+        guard case let .create(title)? = chosen else {
+            return XCTFail("a near-match must not block making a new note")
+        }
+        XCTAssertEqual(title, "Groceries")
+    }
+
+    /// A blank query lists everything, so Return there opens the highlighted
+    /// note — creating is only the fallback when nothing matched.
+    func testReturnOnABlankQueryOpensRatherThanCreates() {
+        var chosen: QuickSwitcherController.Outcome?
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { chosen = $0 })
+        controller.prepare()
+
+        controller.search("   ")
+        controller.activateSelection()
+
+        guard case .open? = chosen else {
+            return XCTFail("expected an open outcome, got \(String(describing: chosen))")
+        }
+    }
+
+    func testCreatingNeedsSomethingTyped() {
+        var chosen: QuickSwitcherController.Outcome?
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { chosen = $0 })
+        controller.prepare()
+
+        controller.search("   ")
+        controller.createFromQuery()
+        XCTAssertNil(chosen, "whitespace is not a title — no untitled note should be created")
     }
 
     func testPreparingAgainPicksUpNotesAddedSince() throws {

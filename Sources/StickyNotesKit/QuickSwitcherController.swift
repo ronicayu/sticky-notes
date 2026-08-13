@@ -8,13 +8,23 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     /// What the caller should do with the chosen note. Archived notes are
     /// restored first, which is why the controller reports intent rather than
     /// acting on the store itself.
+    enum Outcome {
+        /// Open an existing note, restoring it first when it was archived.
+        case open(id: UUID, wasArchived: Bool)
+        /// Nothing matched (or the user asked for a new note anyway) — make
+        /// one titled with what they typed. Searching for something that
+        /// isn't there is itself a capture intent.
+        case create(title: String)
+    }
+
+    /// Kept for the archived-restore path; `Outcome` is what callers act on.
     struct Selection {
         let id: UUID
         let wasArchived: Bool
     }
 
     private let store: NoteStore
-    private let onChoose: (Selection) -> Void
+    private let onChoose: (Outcome) -> Void
 
     private let searchField = QuickSwitcherSearchField()
     private let tableView = NSTableView()
@@ -28,7 +38,7 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     private var archivedIds: Set<UUID> = []
     private var results: [NoteMatch] = []
 
-    init(store: NoteStore, onChoose: @escaping (Selection) -> Void) {
+    init(store: NoteStore, onChoose: @escaping (Outcome) -> Void) {
         self.store = store
         self.onChoose = onChoose
 
@@ -117,6 +127,7 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
         searchField.delegate = self
         searchField.onMoveSelection = { [weak self] delta in self?.moveSelection(by: delta) }
         searchField.onCommit = { [weak self] in self?.activateSelection() }
+        searchField.onCreate = { [weak self] in self?.createFromQuery() }
 
         let divider = NSBox()
         divider.translatesAutoresizingMaskIntoConstraints = false
@@ -208,10 +219,14 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
         if candidates.isEmpty {
             statusLabel.stringValue = "No notes yet — ⌘⇧S makes one"
         } else if results.isEmpty {
-            statusLabel.stringValue = "No matches for “\(query)”"
+            let name = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            statusLabel.stringValue = name.isEmpty
+                ? "No matches"
+                : "No matches  ·  ↩ to create “\(name)”"
         } else {
             let noun = results.count == 1 ? "note" : "notes"
-            statusLabel.stringValue = "\(results.count) \(noun)  ·  ↑↓ to move  ·  ↩ to open  ·  esc to close"
+            statusLabel.stringValue =
+                "\(results.count) \(noun)  ·  ↑↓ to move  ·  ↩ to open  ·  ⌥↩ to create  ·  esc to close"
         }
     }
 
@@ -231,16 +246,28 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
         choose(results[row])
     }
 
-    /// Open the highlighted result — what Return does.
+    /// What Return does: open the highlighted result, or — when nothing
+    /// matched — create a note named after the query.
     func activateSelection() {
         let row = tableView.selectedRow
-        guard row >= 0 && row < results.count else { return }
+        guard row >= 0 && row < results.count else {
+            createFromQuery()
+            return
+        }
         choose(results[row])
     }
 
     private func choose(_ match: NoteMatch) {
         dismiss()
-        onChoose(Selection(id: match.note.id, wasArchived: archivedIds.contains(match.note.id)))
+        onChoose(.open(id: match.note.id, wasArchived: archivedIds.contains(match.note.id)))
+    }
+
+    /// Make a note titled with the current query.
+    func createFromQuery() {
+        let title = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        dismiss()
+        onChoose(.create(title: title))
     }
 
     // MARK: - Table
@@ -277,6 +304,7 @@ private final class QuickSwitcherPanel: NSPanel {
 private final class QuickSwitcherSearchField: NSTextField {
     var onMoveSelection: ((Int) -> Void)?
     var onCommit: (() -> Void)?
+    var onCreate: (() -> Void)?
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
@@ -288,7 +316,12 @@ private final class QuickSwitcherSearchField: NSTextField {
         switch Int(event.keyCode) {
         case 125: onMoveSelection?(1)      // down arrow
         case 126: onMoveSelection?(-1)     // up arrow
-        case 36, 76: onCommit?()           // return, enter
+        case 36, 76:                       // return, enter
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option) {
+                onCreate?()
+            } else {
+                onCommit?()
+            }
         default: super.keyDown(with: event)
         }
     }

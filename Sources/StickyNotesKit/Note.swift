@@ -162,20 +162,20 @@ struct Note: Codable, Identifiable {
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
 
-    static func makeNew() -> Note {
-        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let w = 240.0, h = 200.0
-        let x = Double.random(in: 80...(screen.width - w - 80))
-        let y = Double.random(in: 120...(screen.height - h - 120))
+    /// A new note at `frame`. Callers pass real screen geometry — this used
+    /// to invent a 1440x900 screen and pick a random spot inside it, which put
+    /// notes off screen on other displays and made each new note a scavenger
+    /// hunt. See `NotePlacement`.
+    static func makeNew(frame: CGRect) -> Note {
         let now = Date()
         return Note(
             id: UUID(),
             title: "",
             content: "",
-            positionX: x,
-            positionY: y,
-            width: w,
-            height: h,
+            positionX: Double(frame.origin.x),
+            positionY: Double(frame.origin.y),
+            width: Double(frame.size.width),
+            height: Double(frame.size.height),
             collapsed: false,
             color: Settings.shared.defaultNoteColor,
             labels: [],

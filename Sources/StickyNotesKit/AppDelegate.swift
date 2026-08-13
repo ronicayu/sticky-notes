@@ -16,6 +16,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var dailyNoteController: DailyNoteWindowController?
     private var settingsController: SettingsWindowController?
     private var quickSwitcher: QuickSwitcherController?
+    /// Anchor for the new-note cascade. Reset when the last note is closed so
+    /// a fresh desk starts from the top again.
+    private var lastNewNoteFrame: NSRect?
 
     private lazy var prefetcher = ICloudPrefetcher { [weak self] in
         // Manual nudge in case FSEvents missed the materialization.
@@ -289,21 +292,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             return
         }
         if quickSwitcher == nil {
-            quickSwitcher = QuickSwitcherController(store: noteStore) { [weak self] selection in
-                self?.reveal(selection)
+            quickSwitcher = QuickSwitcherController(store: noteStore) { [weak self] outcome in
+                self?.handle(outcome)
             }
         }
         quickSwitcher?.show()
     }
 
-    /// Bring the chosen note to the front, un-hiding and un-archiving as
-    /// needed — picking a result should always end with the note on screen.
-    private func reveal(_ selection: QuickSwitcherController.Selection) {
-        if selection.wasArchived, let note = noteStore.loadNote(id: selection.id, archived: true) {
-            noteStore.restore(note)
+    /// Act on a quick-switcher result. Picking one should always end with a
+    /// note on screen — un-hiding, un-archiving, or creating as needed.
+    private func handle(_ outcome: QuickSwitcherController.Outcome) {
+        switch outcome {
+        case let .open(id, wasArchived):
+            if wasArchived, let note = noteStore.loadNote(id: id, archived: true) {
+                noteStore.restore(note)
+            }
+            if notesHidden { toggleHideAll() }
+            focusNote(id: id)
+
+        case let .create(title):
+            // Searching for a note that isn't there is a capture intent —
+            // keep the typed words as the title and start in the body.
+            makeNote(title: title)
         }
-        if notesHidden { toggleHideAll() }
-        focusNote(id: selection.id)
     }
 
     @objc func toggleHideAll() {
@@ -417,8 +428,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         applyVisibility()
     }
 
+    /// Pressing the chord again while an untouched new note is focused means
+    /// "never mind" — the same toggle the quick switcher has.
     @objc func newNote() {
+        if let focused = focusedController(), focused.isAbandonedCapture {
+            focused.discardAbandonedCapture()
+            return
+        }
         makeNote()
+    }
+
+    private func focusedController() -> NoteWindowController? {
+        windowControllers.values.first { $0.window?.isKeyWindow == true }
     }
 
     /// Create, save, and present a note. Everything that captures a note —
@@ -434,7 +455,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // notes back so the new one isn't the only thing visible.
         if notesHidden { toggleHideAll() }
 
-        var note = Note.makeNew()
+        var note = Note.makeNew(frame: nextNoteFrame())
         if let title = title { note.title = title }
         if let color = color { note.color = color }
         note.content = text
@@ -451,6 +472,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             windowControllers[note.id]?.focusBodyEnd()
         }
         return note.id
+    }
+
+    /// Frame for the next new note: cascading from the last one created this
+    /// session, on whichever screen the pointer is on.
+    private func nextNoteFrame() -> NSRect {
+        let screen = NotePlacement.screenUnderPointer(
+            mouse: NSEvent.mouseLocation,
+            screens: NSScreen.screens.map(\.visibleFrame),
+            main: NSScreen.main?.visibleFrame
+        ) ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+
+        let frame = NotePlacement.next(previous: lastNewNoteFrame, screen: screen)
+        lastNewNoteFrame = frame
+        return frame
     }
 
     /// New note pre-filled from the clipboard. Pasted images and files are
@@ -502,8 +537,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         case let .search(query):
             if quickSwitcher == nil {
-                quickSwitcher = QuickSwitcherController(store: noteStore) { [weak self] selection in
-                    self?.reveal(selection)
+                quickSwitcher = QuickSwitcherController(store: noteStore) { [weak self] outcome in
+                    self?.handle(outcome)
                 }
             }
             quickSwitcher?.show()

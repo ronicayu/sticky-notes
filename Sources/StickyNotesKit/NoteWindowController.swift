@@ -58,6 +58,30 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private var isHovering = false
     private var pendingExternalContent: String?
 
+    /// True until the user types into this note. An untouched note left by a
+    /// misfired hotkey is swept up on blur; a note that was typed into is
+    /// never discarded automatically, even if it is empty now.
+    private(set) var wasNeverEdited = true
+
+    /// A note is disposable when nothing was ever typed into it and it holds
+    /// nothing — the exact shape a mis-pressed ⌘⇧S leaves behind.
+    var isAbandonedCapture: Bool {
+        wasNeverEdited
+            && note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Discard without archiving. Used for abandoned captures, which should
+    /// leave no trace at all.
+    func discardAbandonedCapture() {
+        savingDisabled = true
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        store.discardActive(note)
+        window?.close()
+        onClosed(note.id)
+    }
+
     /// Height of the chrome strip when expanded.
     static let chromeHeight: CGFloat = 22
     /// Height of the title row sitting below the chrome when expanded.
@@ -627,6 +651,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        // A hotkey misfire leaves an untouched empty note on the desk forever.
+        // Sweep it up when focus moves on, but only if nothing was ever typed.
+        if isAbandonedCapture {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.isAbandonedCapture else { return }
+                self.discardAbandonedCapture()
+            }
+            return
+        }
         updateAlpha()
         updateChromeVisibility()
         hideLabelCompletion()
@@ -684,6 +717,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     func textDidChange(_ notification: Notification) {
         note.content = textView.string
+        wasNeverEdited = false
         refreshCollapsedTitle()
         MarkdownStyler.apply(to: textView)
         refreshMarkerVisibility()
@@ -704,6 +738,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     func controlTextDidChange(_ obj: Notification) {
         guard let field = obj.object as? NSTextField, field === titleField else { return }
         note.title = titleField.stringValue
+        wasNeverEdited = false
         refreshCollapsedTitle()
         updateDateLabel()
         scheduleSave()

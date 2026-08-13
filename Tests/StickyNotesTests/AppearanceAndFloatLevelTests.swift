@@ -80,7 +80,7 @@ final class NoteFloatLevelTests: XCTestCase {
     }
 
     func testNewNotesFloatAboveEverything() {
-        XCTAssertEqual(Note.makeNew().floatLevel, .floating)
+        XCTAssertEqual(Note.makeNew(frame: CGRect(x: 0, y: 0, width: 240, height: 200)).floatLevel, .floating)
     }
 
     func testFloatLevelSurvivesBothStorageFormats() throws {

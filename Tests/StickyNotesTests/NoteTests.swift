@@ -83,22 +83,28 @@ final class NoteTests: XCTestCase {
 
     // MARK: - New notes
 
+    private static let sampleFrame = CGRect(x: 100, y: 200, width: 240, height: 200)
+
     func testNewNoteStartsEmptyAndExpanded() {
-        let note = Note.makeNew()
+        let note = Note.makeNew(frame: NoteTests.sampleFrame)
         XCTAssertTrue(note.content.isEmpty)
         XCTAssertTrue(note.title.isEmpty)
         XCTAssertFalse(note.collapsed)
         XCTAssertTrue(note.labels.isEmpty)
     }
 
-    func testNewNoteHasAUsableFrameAndDistinctIdentity() {
-        let a = Note.makeNew()
-        let b = Note.makeNew()
+    func testNewNoteUsesTheFrameItWasGiven() {
+        let note = Note.makeNew(frame: NoteTests.sampleFrame)
+        XCTAssertEqual(note.positionX, 100)
+        XCTAssertEqual(note.positionY, 200)
+        XCTAssertEqual(note.width, 240)
+        XCTAssertEqual(note.height, 200)
+    }
+
+    func testEachNewNoteHasItsOwnIdentity() {
+        let a = Note.makeNew(frame: NoteTests.sampleFrame)
+        let b = Note.makeNew(frame: NoteTests.sampleFrame)
         XCTAssertNotEqual(a.id, b.id)
-        XCTAssertGreaterThan(a.width, 0)
-        XCTAssertGreaterThan(a.height, 0)
-        XCTAssertGreaterThanOrEqual(a.positionX, 0)
-        XCTAssertGreaterThanOrEqual(a.positionY, 0)
     }
 
     // MARK: - Colors
