@@ -26,6 +26,28 @@ final class NoteStore {
     /// Cleared in discardActive / deleteForever.
     private var knownIds = Set<UUID>()
 
+    /// Decoded notes keyed by directory path. Without it every panel refresh,
+    /// window reconcile, and `allLabels()` call re-reads and re-parses the
+    /// whole tree — `allLabels()` alone read it twice.
+    ///
+    /// Dropped wholesale by `notifyChange()`, which runs for both our own
+    /// writes and external ones. FSEvents reports changes per directory rather
+    /// than per file, so a whole-tree rescan is the granularity we'd get
+    /// anyway; the win is skipping the rescan while nothing is changing.
+    ///
+    /// Everything here is main-queue only: `FileWatcher` sets its FSEvents
+    /// dispatch queue to main, so the invalidation and the reads that
+    /// repopulate it can't interleave.
+    private var cache: [String: [Note]] = [:]
+
+    /// Directory paths whose `markdownPathIndex` entries are known to be
+    /// complete, because we've read every file in them. Lets a lookup miss be
+    /// trusted instead of triggering another full scan — without it, saving
+    /// the Nth note in a vault re-reads the other N-1 looking for an id that
+    /// isn't there. Dropped alongside `cache` whenever the tree changes
+    /// underneath us.
+    private var indexedDirs: Set<String> = []
+
     var activeURL: URL { rootURL.appendingPathComponent("notes", isDirectory: true) }
     var archiveURL: URL { rootURL.appendingPathComponent("archive", isDirectory: true) }
 
@@ -62,7 +84,12 @@ final class NoteStore {
         write(note, to: url)
         markdownPathIndex[note.id] = url
         knownIds.insert(note.id)
-        notifyChange()
+
+        // A save touches exactly one known file, so patch the cache rather
+        // than dropping it. Debounced saves fire on every keystroke; throwing
+        // the tree away each time would make the cache useless while typing.
+        upsertInCache(note, dir: activeURL)
+        notifyObservers()
     }
 
     func loadActive() -> [Note] {
@@ -159,8 +186,34 @@ final class NoteStore {
 
     // MARK: - Internal
 
+    /// Drop the cache before telling anyone, so observers that immediately
+    /// call `loadActive()` read fresh data rather than what we just replaced.
+    /// Used for changes that move or remove files, and for external changes
+    /// reported by the watcher, where we can't know what else shifted.
     private func notifyChange() {
+        invalidateCache()
+        notifyObservers()
+    }
+
+    private func invalidateCache() {
+        cache.removeAll()
+        indexedDirs.removeAll()
+    }
+
+    private func notifyObservers() {
         NotificationCenter.default.post(name: NoteStore.didChange, object: self)
+    }
+
+    /// Replace-or-append a note in a warm cache. A cold cache is left cold —
+    /// a single note is not a directory listing.
+    private func upsertInCache(_ note: Note, dir: URL) {
+        guard var notes = cache[dir.path] else { return }
+        if let index = notes.firstIndex(where: { $0.id == note.id }) {
+            notes[index] = note
+        } else {
+            notes.append(note)
+        }
+        cache[dir.path] = notes
     }
 
     private func ensureDirectories() {
@@ -190,7 +243,12 @@ final class NoteStore {
                FileManager.default.fileExists(atPath: cached.path) {
                 return cached
             }
-            // Cold cache or stale entry: scan and rebuild for this dir.
+            // The index covers this directory, so a miss is the answer — the
+            // note isn't here. (The `fileExists` check above still catches an
+            // entry whose file was deleted since we indexed it, which is what
+            // keeps the no-resurrect guard working.)
+            if indexedDirs.contains(dir.path) { return nil }
+            // Cold index: scan and rebuild for this dir.
             return scanForId(id, in: dir)
         }
     }
@@ -208,20 +266,25 @@ final class NoteStore {
         }
     }
 
+    /// Read every file in `dir` to locate `id`, indexing all of them on the
+    /// way so the next lookup here is free.
     private func scanForId(_ id: UUID, in dir: URL) -> URL? {
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return nil
         }
+        var match: URL?
         for url in files where url.pathExtension == fileExtension {
-            if let note = read(url), note.id == id {
-                markdownPathIndex[id] = url
-                return url
-            }
+            guard let note = read(url) else { continue }
+            markdownPathIndex[note.id] = url
+            if note.id == id { match = url }
         }
-        return nil
+        indexedDirs.insert(dir.path)
+        return match
     }
 
     private func loadAll(from dir: URL) -> [Note] {
+        if let cached = cache[dir.path] { return cached }
+
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return []
         }
@@ -234,6 +297,8 @@ final class NoteStore {
             knownIds.insert(note.id)
             notes.append(note)
         }
+        cache[dir.path] = notes
+        indexedDirs.insert(dir.path)
         return notes
     }
 
