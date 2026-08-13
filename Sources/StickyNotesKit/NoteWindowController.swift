@@ -328,6 +328,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         window.contentMinSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         textView.delegate = self
         textView.todoDelegate = self
+        applyFloatLevel()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applyAppearanceColors),
+            name: Appearance.didChange,
+            object: nil
+        )
         textView.attachmentHandler = { [weak self] pasteboard in
             guard let self = self else { return nil }
             return Attachments.handlePaste(pasteboard, for: self.store)
@@ -498,16 +505,65 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             if color == note.color { item.state = .on }
             menu.addItem(item)
         }
+        menu.addItem(.separator())
+        for level in NoteFloatLevel.allCases {
+            let item = NSMenuItem(
+                title: level.displayName,
+                action: #selector(pickFloatLevel(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = level.rawValue
+            if level == note.floatLevel { item.state = .on }
+            menu.addItem(item)
+        }
+
         let p = NSPoint(x: colorButton.bounds.minX, y: colorButton.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: p, in: colorButton)
+    }
+
+    @objc private func pickFloatLevel(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let level = NoteFloatLevel(rawValue: raw) else { return }
+        note.floatLevel = level
+        applyFloatLevel()
+        scheduleSave()
+    }
+
+    /// A desktop-level note sits below other apps but above the wallpaper, and
+    /// stops following you across Spaces — it belongs to the desk it's on.
+    private func applyFloatLevel() {
+        guard let window = window else { return }
+        switch note.floatLevel {
+        case .floating:
+            window.level = .floating
+            window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        case .desktop:
+            window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+            window.collectionBehavior = [.stationary]
+        }
     }
 
     @objc private func pickColor(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let color = NoteColor(rawValue: raw) else { return }
         note.color = color
-        backgroundView.layer?.backgroundColor = NSColor(hex: color.bodyHex)?.cgColor
+        applyAppearanceColors()
         scheduleSave()
+    }
+
+    /// Repaint everything whose color depends on the note's color or the
+    /// system appearance. Note windows are borderless and paint their own
+    /// paper, so AppKit's automatic appearance handling never reaches them.
+    @objc func applyAppearanceColors() {
+        backgroundView.layer?.backgroundColor = NSColor(hex: note.color.bodyHex)?.cgColor
+        titleField.textColor = MarkdownStyler.bodyTextColor
+        titleLabel.textColor = MarkdownStyler.bodyTextColor
+        textView.insertionPointColor = MarkdownStyler.bodyTextColor
+        textView.typingAttributes[.foregroundColor] = MarkdownStyler.bodyTextColor
+        MarkdownStyler.apply(to: textView)
+        refreshMarkerVisibility()
+        textView.needsDisplay = true
     }
 
     private static func colorSwatch(for color: NoteColor) -> NSImage {
@@ -527,6 +583,32 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     // MARK: - NSWindowDelegate
+
+    func dragZoneDidEndDrag(suppressSnapping: Bool) {
+        guard !suppressSnapping, let window = window else { return }
+        let others = NSApp.windows
+            .filter { $0 !== window && $0 is NoteWindow && $0.isVisible }
+            .map { $0.frame }
+        let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        guard !screen.isEmpty else { return }
+
+        let snapped = WindowArrangement.snap(window.frame, toScreen: screen, others: others)
+        guard snapped != window.frame else { return }
+        window.setFrameOrigin(snapped.origin)
+    }
+
+    /// Move this note to `frame`, animated. Used by the Arrange command.
+    func setArrangedFrame(_ frame: NSRect, animated: Bool = true) {
+        guard let window = window else { return }
+        window.setFrame(frame, display: true, animate: animated)
+        note.positionX = Double(frame.origin.x)
+        note.positionY = Double(frame.origin.y)
+        scheduleSave()
+    }
+
+    /// Current frame and whether the note is collapsed — the Arrange command
+    /// needs both to lay notes out without resizing them.
+    var arrangementSize: NSSize { window?.frame.size ?? NSSize(width: note.width, height: note.height) }
 
     func windowDidMove(_ notification: Notification) {
         guard let frame = window?.frame else { return }

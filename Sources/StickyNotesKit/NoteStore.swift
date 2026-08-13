@@ -421,6 +421,7 @@ final class NoteStore {
             ("width", String(format: "%.2f", note.width)),
             ("height", String(format: "%.2f", note.height)),
             ("collapsed", note.collapsed ? "true" : "false"),
+            ("float", note.floatLevel.rawValue),
             ("created", iso8601.string(from: note.createdAt)),
             ("updated", iso8601.string(from: note.updatedAt))
         ]
@@ -439,6 +440,7 @@ final class NoteStore {
         let width = Double(doc.value(for: "width") ?? "") ?? 240
         let height = Double(doc.value(for: "height") ?? "") ?? 200
         let collapsed = (doc.value(for: "collapsed") ?? "false") == "true"
+        let floatLevel = doc.value(for: "float").flatMap(NoteFloatLevel.init(rawValue:)) ?? .floating
         let createdAt = doc.value(for: "created").flatMap(iso8601.date(from:)) ?? Date()
         let updatedAt = doc.value(for: "updated").flatMap(iso8601.date(from:)) ?? createdAt
         return Note(
@@ -452,6 +454,7 @@ final class NoteStore {
             collapsed: collapsed,
             color: color,
             labels: labels,
+            floatLevel: floatLevel,
             createdAt: createdAt,
             updatedAt: updatedAt
         )

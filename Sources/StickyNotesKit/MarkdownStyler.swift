@@ -14,7 +14,11 @@ extension NSAttributedString.Key {
 
 /// Colors and metrics shared by the styler and the views that host it.
 extension MarkdownStyler {
-    static let linkColor = NSColor(srgbRed: 0.13, green: 0.38, blue: 0.78, alpha: 1.0)
+    static var linkColor: NSColor {
+        Appearance.isDark
+            ? NSColor(srgbRed: 0.51, green: 0.74, blue: 1.0, alpha: 1.0)
+            : NSColor(srgbRed: 0.13, green: 0.38, blue: 0.78, alpha: 1.0)
+    }
 }
 
 /// WYSIWYG markdown styling for an `NSTextView`. Applies live styling, tracks
@@ -27,12 +31,27 @@ extension MarkdownStyler {
 enum MarkdownStyler {
     static let baseFontSize: CGFloat = 13
 
-    /// Exported so other views can match the body text tone (cursor, typing attrs).
-    static let bodyTextColor = NSColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
+    /// Exported so other views can match the body text tone (cursor, typing
+    /// attrs). Computed rather than stored: note windows paint their own paper
+    /// and text, so every tone has to be re-derived when the system flips
+    /// between light and dark.
+    static var bodyTextColor: NSColor {
+        Appearance.isDark
+            ? NSColor(srgbRed: 0.93, green: 0.93, blue: 0.94, alpha: 1.0)
+            : NSColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
+    }
 
-    fileprivate static let markerColor = NSColor.black.withAlphaComponent(0.28)
-    fileprivate static let bodyColor   = bodyTextColor
-    fileprivate static let codeColor   = NSColor(srgbRed: 0.42, green: 0.18, blue: 0.32, alpha: 1.0)
+    fileprivate static var markerColor: NSColor {
+        Appearance.isDark
+            ? NSColor.white.withAlphaComponent(0.35)
+            : NSColor.black.withAlphaComponent(0.28)
+    }
+    fileprivate static var bodyColor: NSColor { bodyTextColor }
+    fileprivate static var codeColor: NSColor {
+        Appearance.isDark
+            ? NSColor(srgbRed: 0.95, green: 0.68, blue: 0.82, alpha: 1.0)
+            : NSColor(srgbRed: 0.42, green: 0.18, blue: 0.32, alpha: 1.0)
+    }
 
     /// Re-style the entire text storage. Caller should subsequently call
     /// `updateMarkerVisibility(in:selection:)` to apply the hidden flag.

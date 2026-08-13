@@ -91,6 +91,9 @@ extension NSColor {
 
 protocol NoteDragZoneDelegate: AnyObject {
     func dragZoneDidDoubleClick()
+    /// Called once the drag loop finishes, so the note can settle against
+    /// nearby edges. `suppressSnapping` is true when the user held Option.
+    func dragZoneDidEndDrag(suppressSnapping: Bool)
 }
 
 /// Invisible region at the top of a note. A normal click+drag moves the
@@ -106,7 +109,12 @@ final class NoteDragZone: NSView {
             delegate?.dragZoneDidDoubleClick()
             return
         }
+        // performDrag runs its own event loop and returns when the mouse is
+        // released — snapping here means the note settles once, on drop,
+        // rather than fighting the pointer the whole way.
         window?.performDrag(with: event)
+        let optionHeld = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option)
+        delegate?.dragZoneDidEndDrag(suppressSnapping: optionHeld)
     }
 }
 

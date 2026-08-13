@@ -20,6 +20,9 @@ Built with AppKit. Two dependencies: [`KeyboardShortcuts`](https://github.com/si
 - **Collapse / expand** — double-click a note's header to collapse it into a slim title bar; double-click again to expand.
 - **Color picker** — 7 vibrant pastels (yellow, pink, orange, green, blue, purple, gray).
 - **Auto-fade** — notes dim when not focused, snap back to full opacity on hover or focus.
+- **Dark mode** — notes follow the system appearance, with deep desaturated paper rather than dimmed pastels. The stored color name doesn't change, so a note is the same color on a light Mac and a dark one.
+- **Tidy desk** — dragging a note snaps it to screen edges and to nearby notes (hold `⌥` to place it freely). **Arrange Notes** in the menu bar packs everything into a grid or a cascade.
+- **Float level** — per note, from the palette button: float above every app (the default) or stick to the desktop, classic-Stickies style.
 - **Auto-save** — every edit, move, resize, recolor, and collapse is debounced and persisted to disk as a per-note JSON file.
 - **Notes panel** — lists every active and archived note with previews, plus search, a label filter, and sorting by last edited / created / title / color. `↩` opens the selected note, `⌘⌫` archives it. Restore or permanently delete archived notes.
 - **Labels** — tag a note by typing `#label`, with autocomplete. Hide a whole label's notes from the menu bar (**Show Labels**) to put `#work` away for the evening without archiving anything.

@@ -71,7 +71,8 @@ final class TodoTextView: NSTextView {
             NSColor.white.setStroke()
             check.stroke()
         } else {
-            NSColor.black.withAlphaComponent(0.55).setStroke()
+            (Appearance.isDark ? NSColor.white.withAlphaComponent(0.6)
+                               : NSColor.black.withAlphaComponent(0.55)).setStroke()
             path.lineWidth = 1.1
             path.stroke()
         }
@@ -126,14 +127,15 @@ final class TodoTextView: NSTextView {
     /// note name it points at.
     static let didClickWikiLink = Notification.Name("TodoTextView.didClickWikiLink")
 
-    /// Pasting a URL over selected text turns the selection into a markdown
-    /// link rather than replacing it — the usual reason to paste a URL onto
-    /// words is to link them.
     /// Turn pasteboard contents into an attachment and return the markdown to
     /// insert, or nil to let the paste proceed normally. Set by the controller,
     /// which owns the store the file has to be written next to.
     var attachmentHandler: ((NSPasteboard) -> String?)?
 
+    /// Paste handling, in order: a file or image becomes an attachment; a URL
+    /// pasted over selected text wraps the selection in a markdown link, since
+    /// that is the usual reason to paste a URL onto words; anything else
+    /// pastes normally.
     override func paste(_ sender: Any?) {
         if let markdown = attachmentHandler?(NSPasteboard.general) {
             insertAsParagraph(markdown)

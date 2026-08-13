@@ -32,6 +32,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             andEventID: AEEventID(kAEGetURL)
         )
         NSApp.servicesProvider = self
+        Appearance.startObserving()
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -195,6 +196,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         showLabelsItem = NSMenuItem(title: "Show Labels", action: nil, keyEquivalent: "")
         menu.addItem(showLabelsItem)
 
+        let arrangeItem = NSMenuItem(title: "Arrange Notes", action: nil, keyEquivalent: "")
+        let arrangeMenu = NSMenu()
+        let gridItem = NSMenuItem(title: "Grid", action: #selector(arrangeGrid), keyEquivalent: "")
+        gridItem.target = self
+        arrangeMenu.addItem(gridItem)
+        let cascadeItem = NSMenuItem(title: "Cascade", action: #selector(arrangeCascade), keyEquivalent: "")
+        cascadeItem.target = self
+        arrangeMenu.addItem(cascadeItem)
+        arrangeItem.submenu = arrangeMenu
+        menu.addItem(arrangeItem)
+
         dailyNoteItem = NSMenuItem(title: "Today's Daily Note",
                                    action: #selector(toggleDailyNote),
                                    keyEquivalent: "")
@@ -318,6 +330,33 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func setVisible(_ window: NSWindow?, _ visible: Bool) {
         guard let window = window, window.isVisible != visible else { return }
         if visible { window.orderFront(nil) } else { window.orderOut(nil) }
+    }
+
+    @objc private func arrangeGrid() { arrange(using: WindowArrangement.grid(sizes:in:gap:)) }
+    @objc private func arrangeCascade() { arrange(using: WindowArrangement.cascade(sizes:in:step:)) }
+
+    /// Lay every visible note out on the screen the pointer is on. Notes keep
+    /// their own sizes; only positions move.
+    private func arrange(using layout: ([CGSize], CGRect, CGFloat) -> [CGRect]) {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else { return }
+
+        let controllers = windowControllers.values
+            .filter { $0.window?.isVisible == true }
+            // Left-to-right, top-to-bottom, so an arrange broadly preserves
+            // where things already were rather than shuffling them.
+            .sorted { a, b in
+                let fa = a.window?.frame ?? .zero, fb = b.window?.frame ?? .zero
+                if fa.minY != fb.minY { return fa.minY > fb.minY }
+                return fa.minX < fb.minX
+            }
+        guard !controllers.isEmpty else { return }
+
+        let frames = layout(controllers.map(\.arrangementSize), visible, 12)
+        for (controller, frame) in zip(controllers, frames) {
+            controller.setArrangedFrame(frame)
+        }
     }
 
     private func makeLabelVisibilityMenu() -> NSMenu {

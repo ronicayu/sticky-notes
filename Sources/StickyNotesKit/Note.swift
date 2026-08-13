@@ -6,6 +6,21 @@ enum NoteColor: String, Codable, CaseIterable {
 
     /// Body / paper color — bright, clean, high-luminosity pastels (TickTick-style).
     var bodyHex: String {
+        Appearance.isDark ? darkBodyHex : lightBodyHex
+    }
+
+    /// Header strip — same hue, slightly more saturated so the title bar reads
+    /// like the top of a real paper sticky.
+    var headerHex: String {
+        Appearance.isDark ? darkHeaderHex : lightHeaderHex
+    }
+
+    /// Text tone that stays legible on this note's paper.
+    var textHex: String {
+        Appearance.isDark ? "#ECECEE" : "#1A1A1F"
+    }
+
+    var lightBodyHex: String {
         switch self {
         case .yellow: return "#FFF1A8"
         case .pink:   return "#FFD8E2"
@@ -17,9 +32,7 @@ enum NoteColor: String, Codable, CaseIterable {
         }
     }
 
-    /// Header strip — same hue, slightly more saturated so the title bar reads
-    /// like the top of a real paper sticky.
-    var headerHex: String {
+    var lightHeaderHex: String {
         switch self {
         case .yellow: return "#FFE680"
         case .pink:   return "#FFC2D2"
@@ -28,6 +41,33 @@ enum NoteColor: String, Codable, CaseIterable {
         case .blue:   return "#BAD9F3"
         case .purple: return "#D1B9EE"
         case .gray:   return "#E5E3D9"
+        }
+    }
+
+    /// Dark-mode paper. Deep, desaturated versions of the same hues rather
+    /// than dimmed pastels — a lightly darkened pastel reads as muddy, and a
+    /// bright one glows against a dark desktop.
+    var darkBodyHex: String {
+        switch self {
+        case .yellow: return "#3E3616"
+        case .pink:   return "#42222C"
+        case .orange: return "#432F16"
+        case .green:  return "#26381D"
+        case .blue:   return "#1E3145"
+        case .purple: return "#332745"
+        case .gray:   return "#2E2E30"
+        }
+    }
+
+    var darkHeaderHex: String {
+        switch self {
+        case .yellow: return "#4E441C"
+        case .pink:   return "#542B38"
+        case .orange: return "#553C1D"
+        case .green:  return "#314726"
+        case .blue:   return "#274058"
+        case .purple: return "#413259"
+        case .gray:   return "#3B3B3E"
         }
     }
 
@@ -44,6 +84,21 @@ enum NoteColor: String, Codable, CaseIterable {
     }
 }
 
+/// How a note sits relative to other apps' windows.
+enum NoteFloatLevel: String, Codable, CaseIterable {
+    /// Above everything — the app's original behavior.
+    case floating
+    /// Behind other apps, visible with the desktop. Classic Stickies.
+    case desktop
+
+    var displayName: String {
+        switch self {
+        case .floating: return "Float Above All"
+        case .desktop:  return "Stick to Desktop"
+        }
+    }
+}
+
 struct Note: Codable, Identifiable {
     let id: UUID
     var title: String
@@ -55,6 +110,7 @@ struct Note: Codable, Identifiable {
     var collapsed: Bool
     var color: NoteColor
     var labels: [String]
+    var floatLevel: NoteFloatLevel
     let createdAt: Date
     var updatedAt: Date
 
@@ -69,6 +125,7 @@ struct Note: Codable, Identifiable {
         collapsed: Bool,
         color: NoteColor,
         labels: [String] = [],
+        floatLevel: NoteFloatLevel = .floating,
         createdAt: Date,
         updatedAt: Date
     ) {
@@ -82,6 +139,7 @@ struct Note: Codable, Identifiable {
         self.collapsed = collapsed
         self.color = color
         self.labels = labels
+        self.floatLevel = floatLevel
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -99,6 +157,7 @@ struct Note: Codable, Identifiable {
         collapsed = (try? c.decode(Bool.self, forKey: .collapsed)) ?? false
         color = (try? c.decode(NoteColor.self, forKey: .color)) ?? .yellow
         labels = (try? c.decode([String].self, forKey: .labels)) ?? []
+        floatLevel = (try? c.decode(NoteFloatLevel.self, forKey: .floatLevel)) ?? .floating
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
@@ -120,6 +179,7 @@ struct Note: Codable, Identifiable {
             collapsed: false,
             color: Settings.shared.defaultNoteColor,
             labels: [],
+            floatLevel: .floating,
             createdAt: now,
             updatedAt: now
         )

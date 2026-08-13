@@ -484,6 +484,17 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         DailyNote.saveState(state)
     }
 
+    func dragZoneDidEndDrag(suppressSnapping: Bool) {
+        guard !suppressSnapping, let window = window else { return }
+        let others = NSApp.windows
+            .filter { $0 !== window && $0 is NoteWindow && $0.isVisible }
+            .map { $0.frame }
+        let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        guard !screen.isEmpty else { return }
+        let snapped = WindowArrangement.snap(window.frame, toScreen: screen, others: others)
+        if snapped != window.frame { window.setFrameOrigin(snapped.origin) }
+    }
+
     func dragZoneDidDoubleClick() { toggleCollapse() }
 
     private func applyCollapse(_ collapsed: Bool, animated: Bool) {
