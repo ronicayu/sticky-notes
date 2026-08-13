@@ -1,5 +1,12 @@
 # Sticky Notes — 10x UX Plan
 
+> **Status: all five phases implemented.** 419 tests, no build warnings, bundle builds.
+> Notable find along the way: the preview pane's vertical divider was an `NSBox`,
+> whose separator style carries an intrinsic height meant for *horizontal* rules —
+> it fought its constraints and silently collapsed the whole quick-switcher to 80pt.
+> Every assertion stayed green; only rendering the snapshot caught it.
+
+
 A phased plan for making the app *feel* 10x better, written for an implementing agent (Opus 5). The feature set is now strong (see `PLAN.md` — all phases shipped); what separates this app from a great one is no longer capability but friction, feedback, and trust. Every item below names the friction it removes and how to verify the fix.
 
 ## Ground rules for the implementer

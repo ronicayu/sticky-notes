@@ -229,14 +229,19 @@ private final class GeneralPaneView: NSView {
 
         let shortcutsLabel = SectionLabel(text: "Keyboard shortcuts")
         let newNoteRow = recorderRow(title: "New note",
+                                     name: .newNote,
                                      recorder: KeyboardShortcuts.RecorderCocoa(for: .newNote))
         let findRow    = recorderRow(title: "Find note",
+                                     name: .quickSwitcher,
                                      recorder: KeyboardShortcuts.RecorderCocoa(for: .quickSwitcher))
         let clipRow    = recorderRow(title: "New note from clipboard",
+                                     name: .newFromClipboard,
                                      recorder: KeyboardShortcuts.RecorderCocoa(for: .newFromClipboard))
         let panelRow   = recorderRow(title: "Show notes panel",
+                                     name: .notesPanel,
                                      recorder: KeyboardShortcuts.RecorderCocoa(for: .notesPanel))
         let hideRow    = recorderRow(title: "Hide all notes",
+                                     name: .hideAll,
                                      recorder: KeyboardShortcuts.RecorderCocoa(for: .hideAll))
 
         let stack = NSStackView(views: [
@@ -261,6 +266,43 @@ private final class GeneralPaneView: NSView {
             stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -20),
             widthAnchor.constraint(greaterThanOrEqualToConstant: 480)
         ])
+    }
+
+    /// A recorder row, plus a line naming what else commonly uses the chord.
+    /// The hint updates as the shortcut is re-recorded.
+    private func recorderRow(title: String,
+                             name: KeyboardShortcuts.Name,
+                             recorder: KeyboardShortcuts.RecorderCocoa) -> NSView {
+        let row = recorderRow(title: title, recorder: recorder)
+
+        let hint = NSTextField(labelWithString: "")
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        hint.font = NSFont.systemFont(ofSize: 10)
+        hint.textColor = .tertiaryLabelColor
+
+        func refreshHint() {
+            let note = HotkeyAdvice.conflictNote(for: HotkeyAdvice.describe(name))
+            hint.stringValue = note ?? ""
+            hint.isHidden = note == nil
+        }
+        refreshHint()
+        // The recorder doesn't expose a change hook, so refresh when the
+        // window comes back to the front — which is when a rebind is done.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { _ in refreshHint() }
+
+        let stack = NSStackView(views: [row, hint])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        // Line the hint up under the recorder rather than the right-aligned
+        // label, so it reads as belonging to the shortcut.
+        hint.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 148).isActive = true
+        return stack
     }
 
     private func recorderRow(title: String, recorder: KeyboardShortcuts.RecorderCocoa) -> NSView {

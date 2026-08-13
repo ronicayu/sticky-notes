@@ -13,9 +13,14 @@ enum WelcomeNote {
 
     /// Create the welcome note if this install has never shown one and the
     /// store is empty. Returns it, or nil when nothing should be created.
+    /// - Parameter needsAccessibilityPermission: when true, the note gains a
+    ///   line explaining why the hotkeys it just described aren't firing.
+    ///   Without permission they silently do nothing, and a new user has no
+    ///   way to tell that apart from a broken app.
     static func makeIfNeeded(
         store: NoteStore,
         defaults: UserDefaults = .standard,
+        needsAccessibilityPermission: Bool = false,
         now: Date = Date()
     ) -> Note? {
         guard !defaults.bool(forKey: shownKey) else { return nil }
@@ -28,7 +33,9 @@ enum WelcomeNote {
         let note = Note(
             id: UUID(),
             title: "Welcome",
-            content: body,
+            content: needsAccessibilityPermission
+                ? body + "\n\n" + HotkeyAdvice.permissionChecklistLine
+                : body,
             positionX: 120, positionY: 260,
             width: 320, height: 340,
             collapsed: false,

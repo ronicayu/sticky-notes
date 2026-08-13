@@ -12,6 +12,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var hideAllItem: NSMenuItem!
     private var dailyNoteItem: NSMenuItem!
     private var storageWarningItem: NSMenuItem!
+    private var permissionWarningItem: NSMenuItem!
     private var showLabelsItem: NSMenuItem!
     private var dailyNoteController: DailyNoteWindowController?
     private var settingsController: SettingsWindowController?
@@ -68,7 +69,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         restoreDailyNoteIfNeeded()
 
         // A first launch showing an empty screen looks like a failed one.
-        if let welcome = WelcomeNote.makeIfNeeded(store: noteStore) {
+        if let welcome = WelcomeNote.makeIfNeeded(
+            store: noteStore,
+            needsAccessibilityPermission: !HotkeyAdvice.hasAccessibilityPermission
+        ) {
             presentWindow(for: welcome)
         }
     }
@@ -198,33 +202,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         storageWarningItem.isHidden = true
         menu.addItem(storageWarningItem)
 
+        // Shown only while hotkeys can't actually be registered.
+        permissionWarningItem = NSMenuItem(title: HotkeyAdvice.permissionMenuTitle,
+                                           action: #selector(openAccessibilitySettings),
+                                           keyEquivalent: "")
+        permissionWarningItem.isHidden = true
+        menu.addItem(permissionWarningItem)
+
         menu.addItem(.separator())
 
-        // Daily actions on top — these are the things you do, not configure.
+        // Capture first — the things you actually do. Everything that
+        // manages notes rather than making them goes in one submenu, which
+        // keeps the top level at a glanceable seven rows.
         menu.addItem(withTitle: "New Note  ⌘⇧S", action: #selector(newNote), keyEquivalent: "")
-        menu.addItem(withTitle: "New Note from Clipboard  ⌥⌘⇧V",
+        menu.addItem(withTitle: "New from Clipboard  ⌥⌘⇧V",
                      action: #selector(newNoteFromClipboard),
                      keyEquivalent: "")
         menu.addItem(withTitle: "Find Note…  ⌘⇧F", action: #selector(toggleQuickSwitcher), keyEquivalent: "")
-        menu.addItem(withTitle: "Notes  ⌘⇧L", action: #selector(showNotesPanel), keyEquivalent: "")
-        hideAllItem = NSMenuItem(title: "Hide All Notes  ⌘⇧H",
-                                  action: #selector(toggleHideAll),
-                                  keyEquivalent: "")
-        menu.addItem(hideAllItem)
-
-        showLabelsItem = NSMenuItem(title: "Show Labels", action: nil, keyEquivalent: "")
-        menu.addItem(showLabelsItem)
-
-        let arrangeItem = NSMenuItem(title: "Arrange Notes", action: nil, keyEquivalent: "")
-        let arrangeMenu = NSMenu()
-        let gridItem = NSMenuItem(title: "Grid", action: #selector(arrangeGrid), keyEquivalent: "")
-        gridItem.target = self
-        arrangeMenu.addItem(gridItem)
-        let cascadeItem = NSMenuItem(title: "Cascade", action: #selector(arrangeCascade), keyEquivalent: "")
-        cascadeItem.target = self
-        arrangeMenu.addItem(cascadeItem)
-        arrangeItem.submenu = arrangeMenu
-        menu.addItem(arrangeItem)
 
         dailyNoteItem = NSMenuItem(title: "Today's Daily Note",
                                    action: #selector(toggleDailyNote),
@@ -233,14 +227,38 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         menu.addItem(.separator())
 
-        // Configuration moved into a single Settings window.
-        menu.addItem(withTitle: "Settings…  ⌘,",
-                     action: #selector(openSettings),
-                     keyEquivalent: "")
-        menu.addItem(withTitle: "Show Storage Folder",
-                     action: #selector(revealStorage),
-                     keyEquivalent: "")
+        let notesItem = NSMenuItem(title: "Notes", action: nil, keyEquivalent: "")
+        let notesMenu = NSMenu(title: "Notes")
+        notesMenu.addItem(withTitle: "All Notes…  ⌘⇧L",
+                          action: #selector(showNotesPanel),
+                          keyEquivalent: "").target = self
 
+        hideAllItem = NSMenuItem(title: "Hide All Notes  ⌘⇧H",
+                                 action: #selector(toggleHideAll),
+                                 keyEquivalent: "")
+        hideAllItem.target = self
+        notesMenu.addItem(hideAllItem)
+
+        showLabelsItem = NSMenuItem(title: "Show Labels", action: nil, keyEquivalent: "")
+        notesMenu.addItem(showLabelsItem)
+
+        let arrangeItem = NSMenuItem(title: "Arrange", action: nil, keyEquivalent: "")
+        let arrangeMenu = NSMenu()
+        let gridItem = NSMenuItem(title: "Grid", action: #selector(arrangeGrid), keyEquivalent: "")
+        gridItem.target = self
+        arrangeMenu.addItem(gridItem)
+        let cascadeItem = NSMenuItem(title: "Cascade", action: #selector(arrangeCascade), keyEquivalent: "")
+        cascadeItem.target = self
+        arrangeMenu.addItem(cascadeItem)
+        arrangeItem.submenu = arrangeMenu
+        notesMenu.addItem(arrangeItem)
+
+        notesItem.submenu = notesMenu
+        menu.addItem(notesItem)
+
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Settings…  ⌘,", action: #selector(openSettings), keyEquivalent: "")
+        menu.addItem(withTitle: "Show Storage Folder", action: #selector(revealStorage), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
@@ -267,6 +285,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         showLabelsItem.submenu = makeLabelVisibilityMenu()
         let hiddenCount = Settings.shared.hiddenLabels.count
         showLabelsItem.title = hiddenCount == 0 ? "Show Labels" : "Show Labels  (\(hiddenCount) hidden)"
+
+        // Re-checked on every open: the user may have just granted it, and
+        // the warning should disappear without a relaunch.
+        permissionWarningItem.isHidden = HotkeyAdvice.hasAccessibilityPermission
 
         let canShowDaily = Settings.shared.obsidianVaultPath != nil
             && Settings.shared.dailyNotesPattern != nil
@@ -657,6 +679,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
            let url = WikiLink.obsidianURL(vaultPath: vault, target: target) {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    @objc private func openAccessibilitySettings() {
+        guard let url = HotkeyAdvice.accessibilitySettingsURL else { return }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: - Text size

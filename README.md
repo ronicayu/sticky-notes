@@ -55,7 +55,7 @@ NOTARY_PROFILE=notary-profile \
 
 (`NOTARY_PROFILE` comes from `xcrun notarytool store-credentials`. Omit it to sign without notarizing.)
 
-The first time you trigger a global hotkey, macOS may also ask you to grant input monitoring or accessibility permissions.
+The first time you trigger a global hotkey, macOS may ask you to grant Accessibility permission. Without it the hotkeys silently do nothing — Sticky Notes shows a warning in its menu until it's granted, and clicking that warning opens the right System Settings pane.
 
 ## Build from source
 
