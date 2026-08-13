@@ -2,7 +2,7 @@
 
 A lightweight macOS sticky notes app that floats over every window, captures notes instantly via a global hotkey, and lets you tidy them up at your own pace.
 
-Built with SwiftUI + AppKit. No dependencies beyond `KeyboardShortcuts` for the global hotkey.
+Built with AppKit. Two dependencies: [`KeyboardShortcuts`](https://github.com/sindresorhus/KeyboardShortcuts) for the global hotkeys and [`swift-markdown`](https://github.com/apple/swift-markdown) for the live-preview parser.
 
 ## Features
 
@@ -16,9 +16,11 @@ Built with SwiftUI + AppKit. No dependencies beyond `KeyboardShortcuts` for the 
 - **Auto-fade** — notes dim when not focused, snap back to full opacity on hover or focus.
 - **Auto-save** — every edit, move, resize, recolor, and collapse is debounced and persisted to disk as a per-note JSON file.
 - **Notes panel** — lists every active and archived note with previews. Click an active note to bring its window forward; restore or permanently delete archived notes.
-- **iCloud Drive sync** — opt in via the menu bar to sync notes across your Macs through iCloud Drive.
-- **Launch at login** — toggle from the menu bar.
-- **Local-first storage** — notes are plain JSON files under `~/Library/Application Support/StickyNotes/` (or your iCloud Drive folder if sync is enabled).
+- **iCloud Drive sync** — opt in from Settings to sync notes across your Macs through iCloud Drive.
+- **Obsidian vault mode** — point Settings at a vault and notes become `.md` files with YAML frontmatter, editable from Obsidian and synced back live.
+- **Daily note** — open today's Obsidian daily note as a floating window; it rolls over to the new day on its own.
+- **Launch at login** — toggle from Settings.
+- **Local-first storage** — notes are plain files under `~/Library/Application Support/StickyNotes/` (or your iCloud Drive folder / Obsidian vault).
 
 ## Install
 
@@ -49,21 +51,29 @@ swift run
 cp -R build/StickyNotes.app /Applications/
 ```
 
-## Hotkey configuration
+## Settings
 
-Hotkeys are registered through [`KeyboardShortcuts`](https://github.com/sindresorhus/KeyboardShortcuts) and persisted to `UserDefaults`. They default to `⌘⇧S` and `⌘⇧L` but can be re-bound at runtime by extending the menu bar with a `KeyboardShortcuts.Recorder` (not included in the current UI).
+Open with `⌘,` or **Settings…** in the menu bar. Three panes:
+
+- **General** — default note color, launch at login, and rebindable hotkeys for every global shortcut.
+- **Storage** — where notes live: local, iCloud Drive, or an Obsidian vault (Markdown mode).
+- **Daily note** — the vault-relative path pattern and optional template.
+
+Hotkeys are registered through `KeyboardShortcuts` and persisted to `UserDefaults`.
 
 ## Storage layout
 
 ```
-~/Library/Application Support/StickyNotes/      (or iCloud Drive root)
+~/Library/Application Support/StickyNotes/      (or iCloud Drive root, or <vault>/StickyNotes/)
 ├── notes/
 │   └── {uuid}.json          # one file per active note
 └── archive/
     └── {uuid}.json          # archived notes (closed via the × button)
 ```
 
-Each JSON contains the note's content, position, size, color, collapsed flag, and timestamps. Files are mutated atomically and per-note, which means iCloud Drive can sync them without merge conflicts.
+Each file holds the note's content, position, size, color, labels, collapsed flag, and timestamps. Files are mutated atomically and per-note, so iCloud Drive can sync them without merge conflicts.
+
+In Obsidian vault mode the same tree holds `.md` files named `{yyyy-MM-dd HHmmss}-{id}.md`, with the metadata in YAML frontmatter and the note body as plain Markdown — readable and editable directly in Obsidian. Edits made outside the app are picked up live.
 
 ## License
 
