@@ -30,6 +30,8 @@ Built with AppKit. Two dependencies: [`KeyboardShortcuts`](https://github.com/si
 - **Obsidian vault mode** — point Settings at a vault and notes become `.md` files with YAML frontmatter, editable from Obsidian and synced back live.
 - **Daily note** — open today's Obsidian daily note as a floating window; it rolls over to the new day on its own.
 - **Launch at login** — toggle from Settings.
+- **Recoverable delete** — "Delete permanently" moves a note to a **Trash** tab in the notes panel, where it stays put-back-able for 30 days before being swept on launch.
+- **Conflict-safe sync** — when two Macs edit the same note before syncing, the versions are merged rather than one silently winning: the newest leads and every other version's text is appended under a dated divider. Labels are unioned.
 - **Local-first storage** — notes are plain files under `~/Library/Application Support/StickyNotes/` (or your iCloud Drive folder / Obsidian vault).
 
 ## Install
@@ -94,8 +96,11 @@ Hotkeys are registered through `KeyboardShortcuts` and persisted to `UserDefault
 ~/Library/Application Support/StickyNotes/      (or iCloud Drive root, or <vault>/StickyNotes/)
 ├── notes/
 │   └── {uuid}.json          # one file per active note
-└── archive/
-    └── {uuid}.json          # archived notes (closed via the × button)
+├── archive/
+│   └── {uuid}.json          # archived notes (closed via the × button)
+├── attachments/             # images and files pasted into notes
+└── .trash/
+    └── {uuid}.json          # deleted notes, purged after 30 days
 ```
 
 Each file holds the note's content, position, size, color, labels, collapsed flag, and timestamps. Files are mutated atomically and per-note, so iCloud Drive can sync them without merge conflicts.

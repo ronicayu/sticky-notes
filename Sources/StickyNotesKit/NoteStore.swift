@@ -90,6 +90,8 @@ final class NoteStore {
         decoder.dateDecodingStrategy = .iso8601
         ensureDirectories()
         startWatching()
+        purgeExpiredTrash()
+        resolveConflicts()
     }
 
     func save(_ note: Note) {
@@ -167,13 +169,78 @@ final class NoteStore {
         return seen.sorted()
     }
 
+    /// "Delete permanently" moves the file to `.trash/` instead of unlinking
+    /// it. The panel calls this from a confirmation sheet, but a confirmation
+    /// sheet is a poor last line of defence for something irreversible —
+    /// files stay recoverable for `trashRetention` and are swept on launch.
     func deleteForever(_ note: Note) {
         if let url = existingURL(for: note.id, in: archiveURL) {
-            try? FileManager.default.removeItem(at: url)
+            let destination = uniqueTrashURL(for: url)
+            if !moveFile(from: url, to: destination) {
+                // Couldn't reach the trash — fall back to removing it, since
+                // the user asked for the note to be gone.
+                try? FileManager.default.removeItem(at: url)
+            }
         }
         markdownPathIndex.removeValue(forKey: note.id)
         knownIds.remove(note.id)
         notifyChange()
+    }
+
+    /// How long a deleted note stays recoverable.
+    static let trashRetention: TimeInterval = 30 * 24 * 60 * 60
+
+    var trashURL: URL { rootURL.appendingPathComponent(".trash", isDirectory: true) }
+
+    /// Notes sitting in the trash, newest first.
+    func loadTrashed() -> [Note] {
+        loadAll(from: trashURL).sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    /// Put a trashed note back in the archive, where deleting it came from.
+    func restoreFromTrash(_ note: Note) {
+        guard let from = existingURL(for: note.id, in: trashURL) else { return }
+        let to = generateURL(for: note, in: archiveURL)
+        guard moveFile(from: from, to: to) else { return }
+        markdownPathIndex[note.id] = to
+        notifyChange()
+    }
+
+    /// Delete trashed files older than `trashRetention`. Called at launch;
+    /// deliberately conservative, since the whole point is not losing things.
+    @discardableResult
+    func purgeExpiredTrash(now: Date = Date()) -> Int {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: trashURL,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return 0 }
+
+        var removed = 0
+        for url in files where url.pathExtension == fileExtension {
+            guard let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate else { continue }
+            guard now.timeIntervalSince(modified) > NoteStore.trashRetention else { continue }
+            if (try? fm.removeItem(at: url)) != nil { removed += 1 }
+        }
+        if removed > 0 { notifyChange() }
+        return removed
+    }
+
+    /// Trash filenames can collide with an earlier deletion of a note created
+    /// in the same second, and the trash is the one place we must not
+    /// overwrite anything.
+    private func uniqueTrashURL(for source: URL) -> URL {
+        try? FileManager.default.createDirectory(at: trashURL, withIntermediateDirectories: true)
+        let base = source.deletingPathExtension().lastPathComponent
+        let ext = source.pathExtension
+        var candidate = trashURL.appendingPathComponent("\(base).\(ext)")
+        var counter = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = trashURL.appendingPathComponent("\(base)-\(counter).\(ext)")
+            counter += 1
+        }
+        return candidate
     }
 
     /// Switch to a new root and/or format. Migrates all existing notes by
@@ -252,13 +319,14 @@ final class NoteStore {
         let fm = FileManager.default
         try? fm.createDirectory(at: activeURL, withIntermediateDirectories: true)
         try? fm.createDirectory(at: archiveURL, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: trashURL, withIntermediateDirectories: true)
     }
 
     private func startWatching() {
         watcher = FileWatcher { [weak self] in
             self?.notifyChange()
         }
-        watcher?.watch([activeURL, archiveURL])
+        watcher?.watch([activeURL, archiveURL, trashURL])
     }
 
     /// Returns the on-disk URL for a note that already exists in the given
@@ -312,6 +380,51 @@ final class NoteStore {
         }
         indexedDirs.insert(dirKey(dir))
         return match
+    }
+
+    /// Resolve every iCloud conflict in the active and archive folders,
+    /// merging rather than picking a winner. Returns how many files were
+    /// merged. Called on launch and whenever the watcher reports a change.
+    @discardableResult
+    func resolveConflicts() -> Int {
+        var resolved = 0
+        for dir in [activeURL, archiveURL] {
+            guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+                continue
+            }
+            for url in files where url.pathExtension == fileExtension {
+                if resolveConflict(at: url) { resolved += 1 }
+            }
+        }
+        if resolved > 0 { notifyChange() }
+        return resolved
+    }
+
+    /// Merge one file's conflict versions back into it. iCloud exposes losing
+    /// versions through `NSFileVersion`; ignoring them, as we used to, silently
+    /// threw away whatever the other Mac wrote.
+    private func resolveConflict(at url: URL) -> Bool {
+        let conflicts = NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []
+        guard !conflicts.isEmpty else { return false }
+
+        var versions: [Note] = []
+        if let current = read(url) { versions.append(current) }
+        for version in conflicts {
+            if let note = read(version.url) { versions.append(note) }
+        }
+
+        // Whatever happens, mark the conflicts resolved — leaving them
+        // unresolved means being asked about them forever.
+        defer {
+            for version in conflicts { version.isResolved = true }
+            try? NSFileVersion.removeOtherVersionsOfItem(at: url)
+        }
+
+        guard ConflictResolver.needsMerge(versions),
+              let merged = ConflictResolver.merge(versions) else { return false }
+
+        write(merged, to: url)
+        return true
     }
 
     private func loadAll(from dir: URL) -> [Note] {

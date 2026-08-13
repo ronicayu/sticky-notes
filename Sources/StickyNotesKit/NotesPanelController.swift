@@ -5,7 +5,7 @@ import AppKit
 /// clicked; archived rows can be restored or permanently deleted.
 final class NotesPanelController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
 
-    enum Mode: Int { case active = 0, archived = 1 }
+    enum Mode: Int { case active = 0, archived = 1, trash = 2 }
 
     /// Ordering for the list. Search results ignore this and use relevance —
     /// re-sorting them by date would throw away the ranking.
@@ -82,9 +82,10 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
     private func setupUI() {
         segmented.translatesAutoresizingMaskIntoConstraints = false
-        segmented.segmentCount = 2
+        segmented.segmentCount = 3
         segmented.setLabel("Active", forSegment: 0)
         segmented.setLabel("Archived", forSegment: 1)
+        segmented.setLabel("Trash", forSegment: 2)
         segmented.selectedSegment = 0
         segmented.target = self
         segmented.action = #selector(segmentChanged)
@@ -227,9 +228,22 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     }
 
     private func updateBottomBarVisibility() {
-        let archived = mode == .archived
-        restoreButton.isHidden = !archived
-        deleteButton.isHidden = !archived
+        switch mode {
+        case .active:
+            restoreButton.isHidden = true
+            deleteButton.isHidden = true
+        case .archived:
+            restoreButton.isHidden = false
+            restoreButton.title = "Restore"
+            deleteButton.isHidden = false
+            deleteButton.title = "Delete…"
+        case .trash:
+            // Nothing in the trash can be lost from here — emptying it is the
+            // scheduled purge's job, not a button's.
+            restoreButton.isHidden = false
+            restoreButton.title = "Put Back"
+            deleteButton.isHidden = true
+        }
     }
 
     // MARK: - Data
@@ -238,7 +252,12 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         let previousSelection = selectedNote()?.id
         rebuildLabelMenu()
 
-        let source = mode == .active ? store.loadActive() : store.loadArchived()
+        let source: [Note]
+        switch mode {
+        case .active:   source = store.loadActive()
+        case .archived: source = store.loadArchived()
+        case .trash:    source = store.loadTrashed()
+        }
         let scoped = labelFilter.map { label in source.filter { $0.labels.contains(label) } } ?? source
 
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -310,11 +329,13 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         if !query.isEmpty {
             emptyLabel.stringValue = "No notes match “\(query)”"
         } else if let label = labelFilter {
-            emptyLabel.stringValue = "No \(mode == .active ? "active" : "archived") notes tagged #\(label)"
-        } else if mode == .active {
-            emptyLabel.stringValue = "No active notes.\nPress ⌘⇧S to make one."
+            emptyLabel.stringValue = "No notes here tagged #\(label)"
         } else {
-            emptyLabel.stringValue = "Nothing archived yet."
+            switch mode {
+            case .active:   emptyLabel.stringValue = "No active notes.\nPress ⌘⇧S to make one."
+            case .archived: emptyLabel.stringValue = "Nothing archived yet."
+            case .trash:    emptyLabel.stringValue = "Trash is empty.\nDeleted notes stay here for 30 days."
+            }
         }
         emptyLabel.maximumNumberOfLines = 0
     }
@@ -341,10 +362,16 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     /// Return on a selected row: focus an active note, restore an archived one.
     private func activateSelectedRow() {
         guard let note = selectedNote() else { return }
-        if mode == .archived {
+        switch mode {
+        case .active:
+            onActivate(note.id)
+        case .archived:
             store.restore(note)
+            onActivate(note.id)
+        case .trash:
+            // A trashed note has no window to focus; put it back first.
+            store.restoreFromTrash(note)
         }
-        onActivate(note.id)
     }
 
     /// ⌘⌫ archives an active note, matching the note window's close button.
@@ -354,9 +381,16 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     }
 
     @objc private func restoreSelected() {
-        guard mode == .archived, let note = selectedNote() else { return }
-        store.restore(note)
-        onActivate(note.id)
+        guard let note = selectedNote() else { return }
+        switch mode {
+        case .archived:
+            store.restore(note)
+            onActivate(note.id)
+        case .trash:
+            store.restoreFromTrash(note)
+        case .active:
+            break
+        }
     }
 
     @objc private func deleteSelected() {
@@ -411,6 +445,14 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     func sort(by order: SortOrder) {
         sortOrder = order
         sortPopUp.selectItem(at: order.rawValue)
+        reload()
+    }
+
+    /// Put the first listed trashed note back. The button's action, callable
+    /// directly.
+    func putBackFirstRow() {
+        guard mode == .trash, let note = rows.first?.note else { return }
+        store.restoreFromTrash(note)
         reload()
     }
 
