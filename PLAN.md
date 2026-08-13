@@ -1,6 +1,28 @@
 # Sticky Notes — 10x Plan
 
-A phased implementation plan for making this app dramatically better. Written for an implementing agent (Opus 5). Each phase is independently shippable and ordered so that foundations land before features that depend on them.
+A phased implementation plan for making this app dramatically better. Each phase is independently shippable and ordered so that foundations land before features that depend on them.
+
+## Status
+
+**Done: Phase 0, Phase 1, and most of Phase 2.** 245 tests, CI green.
+
+| Phase | State |
+|-------|-------|
+| 0 Foundations | ✅ test target + CI, note cache, storage-error surfacing |
+| 1 Search | ✅ quick switcher, panel search/filter/sort, label show-hide |
+| 2 Editor | ◑ links, editor shortcuts, task counts done — **images (2.2) and wiki links not started** |
+| 3 Capture | ⬜ not started |
+| 4 Windows | ⬜ not started |
+| 5 Data safety | ⬜ not started |
+| 6 Distribution | ⬜ not started |
+
+Bugs found and fixed along the way, each with a regression test:
+
+- Nested emphasis (`***x***`) rendered italic-only — `Emphasis` replaced the font `Strong` had set instead of merging traits.
+- Saving the Nth note into a vault re-read the other N-1 looking for an id that wasn't there. 500 saves took ~30s; now ~0.5s.
+- Archive and restore silently did nothing when the storage path went through a symlink — `contentsOfDirectory` resolves symlinks, so directory paths compared as strings never matched.
+
+Still open from the phases below: the collapsed-note task badge (2.3), images (2.2), and wiki links (2.1).
 
 ## Context: what exists today
 
