@@ -5,6 +5,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private let store: NoteStore
     private let onClosed: (UUID) -> Void
 
+    /// Labels currently on this note. Read by the app delegate to decide
+    /// whether the window belongs on screen under the label filter.
+    var labels: [String] { note.labels }
+
     private let dragZone: NoteDragZone
     private let expandButton: NSButton
     private let trashButton: NSButton

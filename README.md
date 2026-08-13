@@ -8,14 +8,18 @@ Built with AppKit. Two dependencies: [`KeyboardShortcuts`](https://github.com/si
 
 - **Global hotkeys**
   - `⌘⇧S` — new note (cursor focused, ready to type)
+  - `⌘⇧F` — find a note (quick switcher)
   - `⌘⇧L` — open the Notes panel (active + archived)
+  - `⌘⇧H` — hide/show all notes
+- **Quick switcher** — `⌘⇧F` opens a Spotlight-style palette that searches titles, labels, and text across active *and* archived notes. Arrows to move, `↩` to open, `esc` to close. Type `#label` to narrow to a label. Picking an archived note restores it.
 - **Floating windows** — every note stays above all other windows and follows you across Spaces.
 - **Live Markdown** — `# heading`, `**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `- list`. Markers hide automatically when the cursor is not inside the element, like Obsidian / TickTick live preview.
 - **Collapse / expand** — double-click a note's header to collapse it into a slim title bar; double-click again to expand.
 - **Color picker** — 7 vibrant pastels (yellow, pink, orange, green, blue, purple, gray).
 - **Auto-fade** — notes dim when not focused, snap back to full opacity on hover or focus.
 - **Auto-save** — every edit, move, resize, recolor, and collapse is debounced and persisted to disk as a per-note JSON file.
-- **Notes panel** — lists every active and archived note with previews. Click an active note to bring its window forward; restore or permanently delete archived notes.
+- **Notes panel** — lists every active and archived note with previews, plus search, a label filter, and sorting by last edited / created / title / color. `↩` opens the selected note, `⌘⌫` archives it. Restore or permanently delete archived notes.
+- **Labels** — tag a note by typing `#label`, with autocomplete. Hide a whole label's notes from the menu bar (**Show Labels**) to put `#work` away for the evening without archiving anything.
 - **iCloud Drive sync** — opt in from Settings to sync notes across your Macs through iCloud Drive.
 - **Obsidian vault mode** — point Settings at a vault and notes become `.md` files with YAML frontmatter, editable from Obsidian and synced back live.
 - **Daily note** — open today's Obsidian daily note as a floating window; it rolls over to the new day on its own.

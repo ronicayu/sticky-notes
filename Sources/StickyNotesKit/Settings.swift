@@ -11,6 +11,7 @@ final class Settings {
         static let defaultNoteColor = "defaultNoteColor"
         static let dailyNotesPattern = "dailyNotesPattern"
         static let dailyTemplatePath = "dailyTemplatePath"
+        static let hiddenLabels = "hiddenLabels"
     }
 
     private init() {}
@@ -58,6 +59,22 @@ final class Settings {
             return (v?.isEmpty ?? true) ? nil : v
         }
         set { defaults.set(newValue, forKey: Keys.dailyTemplatePath) }
+    }
+
+    /// Labels whose note windows are kept off screen, so you can put `#work`
+    /// away in the evening without archiving anything. Stored normalized.
+    var hiddenLabels: Set<String> {
+        get { Set(defaults.stringArray(forKey: Keys.hiddenLabels) ?? []) }
+        set { defaults.set(Array(newValue).sorted(), forKey: Keys.hiddenLabels) }
+    }
+
+    /// Whether a note should currently be on screen. A note is hidden when any
+    /// of its labels is hidden — the narrower intent wins, so hiding `#work`
+    /// puts away a note tagged both `#work` and `#home`.
+    func isHiddenByLabel(_ note: Note) -> Bool {
+        let hidden = hiddenLabels
+        guard !hidden.isEmpty else { return false }
+        return note.labels.contains { hidden.contains($0) }
     }
 
     /// Color applied to a newly-created note. Defaults to yellow.

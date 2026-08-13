@@ -12,6 +12,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var hideAllItem: NSMenuItem!
     private var dailyNoteItem: NSMenuItem!
     private var storageWarningItem: NSMenuItem!
+    private var showLabelsItem: NSMenuItem!
     private var dailyNoteController: DailyNoteWindowController?
     private var settingsController: SettingsWindowController?
     private var quickSwitcher: QuickSwitcherController?
@@ -86,10 +87,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // another machine and synced in).
         for note in active where windowControllers[note.id] == nil {
             presentWindow(for: note, activate: false)
-            if notesHidden {
-                windowControllers[note.id]?.window?.orderOut(nil)
-            }
         }
+
+        // Also catches label edits, which change whether a note belongs on
+        // screen without changing whether its window exists.
+        applyVisibility()
     }
 
     /// Even though we're an accessory (no Dock icon, no system menu bar),
@@ -169,6 +171,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                                   keyEquivalent: "")
         menu.addItem(hideAllItem)
 
+        showLabelsItem = NSMenuItem(title: "Show Labels", action: nil, keyEquivalent: "")
+        menu.addItem(showLabelsItem)
+
         dailyNoteItem = NSMenuItem(title: "Today's Daily Note",
                                    action: #selector(toggleDailyNote),
                                    keyEquivalent: "")
@@ -205,6 +210,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     public func menuWillOpen(_ menu: NSMenu) {
         hideAllItem.title = (notesHidden ? "Show All Notes  ⌘⇧H" : "Hide All Notes  ⌘⇧H")
         hideAllItem.isEnabled = !windowControllers.isEmpty
+
+        // Rebuilt on open so newly added labels appear without a relaunch.
+        showLabelsItem.submenu = makeLabelVisibilityMenu()
+        let hiddenCount = Settings.shared.hiddenLabels.count
+        showLabelsItem.title = hiddenCount == 0 ? "Show Labels" : "Show Labels  (\(hiddenCount) hidden)"
 
         let canShowDaily = Settings.shared.obsidianVaultPath != nil
             && Settings.shared.dailyNotesPattern != nil
@@ -259,27 +269,84 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let dailyVisible = dailyNoteController?.window?.isVisible ?? false
         guard !windowControllers.isEmpty || dailyVisible else { return }
         notesHidden.toggle()
-        if notesHidden {
-            for controller in windowControllers.values {
-                controller.window?.orderOut(nil)
-            }
-            dailyNoteController?.window?.orderOut(nil)
-        } else {
-            for controller in windowControllers.values {
-                controller.window?.orderFront(nil)
-            }
-            // Only restore the daily note if it was visible before — its
-            // own state.visible flag is the source of truth.
-            if DailyNote.loadState().visible {
-                dailyNoteController?.window?.orderFront(nil)
-            }
+        applyVisibility()
+    }
+
+    /// Single place that decides which note windows are on screen. "Hide all"
+    /// wins over everything; otherwise a note is off screen when one of its
+    /// labels is hidden.
+    /// Only acts on windows whose state actually needs to change. This runs on
+    /// every store change, including the debounced save behind each keystroke —
+    /// ordering already-visible windows to the front would make notes jump
+    /// above other apps while you type.
+    private func applyVisibility() {
+        let hiddenLabels = Settings.shared.hiddenLabels
+        for controller in windowControllers.values {
+            let shouldHide = notesHidden || hiddenLabels.contains(where: controller.labels.contains)
+            setVisible(controller.window, !shouldHide)
         }
+
+        // The daily note has no labels; only "hide all" applies to it, and
+        // its own state.visible flag decides whether it should come back.
+        setVisible(dailyNoteController?.window, !notesHidden && DailyNote.loadState().visible)
+    }
+
+    private func setVisible(_ window: NSWindow?, _ visible: Bool) {
+        guard let window = window, window.isVisible != visible else { return }
+        if visible { window.orderFront(nil) } else { window.orderOut(nil) }
+    }
+
+    private func makeLabelVisibilityMenu() -> NSMenu {
+        let menu = NSMenu(title: "Show Labels")
+        let labels = noteStore.allLabels()
+        guard !labels.isEmpty else {
+            let empty = NSMenuItem(title: "No labels yet", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            return menu
+        }
+
+        let hidden = Settings.shared.hiddenLabels
+        for label in labels {
+            let item = NSMenuItem(title: "#\(label)",
+                                  action: #selector(toggleLabelVisibility(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = label
+            item.state = hidden.contains(label) ? .off : .on
+            menu.addItem(item)
+        }
+
+        if !hidden.isEmpty {
+            menu.addItem(.separator())
+            let showAll = NSMenuItem(title: "Show All Labels",
+                                     action: #selector(showAllLabels),
+                                     keyEquivalent: "")
+            showAll.target = self
+            menu.addItem(showAll)
+        }
+        return menu
+    }
+
+    @objc private func toggleLabelVisibility(_ sender: NSMenuItem) {
+        guard let label = sender.representedObject as? String else { return }
+        var hidden = Settings.shared.hiddenLabels
+        if hidden.contains(label) { hidden.remove(label) } else { hidden.insert(label) }
+        Settings.shared.hiddenLabels = hidden
+        applyVisibility()
+    }
+
+    @objc private func showAllLabels() {
+        Settings.shared.hiddenLabels = []
+        applyVisibility()
     }
 
     private func restoreActiveNotes() {
         for note in noteStore.loadActive() {
             presentWindow(for: note)
         }
+        // Labels hidden in a previous session stay hidden across a relaunch.
+        applyVisibility()
     }
 
     @objc func newNote() {
