@@ -1,4 +1,5 @@
 import AppKit
+import Markdown
 
 extension NSAttributedString.Key {
     /// Marks a range as a markdown marker. Value is `NSValue(range:)` of the
@@ -14,15 +15,19 @@ extension NSAttributedString.Key {
 /// WYSIWYG markdown styling for an `NSTextView`. Applies live styling, tracks
 /// marker ranges so the layout manager can hide them when the cursor is not
 /// editing that element, à la Obsidian / TickTick live-preview.
+///
+/// Parsing is done by Apple's `swift-markdown` (CommonMark + GFM AST). The
+/// regex-based approach this replaced mis-handled nested emphasis (`***x***`),
+/// escaped markers (`\*x\*`), and markers inside code spans.
 enum MarkdownStyler {
     static let baseFontSize: CGFloat = 13
 
     /// Exported so other views can match the body text tone (cursor, typing attrs).
     static let bodyTextColor = NSColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
 
-    private static let markerColor = NSColor.black.withAlphaComponent(0.28)
-    private static let bodyColor   = bodyTextColor
-    private static let codeColor   = NSColor(srgbRed: 0.42, green: 0.18, blue: 0.32, alpha: 1.0)
+    fileprivate static let markerColor = NSColor.black.withAlphaComponent(0.28)
+    fileprivate static let bodyColor   = bodyTextColor
+    fileprivate static let codeColor   = NSColor(srgbRed: 0.42, green: 0.18, blue: 0.32, alpha: 1.0)
 
     /// Re-style the entire text storage. Caller should subsequently call
     /// `updateMarkerVisibility(in:selection:)` to apply the hidden flag.
@@ -31,7 +36,6 @@ enum MarkdownStyler {
         let full = NSRange(location: 0, length: storage.length)
         guard full.length > 0 else { return }
 
-        let nsString = storage.string as NSString
         storage.beginEditing()
         defer { storage.endEditing() }
 
@@ -41,51 +45,17 @@ enum MarkdownStyler {
             .foregroundColor: bodyColor
         ], range: full)
 
-        // Block-level (per line).
-        nsString.enumerateSubstrings(in: full, options: .byLines) { _, lineRange, _, _ in
-            let line = nsString.substring(with: lineRange)
-            applyBlock(line: line, range: lineRange, in: storage)
-        }
+        let source = storage.string
+        let document = Document(parsing: source)
+        let table = LineOffsetTable(source)
+        var visitor = StylingVisitor(storage: storage, source: source as NSString, table: table)
+        visitor.visit(document)
 
-        // Checkbox lines: tag the "- [ ] " / "- [x] " prefix so the editor
-        // can hide it and overlay-draw a real checkbox.
+        // Checkbox lines: tag the "- [ ] " / "- [x] " prefix so the editor can
+        // hide the source markdown and overlay-draw a real checkbox. Kept as a
+        // regex pass — it has app-specific kerning + foreground-clear semantics
+        // that don't belong in the AST walk.
         applyCheckboxes(in: storage, full: full)
-
-        // Inline runs. Order matters: bold first so italic regex skips `**`.
-        applyInline(
-            pattern: #"\*\*([^*\n]+?)\*\*"#,
-            markerLen: 2,
-            in: storage,
-            full: full,
-            innerAttrs: [.font: NSFont.systemFont(ofSize: baseFontSize, weight: .bold)]
-        )
-        applyInline(
-            pattern: #"(?<!\*)\*([^*\n]+?)\*(?!\*)"#,
-            markerLen: 1,
-            in: storage,
-            full: full,
-            innerAttrs: [.font: italicFont(size: baseFontSize)]
-        )
-        applyInline(
-            pattern: #"~~([^~\n]+?)~~"#,
-            markerLen: 2,
-            in: storage,
-            full: full,
-            innerAttrs: [
-                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-                .strikethroughColor: bodyColor
-            ]
-        )
-        applyInline(
-            pattern: #"`([^`\n]+)`"#,
-            markerLen: 1,
-            in: storage,
-            full: full,
-            innerAttrs: [
-                .font: NSFont.monospacedSystemFont(ofSize: baseFontSize - 1, weight: .regular),
-                .foregroundColor: codeColor
-            ]
-        )
     }
 
     /// Sets/removes `mdHidden` on every tagged marker range based on whether the
@@ -157,124 +127,300 @@ enum MarkdownStyler {
         }
     }
 
-    // MARK: - Block
-
-    private static func applyBlock(line: String, range: NSRange, in storage: NSTextStorage) {
-        if line.hasPrefix("# ") {
-            applyHeading(markerLen: 2, fontSize: baseFontSize + 7, weight: .bold, lineRange: range, storage: storage)
-        } else if line.hasPrefix("## ") {
-            applyHeading(markerLen: 3, fontSize: baseFontSize + 4, weight: .semibold, lineRange: range, storage: storage)
-        } else if line.hasPrefix("### ") {
-            applyHeading(markerLen: 4, fontSize: baseFontSize + 1, weight: .semibold, lineRange: range, storage: storage)
-        } else if line.hasPrefix("- ") || line.hasPrefix("* ") {
-            // Checkbox prefix is handled separately so it can render as a real
-            // checkbox; let applyCheckboxes own that range.
-            let isCheckboxLine = line.range(
-                of: #"^[ \t]*-\s\[([ xX])\]\s"#,
-                options: .regularExpression
-            ) != nil
-            if !isCheckboxLine {
-                applyListItem(lineRange: range, storage: storage)
-            }
-        } else if let prefixLen = orderedListMarkerLength(line) {
-            applyOrderedItem(lineRange: range, markerLength: prefixLen, storage: storage)
-        }
-    }
-
-    private static func applyHeading(markerLen: Int, fontSize: CGFloat, weight: NSFont.Weight, lineRange: NSRange, storage: NSTextStorage) {
-        let markerRange = NSRange(location: lineRange.location, length: min(markerLen, lineRange.length))
-        storage.addAttributes([
-            .foregroundColor: markerColor,
-            .font: baseFont(),
-            .mdMarkerScope: NSValue(range: lineRange)
-        ], range: markerRange)
-
-        let textStart = lineRange.location + markerLen
-        let textLen = max(0, lineRange.length - markerLen)
-        guard textLen > 0 else { return }
-        let textRange = NSRange(location: textStart, length: textLen)
-        storage.addAttribute(.font, value: NSFont.systemFont(ofSize: fontSize, weight: weight), range: textRange)
-    }
-
-    private static func applyListItem(lineRange: NSRange, storage: NSTextStorage) {
-        // Marker is "- " / "* " — keep the dash/star visible (it acts as the bullet),
-        // hide only the trailing space after the cursor leaves the line.
-        let markerRange = NSRange(location: lineRange.location, length: 2)
-        storage.addAttribute(.foregroundColor, value: markerColor, range: markerRange)
-
-        let para = NSMutableParagraphStyle()
-        para.headIndent = 14
-        para.firstLineHeadIndent = 0
-        storage.addAttribute(.paragraphStyle, value: para, range: lineRange)
-    }
-
-    /// Returns the number of characters in an ordered-list marker like
-    /// "1. " / "23. " at the start of `line`, or nil if there is none.
-    private static func orderedListMarkerLength(_ line: String) -> Int? {
-        guard let match = line.range(
-            of: #"^\d+\.\s"#,
-            options: .regularExpression
-        ) else { return nil }
-        return line.distance(from: match.lowerBound, to: match.upperBound)
-    }
-
-    private static func applyOrderedItem(lineRange: NSRange, markerLength: Int, storage: NSTextStorage) {
-        let markerRange = NSRange(location: lineRange.location, length: markerLength)
-        storage.addAttribute(.foregroundColor, value: markerColor, range: markerRange)
-
-        let para = NSMutableParagraphStyle()
-        para.headIndent = CGFloat(markerLength) * 8 // approximate; aligns wrap to text
-        para.firstLineHeadIndent = 0
-        storage.addAttribute(.paragraphStyle, value: para, range: lineRange)
-    }
-
-    // MARK: - Inline
-
-    private static func applyInline(
-        pattern: String,
-        markerLen: Int,
-        in storage: NSTextStorage,
-        full: NSRange,
-        innerAttrs: [NSAttributedString.Key: Any]
-    ) {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
-        let matches = regex.matches(in: storage.string, range: full)
-        for match in matches {
-            let r = match.range
-            guard r.length >= markerLen * 2 else { continue }
-
-            let scopeValue = NSValue(range: r)
-            let leadMarker = NSRange(location: r.location, length: markerLen)
-            let trailMarker = NSRange(location: r.location + r.length - markerLen, length: markerLen)
-            storage.addAttributes([
-                .foregroundColor: markerColor,
-                .mdMarkerScope: scopeValue
-            ], range: leadMarker)
-            storage.addAttributes([
-                .foregroundColor: markerColor,
-                .mdMarkerScope: scopeValue
-            ], range: trailMarker)
-
-            let innerStart = r.location + markerLen
-            let innerLen = r.length - markerLen * 2
-            guard innerLen > 0 else { continue }
-            let innerRange = NSRange(location: innerStart, length: innerLen)
-            storage.addAttributes(innerAttrs, range: innerRange)
-        }
-    }
-
     // MARK: - Fonts
 
-    private static func baseFont() -> NSFont {
+    fileprivate static func baseFont() -> NSFont {
         NSFont.systemFont(ofSize: baseFontSize)
     }
 
-    private static func italicFont(size: CGFloat) -> NSFont {
+    fileprivate static func italicFont(size: CGFloat) -> NSFont {
         let base = NSFont.systemFont(ofSize: size)
         if let descriptor = base.fontDescriptor.withSymbolicTraits(.italic) as NSFontDescriptor?,
            let font = NSFont(descriptor: descriptor, size: size) {
             return font
         }
         return base
+    }
+}
+
+// MARK: - Source range mapping
+
+/// Converts swift-markdown `SourceRange` (1-based line/column where column is
+/// a UTF-8 byte offset within the line) into the `NSRange` (UTF-16 offsets)
+/// that NSAttributedString uses.
+private struct LineOffsetTable {
+    private let source: String
+    /// UTF-8 byte offset of the first character of each line. Index 0 unused;
+    /// index N corresponds to line N (1-based, matching swift-markdown).
+    private let utf8LineStarts: [Int]
+    /// UTF-16 unit offset of the first character of each line, parallel to
+    /// `utf8LineStarts`.
+    private let utf16LineStarts: [Int]
+
+    init(_ source: String) {
+        self.source = source
+        var u8: [Int] = [0, 0]
+        var u16: [Int] = [0, 0]
+        var u8Cursor = 0
+        var u16Cursor = 0
+        for scalar in source.unicodeScalars {
+            let isNewline = scalar == "\n"
+            u8Cursor += UTF8.width(scalar)
+            u16Cursor += UTF16.width(scalar)
+            if isNewline {
+                u8.append(u8Cursor)
+                u16.append(u16Cursor)
+            }
+        }
+        self.utf8LineStarts = u8
+        self.utf16LineStarts = u16
+    }
+
+    func nsRange(_ range: SourceRange) -> NSRange? {
+        guard let start = utf16Offset(line: range.lowerBound.line, column: range.lowerBound.column),
+              let end   = utf16Offset(line: range.upperBound.line, column: range.upperBound.column) else {
+            return nil
+        }
+        return NSRange(location: start, length: max(0, end - start))
+    }
+
+    private func utf16Offset(line: Int, column: Int) -> Int? {
+        guard line >= 1 && line < utf16LineStarts.count else { return nil }
+        if column <= 1 { return utf16LineStarts[line] }
+
+        let lineU8Start = utf8LineStarts[line]
+        let targetU8 = lineU8Start + (column - 1)
+
+        // Walk unicode scalars within this line, summing UTF-8 and UTF-16
+        // widths in lockstep, until we've consumed `column - 1` UTF-8 bytes.
+        let utf8 = source.utf8
+        guard let lineStartUtf8 = utf8.index(utf8.startIndex, offsetBy: lineU8Start, limitedBy: utf8.endIndex),
+              let lineStartScalar = lineStartUtf8.samePosition(in: source.unicodeScalars) else {
+            return nil
+        }
+
+        var u8 = lineU8Start
+        var u16 = utf16LineStarts[line]
+        var i = lineStartScalar
+        while u8 < targetU8 && i < source.unicodeScalars.endIndex {
+            let scalar = source.unicodeScalars[i]
+            u8 += UTF8.width(scalar)
+            u16 += UTF16.width(scalar)
+            source.unicodeScalars.formIndex(after: &i)
+        }
+        return u16
+    }
+}
+
+// MARK: - AST walker
+
+/// Walks a swift-markdown `Document` and applies live-preview styling to the
+/// underlying `NSTextStorage`. Block-level nodes (Heading, ListItem) are styled
+/// from the source line because their AST `range` includes child paragraphs
+/// that we don't want to repaint. Inline nodes (Strong, Emphasis, Strikethrough,
+/// InlineCode) get their full marker-and-content range from the AST.
+private struct StylingVisitor: MarkupWalker {
+    let storage: NSTextStorage
+    let source: NSString
+    let table: LineOffsetTable
+
+    // MARK: Block
+
+    mutating func visitHeading(_ heading: Heading) {
+        guard let range = heading.range, let nsr = table.nsRange(range) else {
+            descendInto(heading)
+            return
+        }
+        let lineRange = trimmedLineRange(at: nsr.location)
+        guard lineRange.length > 0 else {
+            descendInto(heading)
+            return
+        }
+        let line = source.substring(with: lineRange)
+        // Only style ATX headings (# / ## / ###). Setext headings (=== / ---)
+        // aren't part of the app's UX surface; leave them alone.
+        let markerLen: Int
+        let fontSize: CGFloat
+        let weight: NSFont.Weight
+        if line.hasPrefix("# ") {
+            markerLen = 2; fontSize = MarkdownStyler.baseFontSize + 7; weight = .bold
+        } else if line.hasPrefix("## ") {
+            markerLen = 3; fontSize = MarkdownStyler.baseFontSize + 4; weight = .semibold
+        } else if line.hasPrefix("### ") {
+            markerLen = 4; fontSize = MarkdownStyler.baseFontSize + 1; weight = .semibold
+        } else {
+            descendInto(heading)
+            return
+        }
+
+        let markerRange = NSRange(location: lineRange.location, length: min(markerLen, lineRange.length))
+        storage.addAttributes([
+            .foregroundColor: MarkdownStyler.markerColor,
+            .font: MarkdownStyler.baseFont(),
+            .mdMarkerScope: NSValue(range: lineRange)
+        ], range: markerRange)
+
+        let textStart = lineRange.location + markerLen
+        let textLen = max(0, lineRange.length - markerLen)
+        if textLen > 0 {
+            storage.addAttribute(
+                .font,
+                value: NSFont.systemFont(ofSize: fontSize, weight: weight),
+                range: NSRange(location: textStart, length: textLen)
+            )
+        }
+
+        descendInto(heading)
+    }
+
+    mutating func visitListItem(_ item: ListItem) {
+        // Checkbox items are owned by `applyCheckboxes` — skip the marker
+        // styling but still descend so any nested emphasis / code gets styled.
+        if item.checkbox != nil {
+            descendInto(item)
+            return
+        }
+        guard let range = item.range, let nsr = table.nsRange(range) else {
+            descendInto(item)
+            return
+        }
+        let lineRange = trimmedLineRange(at: nsr.location)
+        guard lineRange.length > 0 else {
+            descendInto(item)
+            return
+        }
+        let line = source.substring(with: lineRange)
+        let leadingWhitespace = line.prefix(while: { $0 == " " || $0 == "\t" }).count
+        let body = line.dropFirst(leadingWhitespace)
+
+        if body.hasPrefix("- ") || body.hasPrefix("* ") {
+            applyListMarker(
+                lineRange: lineRange,
+                markerStart: lineRange.location + leadingWhitespace,
+                markerLength: 2,
+                headIndent: 14
+            )
+        } else if let markerLen = orderedListMarkerLength(body) {
+            applyListMarker(
+                lineRange: lineRange,
+                markerStart: lineRange.location + leadingWhitespace,
+                markerLength: markerLen,
+                headIndent: CGFloat(markerLen) * 8
+            )
+        }
+        descendInto(item)
+    }
+
+    private func applyListMarker(lineRange: NSRange, markerStart: Int, markerLength: Int, headIndent: CGFloat) {
+        let markerRange = NSRange(location: markerStart, length: markerLength)
+        storage.addAttribute(.foregroundColor, value: MarkdownStyler.markerColor, range: markerRange)
+
+        let para = NSMutableParagraphStyle()
+        para.headIndent = headIndent
+        para.firstLineHeadIndent = 0
+        storage.addAttribute(.paragraphStyle, value: para, range: lineRange)
+    }
+
+    private func orderedListMarkerLength(_ text: Substring) -> Int? {
+        var digits = 0
+        for ch in text {
+            if ch.isNumber { digits += 1 } else { break }
+        }
+        guard digits > 0 else { return nil }
+        let after = text.index(text.startIndex, offsetBy: digits)
+        guard after < text.endIndex, text[after] == "." else { return nil }
+        let space = text.index(after: after)
+        guard space < text.endIndex, text[space] == " " else { return nil }
+        return digits + 2
+    }
+
+    // MARK: Inline
+
+    mutating func visitStrong(_ strong: Strong) {
+        applyInlineMarker(node: strong, markerLen: 2, innerAttrs: [
+            .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize, weight: .bold)
+        ])
+        descendInto(strong)
+    }
+
+    mutating func visitEmphasis(_ emphasis: Emphasis) {
+        applyInlineMarker(node: emphasis, markerLen: 1, innerAttrs: [
+            .font: MarkdownStyler.italicFont(size: MarkdownStyler.baseFontSize)
+        ])
+        descendInto(emphasis)
+    }
+
+    mutating func visitStrikethrough(_ strike: Strikethrough) {
+        applyInlineMarker(node: strike, markerLen: 2, innerAttrs: [
+            .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+            .strikethroughColor: MarkdownStyler.bodyTextColor
+        ])
+        descendInto(strike)
+    }
+
+    mutating func visitInlineCode(_ code: InlineCode) {
+        // Backtick spans can be opened with ``one``, ``two``, etc. Recover
+        // marker length from the source rather than assuming 1.
+        guard let range = code.range, let nsr = table.nsRange(range) else { return }
+        let text = source.substring(with: nsr)
+        let backticks = text.prefix(while: { $0 == "`" }).count
+        guard backticks > 0, nsr.length >= backticks * 2 else { return }
+        applyInlineMarkerRange(
+            nsr,
+            markerLen: backticks,
+            innerAttrs: [
+                .font: NSFont.monospacedSystemFont(ofSize: MarkdownStyler.baseFontSize - 1, weight: .regular),
+                .foregroundColor: MarkdownStyler.codeColor
+            ]
+        )
+    }
+
+    private func applyInlineMarker(node: Markup, markerLen: Int, innerAttrs: [NSAttributedString.Key: Any]) {
+        guard let range = node.range, let nsr = table.nsRange(range) else { return }
+        guard nsr.length >= markerLen * 2 else { return }
+        applyInlineMarkerRange(nsr, markerLen: markerLen, innerAttrs: innerAttrs)
+    }
+
+    private func applyInlineMarkerRange(_ nsr: NSRange, markerLen: Int, innerAttrs: [NSAttributedString.Key: Any]) {
+        let scope = NSValue(range: nsr)
+        let lead  = NSRange(location: nsr.location, length: markerLen)
+        let trail = NSRange(location: nsr.location + nsr.length - markerLen, length: markerLen)
+        storage.addAttributes([
+            .foregroundColor: MarkdownStyler.markerColor,
+            .mdMarkerScope: scope
+        ], range: lead)
+        storage.addAttributes([
+            .foregroundColor: MarkdownStyler.markerColor,
+            .mdMarkerScope: scope
+        ], range: trail)
+
+        let innerLen = nsr.length - markerLen * 2
+        if innerLen > 0 {
+            storage.addAttributes(
+                innerAttrs,
+                range: NSRange(location: nsr.location + markerLen, length: innerLen)
+            )
+        }
+    }
+
+    // MARK: Line range helper
+
+    /// Returns the range of the line containing `location`, *excluding* the
+    /// trailing newline. Matches the geometry of `NSString.enumerateSubstrings(.byLines)`
+    /// that the previous regex-based block styler used.
+    private func trimmedLineRange(at location: Int) -> NSRange {
+        let probe = NSRange(location: max(0, min(location, source.length)), length: 0)
+        let lr = source.lineRange(for: probe)
+        var len = lr.length
+        if len > 0 {
+            let last = source.character(at: lr.location + len - 1)
+            if last == 0x0A {
+                len -= 1
+                if len > 0 && source.character(at: lr.location + len - 1) == 0x0D {
+                    len -= 1
+                }
+            }
+        }
+        return NSRange(location: lr.location, length: len)
     }
 }
