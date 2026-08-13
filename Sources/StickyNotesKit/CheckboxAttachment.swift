@@ -85,8 +85,20 @@ final class TodoTextView: NSTextView {
             return
         }
         if handleLinkClick(at: viewPoint, event: event) { return }
+
+        // ⌘-drag anywhere moves the note. The 22pt title strip is a precise
+        // target for the most common physical action; this is the easy path.
+        // (A ⌘-click on a link is handled above and never reaches here.)
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
+            window?.performDrag(with: event)
+            onCommandDragEnded?()
+            return
+        }
         super.mouseDown(with: event)
     }
+
+    /// Called after a ⌘-drag finishes, so the controller can snap the note.
+    var onCommandDragEnded: (() -> Void)?
 
     /// Open a link on ⌘-click, or on a plain click when this editor doesn't
     /// have focus. Clicking a link in the note you're editing places the caret

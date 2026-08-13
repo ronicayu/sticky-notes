@@ -91,6 +91,9 @@ extension NSColor {
 
 protocol NoteDragZoneDelegate: AnyObject {
     func dragZoneDidDoubleClick()
+    /// A click that didn't turn into a drag. Only sent while collapsed, where
+    /// the 22pt bar is the whole note and double-clicking it isn't discoverable.
+    func dragZoneDidClick()
     /// Called once the drag loop finishes, so the note can settle against
     /// nearby edges. `suppressSnapping` is true when the user held Option.
     func dragZoneDidEndDrag(suppressSnapping: Bool)
@@ -102,6 +105,10 @@ protocol NoteDragZoneDelegate: AnyObject {
 final class NoteDragZone: NSView {
     weak var delegate: NoteDragZoneDelegate?
 
+    /// When true, a click that doesn't move reports `dragZoneDidClick`.
+    /// Set while the note is collapsed.
+    var reportsSingleClick = false
+
     override var isFlipped: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
@@ -109,79 +116,58 @@ final class NoteDragZone: NSView {
             delegate?.dragZoneDidDoubleClick()
             return
         }
+        let origin = window?.frame.origin
         // performDrag runs its own event loop and returns when the mouse is
         // released — snapping here means the note settles once, on drop,
         // rather than fighting the pointer the whole way.
         window?.performDrag(with: event)
+
+        // Distinguish a click from a drag by how far the window actually
+        // moved. performDrag swallows the intermediate events, so the window's
+        // own displacement is the only signal available.
+        let moved = origin.map { start in
+            guard let end = window?.frame.origin else { return false }
+            return abs(end.x - start.x) > 2 || abs(end.y - start.y) > 2
+        } ?? false
+
+        if !moved {
+            if reportsSingleClick { delegate?.dragZoneDidClick() }
+            return
+        }
         let optionHeld = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option)
         delegate?.dragZoneDidEndDrag(suppressSnapping: optionHeld)
     }
 }
 
-// MARK: - Color picker
 
-protocol ColorPickerBarDelegate: AnyObject {
-    func colorPicker(_ bar: ColorPickerBar, didSelect color: NoteColor)
-}
+// MARK: - Resize affordance
 
-/// Horizontal row of color dots. The currently active color renders as a
-/// hollow ring; the rest as filled circles.
-final class ColorPickerBar: NSView {
-    weak var delegate: ColorPickerBarDelegate?
+/// Three diagonal dots in the bottom-right corner, drawn only while the
+/// pointer is over the note.
+///
+/// The window is borderless and resizable, which gives no visual hint that
+/// dragging the corner does anything. This doesn't implement resizing — AppKit
+/// already handles that — it just says the corner is live.
+final class ResizeGripView: NSView {
+    override var isFlipped: Bool { true }
 
-    var currentColor: NoteColor {
-        didSet { needsDisplay = true }
-    }
-
-    private let colors = NoteColor.allCases
-    private let dotSize: CGFloat = 11
-    private let spacing: CGFloat = 7
-
-    init(currentColor: NoteColor) {
-        self.currentColor = currentColor
-        super.init(frame: .zero)
-        wantsLayer = true
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var intrinsicContentSize: NSSize {
-        let count = CGFloat(colors.count)
-        return NSSize(width: count * dotSize + (count - 1) * spacing, height: dotSize)
-    }
+    /// Purely decorative: the window's own resize region handles the drag, and
+    /// swallowing clicks here would break it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        for (i, color) in colors.enumerated() {
-            let rect = dotRect(at: i)
-            let path = NSBezierPath(ovalIn: rect)
+        let color = (Appearance.isDark ? NSColor.white : NSColor.black).withAlphaComponent(0.28)
+        color.setFill()
 
-            if color == currentColor {
-                // Hollow ring for the currently selected color.
-                NSColor.black.withAlphaComponent(0.35).setStroke()
-                path.lineWidth = 1.2
-                path.stroke()
-            } else {
-                NSColor(hex: color.bodyHex)?.setFill()
-                path.fill()
-                NSColor.black.withAlphaComponent(0.18).setStroke()
-                path.lineWidth = 0.5
-                path.stroke()
+        let dot: CGFloat = 2
+        let gap: CGFloat = 4
+        // Rows of 1, 2, 3 dots stepping out from the corner.
+        for row in 0..<3 {
+            for column in 0...row {
+                let x = bounds.maxX - gap - dot - CGFloat(row - column) * gap
+                let y = bounds.maxY - gap - dot - CGFloat(column) * gap
+                NSBezierPath(ovalIn: NSRect(x: x, y: y, width: dot, height: dot)).fill()
             }
         }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        let local = convert(event.locationInWindow, from: nil)
-        for (i, color) in colors.enumerated() {
-            if dotRect(at: i).insetBy(dx: -3, dy: -3).contains(local) {
-                delegate?.colorPicker(self, didSelect: color)
-                return
-            }
-        }
-    }
-
-    private func dotRect(at index: Int) -> NSRect {
-        let x = CGFloat(index) * (dotSize + spacing)
-        return NSRect(x: x, y: 0, width: dotSize, height: dotSize)
     }
 }

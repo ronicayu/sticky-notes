@@ -166,6 +166,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         // already opened at the right height so this is just sizing the
         // scroll view side of things.
         if state.collapsed { applyCollapse(true, animated: false) }
+        dragZone.reportsSingleClick = state.collapsed
     }
 
     private static func makeChromeButton(symbol: String, tooltip: String) -> NSButton {
@@ -480,8 +481,14 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
             }
         }
         state.collapsed = target
+        dragZone.reportsSingleClick = target
         applyCollapse(target, animated: true)
         DailyNote.saveState(state)
+    }
+
+    func dragZoneDidClick() {
+        guard DailyNote.loadState().collapsed else { return }
+        dragZoneDidDoubleClick()
     }
 
     func dragZoneDidEndDrag(suppressSnapping: Bool) {

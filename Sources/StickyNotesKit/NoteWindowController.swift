@@ -54,6 +54,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private let layoutManager: NSLayoutManager
     private let scrollView: NSScrollView
     private let backgroundView: HoverTrackingView
+    private let resizeGrip = ResizeGripView()
 
     private var saveWorkItem: DispatchWorkItem?
     private var savingDisabled = false
@@ -90,7 +91,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// Height of the title row sitting below the chrome when expanded.
     static let titleRowHeight: CGFloat = 28
     /// Window height when collapsed (matches the chrome strip exactly).
-    static let collapsedHeight: CGFloat = 18
+    static let collapsedHeight: CGFloat = 22
 
     private static let slashDateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -198,6 +199,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         titleLabel.textColor = MarkdownStyler.bodyTextColor
         titleLabel.placeholder = "Untitled"
         titleLabel.isHidden = !note.collapsed
+        dragZone.reportsSingleClick = note.collapsed
 
         bodyContainer = NSView()
         bodyContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -262,6 +264,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         bodyContainer.addSubview(scrollView)
         bodyContainer.addSubview(footerView)
         dragZone.addSubview(titleLabel)
+
+        resizeGrip.translatesAutoresizingMaskIntoConstraints = false
+        resizeGrip.alphaValue = 0
+        backgroundView.addSubview(resizeGrip)
         dragZone.addSubview(colorButton)
         dragZone.addSubview(expandButton)
         dragZone.addSubview(trashButton)
@@ -306,6 +312,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             expandButton.heightAnchor.constraint(equalToConstant: 13),
 
             // Collapsed title label fills the drag zone.
+            resizeGrip.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor),
+            resizeGrip.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor),
+            resizeGrip.widthAnchor.constraint(equalToConstant: 18),
+            resizeGrip.heightAnchor.constraint(equalToConstant: 18),
+
             titleLabel.leadingAnchor.constraint(equalTo: dragZone.leadingAnchor, constant: 14),
             titleLabel.trailingAnchor.constraint(equalTo: dragZone.trailingAnchor, constant: -14),
             titleLabel.topAnchor.constraint(equalTo: dragZone.topAnchor),
@@ -356,6 +367,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         window.contentMinSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         textView.delegate = self
         textView.todoDelegate = self
+        textView.onCommandDragEnded = { [weak self] in
+            self?.dragZoneDidEndDrag(suppressSnapping: false)
+        }
         applyFloatLevel()
         NotificationCenter.default.addObserver(
             self,
@@ -484,11 +498,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
                 expandButton.animator().alphaValue = target
                 colorButton.animator().alphaValue = target
                 labelButton.animator().alphaValue = target
+                resizeGrip.animator().alphaValue = target
             }
         } else {
             trashButton.alphaValue = target
             expandButton.alphaValue = target
             colorButton.alphaValue = target
+            resizeGrip.alphaValue = target
             labelButton.alphaValue = target
         }
     }
@@ -622,6 +638,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     // MARK: - NSWindowDelegate
 
+    /// A collapsed note is an 18pt bar whose only affordance is knowing to
+    /// double-click it. One click expands.
+    func dragZoneDidClick() {
+        guard note.collapsed else { return }
+        dragZoneDidDoubleClick()
+    }
+
     func dragZoneDidEndDrag(suppressSnapping: Bool) {
         guard !suppressSnapping, let window = window else { return }
         let others = NSApp.windows
@@ -633,6 +656,23 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         let snapped = WindowArrangement.snap(window.frame, toScreen: screen, others: others)
         guard snapped != window.frame else { return }
         window.setFrameOrigin(snapped.origin)
+        flashSnapFeedback()
+    }
+
+    /// Snapping teleports the note on drop with no acknowledgement, which
+    /// reads as a glitch the first time. A brief pulse of the border shows
+    /// what happened and teaches the feature by demonstrating it.
+    private func flashSnapFeedback() {
+        guard !Appearance.reduceMotion, let layer = backgroundView.layer else { return }
+        layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.9).cgColor
+        layer.borderWidth = 2
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { [weak self] in
+            guard let layer = self?.backgroundView.layer else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                layer.borderWidth = 0
+            }
+        }
     }
 
     /// Move this note to `frame`, animated. Used by the Arrange command.
@@ -1147,6 +1187,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
             refreshCollapsedTitle()
             titleLabel.isHidden = false
+            dragZone.reportsSingleClick = true
             bodyContainer.isHidden = true
             bodyHeightZeroConstraint.isActive = true
 
@@ -1159,6 +1200,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
         } else {
             titleLabel.isHidden = true
+            dragZone.reportsSingleClick = false
             bodyContainer.isHidden = false
             bodyHeightZeroConstraint.isActive = false
 
