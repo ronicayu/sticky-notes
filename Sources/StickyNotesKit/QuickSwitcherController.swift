@@ -372,7 +372,16 @@ private final class QuickSwitcherCell: NSView {
         // Only repeat the excerpt when it says something the heading doesn't.
         let excerpt = match.excerpt
         detailLabel.stringValue = (excerpt == heading) ? relativeDate(match.note) : excerpt
-        badge.stringValue = archived ? "archived" : ""
+
+        // Task progress earns the badge slot over the archived marker — it
+        // changes, and it's the thing you're deciding on.
+        if let progress = MarkdownEditing.checkboxProgress(in: match.note.content) {
+            badge.stringValue = archived
+                ? "\(progress.done)/\(progress.total) · archived"
+                : "\(progress.done)/\(progress.total)"
+        } else {
+            badge.stringValue = archived ? "archived" : ""
+        }
     }
 
     /// A note edited seconds ago reads as "in 0 seconds" through

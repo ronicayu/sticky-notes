@@ -523,7 +523,10 @@ final class NotesPanelCell: NSView {
         }
 
         // Show why this row matched, unless that just repeats the heading.
-        detail.stringValue = match.excerpt == heading ? labelSummary(note) : match.excerpt
+        let reason = match.excerpt == heading ? labelSummary(note) : match.excerpt
+        detail.stringValue = [taskProgress(note), reason]
+            .filter { !$0.isEmpty }
+            .joined(separator: "   ")
         detail.isHidden = detail.stringValue.isEmpty
 
         timeLabel.stringValue = NotesPanelCell.relativeFormatter.localizedString(for: note.updatedAt, relativeTo: Date())
@@ -531,6 +534,13 @@ final class NotesPanelCell: NSView {
 
     private func labelSummary(_ note: Note) -> String {
         note.labels.isEmpty ? "" : note.labels.map { "#\($0)" }.joined(separator: "  ")
+    }
+
+    /// "2/5" for a note with checkboxes, empty otherwise — enough to see what's
+    /// left without opening the note.
+    private func taskProgress(_ note: Note) -> String {
+        guard let progress = MarkdownEditing.checkboxProgress(in: note.content) else { return "" }
+        return "\(progress.done)/\(progress.total)"
     }
 
     private static func stripMarkdown(_ line: String) -> String {

@@ -14,6 +14,8 @@ Built with AppKit. Two dependencies: [`KeyboardShortcuts`](https://github.com/si
 - **Quick switcher** — `⌘⇧F` opens a Spotlight-style palette that searches titles, labels, and text across active *and* archived notes. Arrows to move, `↩` to open, `esc` to close. Type `#label` to narrow to a label. Picking an archived note restores it.
 - **Floating windows** — every note stays above all other windows and follows you across Spaces.
 - **Live Markdown** — `# heading`, `**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `- list`. Markers hide automatically when the cursor is not inside the element, like Obsidian / TickTick live preview.
+- **Editor shortcuts** — `⌘B` / `⌘I` / `⌘E` wrap the selection in bold, italic, or code (press again to unwrap). `⌘↩` turns the current line into a task, then checks and unchecks it. `⇥` / `⇧⇥` indent and outdent list items. `↩` continues a list and exits it on an empty item.
+- **Task progress** — notes with checkboxes show a `2/5` count in the notes panel and quick switcher.
 - **Collapse / expand** — double-click a note's header to collapse it into a slim title bar; double-click again to expand.
 - **Color picker** — 7 vibrant pastels (yellow, pink, orange, green, blue, purple, gray).
 - **Auto-fade** — notes dim when not focused, snap back to full opacity on hover or focus.

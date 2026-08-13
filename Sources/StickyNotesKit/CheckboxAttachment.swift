@@ -86,6 +86,58 @@ final class TodoTextView: NSTextView {
         super.mouseDown(with: event)
     }
 
+    // MARK: - Markdown shortcuts
+
+    /// ⌘B / ⌘I / ⌘E wrap the selection, ⌘↩ turns the current line into a task.
+    /// Handled here rather than through the main menu so they only apply while
+    /// a note editor has focus.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard mods == .command else { return super.performKeyEquivalent(with: event) }
+
+        if event.keyCode == 36 || event.keyCode == 76 {     // return, enter
+            return apply { MarkdownEditing.toggleCheckbox($0, selection: $1) }
+        }
+
+        let marker: String?
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "b": marker = "**"
+        case "i": marker = "*"
+        case "e": marker = "`"
+        default:  marker = nil
+        }
+        guard let marker = marker else { return super.performKeyEquivalent(with: event) }
+        return apply { MarkdownEditing.toggleWrap($0, selection: $1, marker: marker) }
+    }
+
+    /// Indent and outdent list items. Only claims Tab on a list line so it
+    /// still moves focus everywhere else.
+    func indentSelection(outdent: Bool) -> Bool {
+        guard MarkdownEditing.isListLine(string, selection: selectedRange()) else { return false }
+        return apply { text, selection in
+            outdent
+                ? MarkdownEditing.outdent(text, selection: selection)
+                : MarkdownEditing.indent(text, selection: selection)
+        }
+    }
+
+    /// Run a transform through the undo-aware editing path so ⌘Z still works.
+    /// `didChangeText()` drives the delegate's usual restyle-and-save path, so
+    /// there's nothing extra to notify.
+    private func apply(_ transform: (String, NSRange) -> MarkdownEditing.Edit) -> Bool {
+        let edit = transform(string, selectedRange())
+        guard edit.text != string else {
+            setSelectedRange(edit.selection)
+            return true
+        }
+        let whole = NSRange(location: 0, length: (string as NSString).length)
+        guard shouldChangeText(in: whole, replacementString: edit.text) else { return false }
+        textStorage?.replaceCharacters(in: whole, with: edit.text)
+        didChangeText()
+        setSelectedRange(edit.selection)
+        return true
+    }
+
     private func checkboxStartIndex(at point: NSPoint) -> Int? {
         guard let storage = textStorage, let lm = layoutManager, let tc = textContainer else { return nil }
         let full = NSRange(location: 0, length: storage.length)

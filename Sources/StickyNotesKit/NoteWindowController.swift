@@ -650,6 +650,14 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             return handleListContinuation()
         }
 
+        // Tab indents a list item; anywhere else it keeps its normal meaning.
+        if commandSelector == #selector(NSResponder.insertTab(_:)) {
+            return self.textView.indentSelection(outdent: false)
+        }
+        if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
+            return self.textView.indentSelection(outdent: true)
+        }
+
         return false
     }
 
