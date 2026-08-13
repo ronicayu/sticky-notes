@@ -30,5 +30,44 @@
     <string>Copyright © 2026. All rights reserved.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+
+    <!-- stickynotes:// — lets Raycast, Alfred, Shortcuts, and shell scripts
+         create notes and run searches without a per-tool integration. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.ronica.stickynotes.url</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>stickynotes</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- Puts "New Sticky Note" in the Services menu of every app, so a
+         selection anywhere can become a note. Only works from the built
+         .app bundle; `swift run` has no Info.plist for the system to read. -->
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>New Sticky Note</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>makeNoteFromService</string>
+            <key>NSPortName</key>
+            <string>StickyNotes</string>
+            <key>NSSendTypes</key>
+            <array>
+                <string>NSStringPboardType</string>
+                <string>public.utf8-plain-text</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

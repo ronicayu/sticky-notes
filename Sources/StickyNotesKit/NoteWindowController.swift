@@ -383,6 +383,16 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     /// Focus the title field, placing the caret after any existing text.
+    /// Put the caret at the end of the body. Used when a note arrives with
+    /// text already in it, so the user can keep typing after it.
+    func focusBodyEnd() {
+        guard let window = window else { return }
+        window.makeFirstResponder(textView)
+        let end = (textView.string as NSString).length
+        textView.setSelectedRange(NSRange(location: end, length: 0))
+        textView.scrollRangeToVisible(NSRange(location: end, length: 0))
+    }
+
     func focusTitle() {
         guard let window = window else { return }
         window.makeFirstResponder(titleField)

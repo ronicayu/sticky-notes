@@ -22,6 +22,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         self?.handleStoreChange()
     }
 
+    /// URL handling has to be registered before launch finishes, or a URL that
+    /// launched the app is delivered before anyone is listening.
+    public func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleURLEvent(_:replyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+        NSApp.servicesProvider = self
+    }
+
     public func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
         setupMenuBar()
@@ -170,6 +182,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         // Daily actions on top — these are the things you do, not configure.
         menu.addItem(withTitle: "New Note  ⌘⇧S", action: #selector(newNote), keyEquivalent: "")
+        menu.addItem(withTitle: "New Note from Clipboard  ⌥⌘⇧V",
+                     action: #selector(newNoteFromClipboard),
+                     keyEquivalent: "")
         menu.addItem(withTitle: "Find Note…  ⌘⇧F", action: #selector(toggleQuickSwitcher), keyEquivalent: "")
         menu.addItem(withTitle: "Notes  ⌘⇧L", action: #selector(showNotesPanel), keyEquivalent: "")
         hideAllItem = NSMenuItem(title: "Hide All Notes  ⌘⇧H",
@@ -243,6 +258,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         KeyboardShortcuts.onKeyDown(for: .quickSwitcher) { [weak self] in
             self?.toggleQuickSwitcher()
+        }
+        KeyboardShortcuts.onKeyDown(for: .newFromClipboard) { [weak self] in
+            self?.newNoteFromClipboard()
         }
     }
 
@@ -356,15 +374,101 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     @objc func newNote() {
+        makeNote()
+    }
+
+    /// Create, save, and present a note. Everything that captures a note —
+    /// the hotkey, the clipboard, a Service, a URL — comes through here.
+    @discardableResult
+    private func makeNote(
+        title: String? = nil,
+        text: String = "",
+        color: NoteColor? = nil,
+        labels: [String] = []
+    ) -> UUID {
         // Creating a new note while everything is hidden should bring all
         // notes back so the new one isn't the only thing visible.
         if notesHidden { toggleHideAll() }
-        let note = Note.makeNew()
+
+        var note = Note.makeNew()
+        if let title = title { note.title = title }
+        if let color = color { note.color = color }
+        note.content = text
+        note.labels = labels
         noteStore.save(note)
         presentWindow(for: note)
-        // New notes start with the cursor in the title — that's where the
-        // user should be naming the thing first.
-        windowControllers[note.id]?.focusTitle()
+
+        // An empty note starts in the title — that's where the user should be
+        // naming the thing. One that arrived with text starts in the body,
+        // after what's already there.
+        if text.isEmpty {
+            windowControllers[note.id]?.focusTitle()
+        } else {
+            windowControllers[note.id]?.focusBodyEnd()
+        }
+        return note.id
+    }
+
+    /// New note pre-filled from the clipboard. Pasted images and files are
+    /// saved as attachments the same way an in-editor paste would.
+    @objc func newNoteFromClipboard() {
+        let pasteboard = NSPasteboard.general
+        if let markdown = Attachments.handlePaste(pasteboard, for: noteStore) {
+            makeNote(text: markdown)
+            return
+        }
+        let text = pasteboard.string(forType: .string) ?? ""
+        makeNote(text: text)
+    }
+
+    // MARK: - Services
+
+    /// Wired up by the `NSServices` entry in Info.plist, so any app's
+    /// right-click menu can send a selection straight into a new note.
+    @objc func makeNoteFromService(
+        _ pasteboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString>?
+    ) {
+        guard let text = pasteboard.string(forType: .string), !text.isEmpty else {
+            error?.pointee = "No text was selected." as NSString
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        makeNote(text: text)
+    }
+
+    // MARK: - URL scheme
+
+    /// Handles `stickynotes://` URLs. Registered in
+    /// `applicationWillFinishLaunching`, which is early enough to catch a URL
+    /// that launched the app.
+    @objc func handleURLEvent(_ event: NSAppleEventDescriptor, replyEvent: NSAppleEventDescriptor) {
+        guard let string = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: string),
+              let command = CaptureCommand.parse(url) else { return }
+        perform(command)
+    }
+
+    func perform(_ command: CaptureCommand) {
+        switch command {
+        case let .new(title, text, color, labels):
+            NSApp.activate(ignoringOtherApps: true)
+            makeNote(title: title, text: text, color: color, labels: labels)
+
+        case let .search(query):
+            if quickSwitcher == nil {
+                quickSwitcher = QuickSwitcherController(store: noteStore) { [weak self] selection in
+                    self?.reveal(selection)
+                }
+            }
+            quickSwitcher?.show()
+            if !query.isEmpty { quickSwitcher?.search(query) }
+
+        case .daily:
+            NSApp.activate(ignoringOtherApps: true)
+            openTodaysDailyNote()
+        }
     }
 
     @objc func showNotesPanel() {

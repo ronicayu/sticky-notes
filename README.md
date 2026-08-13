@@ -58,6 +58,23 @@ swift run
 cp -R build/StickyNotes.app /Applications/
 ```
 
+## Automation
+
+Sticky Notes registers a `stickynotes://` URL scheme, so Raycast, Alfred, Shortcuts, or a shell script can drive it:
+
+```bash
+open "stickynotes://new?text=buy%20milk&color=blue&labels=home,errands"
+open "stickynotes://new?title=Standup&body=blocked%20on%20the%20migration"
+open "stickynotes://search?q=groceries"   # opens the quick switcher, pre-filled
+open "stickynotes://daily"                # opens today's daily note
+```
+
+`text` and `body` are interchangeable, as are `search` and `find`. Labels are normalized the same way typed ones are, unknown parameters are ignored, and `+` decodes as a space.
+
+There's also a **New Sticky Note** entry in every app's Services menu that turns the current selection into a note, and `⌥⌘⇧V` makes a note from the clipboard — including images, which are saved as attachments.
+
+Services and the URL scheme both need the built `.app` bundle; neither works under bare `swift run`, which has no `Info.plist` for the system to read.
+
 ## Settings
 
 Open with `⌘,` or **Settings…** in the menu bar. Three panes:

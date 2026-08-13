@@ -232,6 +232,8 @@ private final class GeneralPaneView: NSView {
                                      recorder: KeyboardShortcuts.RecorderCocoa(for: .newNote))
         let findRow    = recorderRow(title: "Find note",
                                      recorder: KeyboardShortcuts.RecorderCocoa(for: .quickSwitcher))
+        let clipRow    = recorderRow(title: "New note from clipboard",
+                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .newFromClipboard))
         let panelRow   = recorderRow(title: "Show notes panel",
                                      recorder: KeyboardShortcuts.RecorderCocoa(for: .notesPanel))
         let hideRow    = recorderRow(title: "Hide all notes",
@@ -240,7 +242,7 @@ private final class GeneralPaneView: NSView {
         let stack = NSStackView(views: [
             launchToggle,
             colorLabel, colorRow,
-            shortcutsLabel, newNoteRow, findRow, panelRow, hideRow
+            shortcutsLabel, newNoteRow, clipRow, findRow, panelRow, hideRow
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
