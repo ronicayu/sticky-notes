@@ -12,7 +12,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private var hideAllItem: NSMenuItem!
     private var dailyNoteItem: NSMenuItem!
     private var storageWarningItem: NSMenuItem!
-    private var permissionWarningItem: NSMenuItem!
     private var showLabelsItem: NSMenuItem!
     private var dailyNoteController: DailyNoteWindowController?
     private var settingsController: SettingsWindowController?
@@ -38,6 +37,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         )
         NSApp.servicesProvider = self
         Appearance.startObserving()
+    }
+
+    /// Saves are debounced, so quitting has to drain them before the process
+    /// goes away — otherwise everything typed since the last pause is lost.
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        flushPendingSaves()
+        return .terminateNow
+    }
+
+    func flushPendingSaves() {
+        for controller in windowControllers.values {
+            controller.flushPendingSave()
+        }
+        dailyNoteController?.flushPendingSave()
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -69,10 +82,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         restoreDailyNoteIfNeeded()
 
         // A first launch showing an empty screen looks like a failed one.
-        if let welcome = WelcomeNote.makeIfNeeded(
-            store: noteStore,
-            needsAccessibilityPermission: !HotkeyAdvice.hasAccessibilityPermission
-        ) {
+        if let welcome = WelcomeNote.makeIfNeeded(store: noteStore) {
             presentWindow(for: welcome)
         }
     }
@@ -202,23 +212,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         storageWarningItem.isHidden = true
         menu.addItem(storageWarningItem)
 
-        // Shown only while hotkeys can't actually be registered.
-        permissionWarningItem = NSMenuItem(title: HotkeyAdvice.permissionMenuTitle,
-                                           action: #selector(openAccessibilitySettings),
-                                           keyEquivalent: "")
-        permissionWarningItem.isHidden = true
-        menu.addItem(permissionWarningItem)
-
         menu.addItem(.separator())
 
         // Capture first — the things you actually do. Everything that
         // manages notes rather than making them goes in one submenu, which
         // keeps the top level at a glanceable seven rows.
-        menu.addItem(withTitle: "New Note  ⌘⇧S", action: #selector(newNote), keyEquivalent: "")
-        menu.addItem(withTitle: "New from Clipboard  ⌥⌘⇧V",
-                     action: #selector(newNoteFromClipboard),
-                     keyEquivalent: "")
-        menu.addItem(withTitle: "Find Note…  ⌘⇧F", action: #selector(toggleQuickSwitcher), keyEquivalent: "")
+        // Titles carry no chord text: the shortcuts are user-rebindable, and
+        // `setShortcut(for:)` renders whatever is currently bound and keeps
+        // it up to date. Spelling them out left the menu advertising chords
+        // that no longer worked.
+        showChord(.newNote,
+                  on: menu.addItem(withTitle: "New Note", action: #selector(newNote), keyEquivalent: ""))
+        showChord(.newFromClipboard,
+                  on: menu.addItem(withTitle: "New from Clipboard",
+                                   action: #selector(newNoteFromClipboard),
+                                   keyEquivalent: ""))
+        showChord(.quickSwitcher,
+                  on: menu.addItem(withTitle: "Find Note…",
+                                   action: #selector(toggleQuickSwitcher),
+                                   keyEquivalent: ""))
 
         dailyNoteItem = NSMenuItem(title: "Today's Daily Note",
                                    action: #selector(toggleDailyNote),
@@ -229,14 +241,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         let notesItem = NSMenuItem(title: "Notes", action: nil, keyEquivalent: "")
         let notesMenu = NSMenu(title: "Notes")
-        notesMenu.addItem(withTitle: "All Notes…  ⌘⇧L",
-                          action: #selector(showNotesPanel),
-                          keyEquivalent: "").target = self
+        let allNotesItem = notesMenu.addItem(withTitle: "All Notes…",
+                                             action: #selector(showNotesPanel),
+                                             keyEquivalent: "")
+        allNotesItem.target = self
+        showChord(.notesPanel, on: allNotesItem)
 
-        hideAllItem = NSMenuItem(title: "Hide All Notes  ⌘⇧H",
+        hideAllItem = NSMenuItem(title: "Hide All Notes",
                                  action: #selector(toggleHideAll),
                                  keyEquivalent: "")
         hideAllItem.target = self
+        showChord(.hideAll, on: hideAllItem)
         notesMenu.addItem(hideAllItem)
 
         showLabelsItem = NSMenuItem(title: "Show Labels", action: nil, keyEquivalent: "")
@@ -277,18 +292,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         return "dev"
     }
 
+    /// Menu construction runs on the main thread; the library's helper is
+    /// main-actor isolated and can't see that from here.
+    private func showChord(_ name: KeyboardShortcuts.Name, on item: NSMenuItem) {
+        MainActor.assumeIsolated { item.setShortcut(for: name) }
+    }
+
+    /// Every menu item that shows a chord is also a global hotkey. While a
+    /// menu is open AppKit puts the thread in tracking mode, which buffers the
+    /// global hotkey and fires it once the menu closes — so the action would
+    /// run twice. Suspend them for as long as the menu is up.
+    private static let menuShortcuts: [KeyboardShortcuts.Name] =
+        [.newNote, .newFromClipboard, .quickSwitcher, .notesPanel, .hideAll]
+
+    public func menuDidClose(_ menu: NSMenu) {
+        KeyboardShortcuts.enable(AppDelegate.menuShortcuts)
+    }
+
     public func menuWillOpen(_ menu: NSMenu) {
-        hideAllItem.title = (notesHidden ? "Show All Notes  ⌘⇧H" : "Hide All Notes  ⌘⇧H")
+        KeyboardShortcuts.disable(AppDelegate.menuShortcuts)
+        hideAllItem.title = notesHidden ? "Show All Notes" : "Hide All Notes"
         hideAllItem.isEnabled = !windowControllers.isEmpty
 
         // Rebuilt on open so newly added labels appear without a relaunch.
         showLabelsItem.submenu = makeLabelVisibilityMenu()
         let hiddenCount = Settings.shared.hiddenLabels.count
         showLabelsItem.title = hiddenCount == 0 ? "Show Labels" : "Show Labels  (\(hiddenCount) hidden)"
-
-        // Re-checked on every open: the user may have just granted it, and
-        // the warning should disappear without a relaunch.
-        permissionWarningItem.isHidden = HotkeyAdvice.hasAccessibilityPermission
 
         let canShowDaily = Settings.shared.obsidianVaultPath != nil
             && Settings.shared.dailyNotesPattern != nil
@@ -512,8 +541,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         labels: [String] = []
     ) -> UUID {
         // Creating a new note while everything is hidden should bring all
-        // notes back so the new one isn't the only thing visible.
-        if notesHidden { toggleHideAll() }
+        // notes back so the new one isn't the only thing visible. Clear the
+        // flag directly — `toggleHideAll` refuses when there are no windows
+        // to unhide, which would leave the note we're about to make hidden.
+        if notesHidden {
+            notesHidden = false
+            applyVisibility()
+            // The "Hidden N notes — Undo" toast has nothing left to undo.
+            toasts.dismiss()
+        }
 
         var note = Note.makeNew(frame: nextNoteFrame())
         if let title = title { note.title = title }
@@ -647,7 +683,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         guard Settings.shared.obsidianVaultPath != nil,
               Settings.shared.dailyNotesPattern != nil else { return }
         if let controller = dailyNoteController, controller.window?.isVisible == true {
-            controller.window?.orderOut(nil)
+            controller.hide()
             return
         }
         if dailyNoteController == nil {
@@ -679,11 +715,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
            let url = WikiLink.obsidianURL(vaultPath: vault, target: target) {
             NSWorkspace.shared.open(url)
         }
-    }
-
-    @objc private func openAccessibilitySettings() {
-        guard let url = HotkeyAdvice.accessibilitySettingsURL else { return }
-        NSWorkspace.shared.open(url)
     }
 
     // MARK: - Text size
@@ -836,7 +867,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             dailyNoteController?.window?.orderOut(nil)
             dailyNoteController = nil
         } else if nowVault {
-            dailyNoteController?.patternDidChange()
+            // Entering vault mode from a non-vault one leaves no controller to
+            // notify, so a daily note the user had visible stayed missing
+            // until the next launch.
+            if dailyNoteController == nil {
+                restoreDailyNoteIfNeeded()
+            } else {
+                dailyNoteController?.patternDidChange()
+            }
         }
     }
 
@@ -882,7 +920,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             return
         }
         let controller = NoteWindowController(note: note, store: noteStore) { [weak self] id in
-            self?.windowControllers.removeValue(forKey: id)
+            guard let self = self else { return }
+            self.windowControllers.removeValue(forKey: id)
+            // An emptied desk should start the cascade from the top again.
+            if self.windowControllers.isEmpty { self.lastNewNoteFrame = nil }
         }
         controller.onArchived = { [weak self] archived in
             self?.offerUndoForArchive(of: archived)
@@ -894,8 +935,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             NSApp.activate(ignoringOtherApps: true)
         } else {
             // Sync-induced presentation: float the window in without yanking
-            // focus from whatever the user is doing.
+            // focus from whatever the user is doing. It never becomes key, so
+            // nothing else would lift it out of the faded-away state.
             controller.window?.orderFront(nil)
+            controller.refreshAlpha()
         }
     }
 }

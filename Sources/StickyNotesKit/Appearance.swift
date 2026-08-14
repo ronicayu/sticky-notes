@@ -27,6 +27,26 @@ enum Appearance {
         }
     }
 
+    /// Ink for the chrome buttons drawn on a note's paper. Dark papers need
+    /// light ink; a fixed black tint is invisible on them.
+    static var chromeInk: NSColor {
+        (isDark ? NSColor.white : NSColor.black).withAlphaComponent(0.55)
+    }
+
+    /// Quieter ink, for supporting text like the footer date and label chips.
+    static var secondaryInk: NSColor {
+        (isDark ? NSColor.white : NSColor.black).withAlphaComponent(0.40)
+    }
+
+    /// A wash that reads as a raised chip on either paper.
+    static var chipFill: NSColor {
+        (isDark ? NSColor.white : NSColor.black).withAlphaComponent(isDark ? 0.13 : 0.08)
+    }
+
+    static var chipInk: NSColor {
+        (isDark ? NSColor.white : NSColor.black).withAlphaComponent(0.65)
+    }
+
     /// True when the user has asked for less animation. Fades still happen —
     /// they just happen instantly, which is what Reduce Motion asks for.
     static var reduceMotion: Bool {

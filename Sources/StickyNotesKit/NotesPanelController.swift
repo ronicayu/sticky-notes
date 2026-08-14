@@ -1,4 +1,5 @@
 import AppKit
+import KeyboardShortcuts
 
 /// Single panel that lists every sticky note (active + archived). Toggle with a
 /// segmented control. Active rows focus their on-desktop note window when
@@ -332,12 +333,18 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
             emptyLabel.stringValue = "No notes here tagged #\(label)"
         } else {
             switch mode {
-            case .active:   emptyLabel.stringValue = "No active notes.\nPress ⌘⇧S to make one."
+            case .active:   emptyLabel.stringValue = "No active notes.\nPress \(NotesPanelController.newNoteChord) to make one."
             case .archived: emptyLabel.stringValue = "Nothing archived yet."
             case .trash:    emptyLabel.stringValue = "Trash is empty.\nDeleted notes stay here for 30 days."
             }
         }
         emptyLabel.maximumNumberOfLines = 0
+    }
+
+    /// The chord the user actually has bound, not the shipped default —
+    /// they can rebind it in Settings.
+    private static var newNoteChord: String {
+        KeyboardShortcuts.getShortcut(for: .newNote).map(String.init(describing:)) ?? "the New Note hotkey"
     }
 
     // MARK: - Selection

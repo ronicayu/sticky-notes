@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum StorageFormat {
@@ -44,6 +45,11 @@ final class NoteStore {
     /// another machine deleted it — we bail instead of resurrecting it.
     /// Cleared in discardActive / deleteForever.
     private var knownIds = Set<UUID>()
+
+    /// Ids a rescan has already proved are gone from the active folder, so a
+    /// controller that keeps saving doesn't re-scan the tree every time.
+    /// Cleared whenever the tree changes underneath us.
+    private var confirmedDeletedIds = Set<UUID>()
 
     /// Decoded notes keyed by directory path. Without it every panel refresh,
     /// window reconcile, and `allLabels()` call re-reads and re-parses the
@@ -98,8 +104,23 @@ final class NoteStore {
         if knownIds.contains(note.id), existingURL(for: note.id, in: activeURL) == nil {
             // Seen before but no active file now — externally deleted (or
             // archived). Don't resurrect it here.
-            markdownPathIndex.removeValue(forKey: note.id)
-            return
+            //
+            // Except the index can be stale in a way that looks identical:
+            // an external tool renaming the file moves it out from under the
+            // cached path while `indexedDirs` still says the directory is
+            // fully known, which suppresses the scan that would find it under
+            // its new name. Dropping the save there loses whatever the user
+            // just typed, so pay for one rescan before believing it's gone.
+            if format == .markdown, !confirmedDeletedIds.contains(note.id),
+               rescanForId(note.id, in: activeURL) != nil {
+                confirmedDeletedIds.remove(note.id)
+            } else {
+                // Really gone. Remember that, or every subsequent keystroke
+                // pays for another full scan of the notes directory.
+                confirmedDeletedIds.insert(note.id)
+                markdownPathIndex.removeValue(forKey: note.id)
+                return
+            }
         }
         let url = existingURL(for: note.id, in: activeURL) ?? generateURL(for: note, in: activeURL)
         // Nothing reached disk — don't record the path or cache the note as
@@ -176,7 +197,9 @@ final class NoteStore {
     func deleteForever(_ note: Note) {
         if let url = existingURL(for: note.id, in: archiveURL) {
             let destination = uniqueTrashURL(for: url)
-            if !moveFile(from: url, to: destination) {
+            if moveFile(from: url, to: destination) {
+                stampDeletionDate(on: destination)
+            } else {
                 // Couldn't reach the trash — fall back to removing it, since
                 // the user asked for the note to be gone.
                 try? FileManager.default.removeItem(at: url)
@@ -206,21 +229,36 @@ final class NoteStore {
         notifyChange()
     }
 
+    /// Moving a file preserves its modification date, so a note last edited
+    /// months ago would land in the trash already expired. Retention has to
+    /// run from the deletion, so record that as the file's modification date.
+    private func stampDeletionDate(on url: URL) {
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()],
+            ofItemAtPath: url.path
+        )
+    }
+
     /// Delete trashed files older than `trashRetention`. Called at launch;
     /// deliberately conservative, since the whole point is not losing things.
     @discardableResult
     func purgeExpiredTrash(now: Date = Date()) -> Int {
         let fm = FileManager.default
+        let keys: [URLResourceKey] = [.addedToDirectoryDateKey, .contentModificationDateKey]
         guard let files = try? fm.contentsOfDirectory(
             at: trashURL,
-            includingPropertiesForKeys: [.contentModificationDateKey]
+            includingPropertiesForKeys: keys
         ) else { return 0 }
 
         var removed = 0
         for url in files where url.pathExtension == fileExtension {
-            guard let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate else { continue }
-            guard now.timeIntervalSince(modified) > NoteStore.trashRetention else { continue }
+            // When the file entered the trash is the only date that reflects
+            // the deletion; the modification date is a stamped fallback for
+            // filesystems that don't report it.
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            guard let deleted = values?.addedToDirectoryDate ?? values?.contentModificationDate
+            else { continue }
+            guard now.timeIntervalSince(deleted) > NoteStore.trashRetention else { continue }
             if (try? fm.removeItem(at: url)) != nil { removed += 1 }
         }
         if removed > 0 { notifyChange() }
@@ -297,6 +335,8 @@ final class NoteStore {
     private func invalidateCache() {
         cache.removeAll()
         indexedDirs.removeAll()
+        // The file may be back — a rename, or a sync agent restoring it.
+        confirmedDeletedIds.removeAll()
     }
 
     private func notifyObservers() {
@@ -324,7 +364,12 @@ final class NoteStore {
 
     private func startWatching() {
         watcher = FileWatcher { [weak self] in
-            self?.notifyChange()
+            guard let self = self else { return }
+            // Conflict copies arrive as ordinary file changes. Merging only at
+            // launch left the other Mac's edits invisible — and diverging
+            // further — for the rest of the session.
+            self.resolveConflictsIfDue()
+            self.notifyChange()
         }
         watcher?.watch([activeURL, archiveURL, trashURL])
     }
@@ -368,6 +413,13 @@ final class NoteStore {
 
     /// Read every file in `dir` to locate `id`, indexing all of them on the
     /// way so the next lookup here is free.
+    /// A scan that ignores `indexedDirs`, for when the index is the thing
+    /// we're suspicious of.
+    private func rescanForId(_ id: UUID, in dir: URL) -> URL? {
+        indexedDirs.remove(dirKey(dir))
+        return scanForId(id, in: dir)
+    }
+
     private func scanForId(_ id: UUID, in dir: URL) -> URL? {
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return nil
@@ -380,6 +432,18 @@ final class NoteStore {
         }
         indexedDirs.insert(dirKey(dir))
         return match
+    }
+
+    /// Sweeping asks the filesystem for conflict versions of every file, and
+    /// the watcher fires on our own debounced saves too. Rate-limit it: iCloud
+    /// takes far longer than this to deliver a conflict in the first place.
+    private static let conflictSweepInterval: TimeInterval = 5
+    private var lastConflictSweep = Date.distantPast
+
+    private func resolveConflictsIfDue(now: Date = Date()) {
+        guard now.timeIntervalSince(lastConflictSweep) > NoteStore.conflictSweepInterval else { return }
+        lastConflictSweep = now
+        resolveConflicts()
     }
 
     /// Resolve every iCloud conflict in the active and archive folders,
@@ -423,6 +487,15 @@ final class NoteStore {
         guard ConflictResolver.needsMerge(versions),
               let merged = ConflictResolver.merge(versions) else { return false }
 
+        // A merge that changed nothing must not be written: the write comes
+        // back through the watcher, which sweeps again — and a conflict that
+        // won't clear would keep that cycle running every few seconds,
+        // dropping the cache and reloading every window each time.
+        if let current = versions.first, current.content == merged.content,
+           current.title == merged.title, current.labels == merged.labels {
+            return false
+        }
+
         write(merged, to: url)
         return true
     }
@@ -454,7 +527,7 @@ final class NoteStore {
             return try? decoder.decode(Note.self, from: data)
         case .markdown:
             guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-            return parseMarkdown(raw, fallbackId: idFromFilename(url))
+            return parseMarkdown(raw, fallbackId: idFromFilename(url) ?? stableId(for: url))
         }
     }
 
@@ -589,5 +662,23 @@ final class NoteStore {
 
     private func idFromFilename(_ url: URL) -> UUID? {
         UUID(uuidString: url.deletingPathExtension().lastPathComponent)
+    }
+
+    /// An id for a vault file that carries no `id:` of its own — a note
+    /// someone wrote in Obsidian and dropped in the folder. Deriving it from
+    /// the path keeps it the same on every load; minting a random one made
+    /// each reload look like the old note had vanished and a new one
+    /// appeared, so its window was torn down and rebuilt on every change.
+    private func stableId(for url: URL) -> UUID {
+        var digest = SHA256()
+        digest.update(data: Data(url.standardizedFileURL.path.utf8))
+        var bytes = Array(digest.finalize().prefix(16))
+        // Shape the bytes as a v4 UUID so nothing downstream sees anything odd.
+        bytes[6] = (bytes[6] & 0x0F) | 0x40
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
+                           bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11],
+                           bytes[12], bytes[13], bytes[14], bytes[15]))
     }
 }

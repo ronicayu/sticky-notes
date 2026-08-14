@@ -4,6 +4,27 @@ import XCTest
 
 final class NoteColorAppearanceTests: XCTestCase {
 
+    /// Chrome ink used to be a fixed black, which is invisible on the dark
+    /// papers — the buttons, the footer date and the label chips all vanished.
+    func testChromeInkFlipsWithTheAppearance() throws {
+        // Touching `shared` is what installs NSApp, which `Appearance` reads.
+        let app = NSApplication.shared
+        let original = app.appearance
+        defer { app.appearance = original }
+
+        app.appearance = NSAppearance(named: .aqua)
+        let lightInks = [Appearance.chromeInk, Appearance.secondaryInk, Appearance.chipInk]
+        app.appearance = NSAppearance(named: .darkAqua)
+        let darkInks = [Appearance.chromeInk, Appearance.secondaryInk, Appearance.chipInk]
+
+        for (light, dark) in zip(lightInks, darkInks) {
+            let lightWhite = try XCTUnwrap(light.usingColorSpace(.genericGray)).whiteComponent
+            let darkWhite = try XCTUnwrap(dark.usingColorSpace(.genericGray)).whiteComponent
+            XCTAssertGreaterThan(darkWhite, lightWhite,
+                                 "ink on dark paper has to be lighter, not darker")
+        }
+    }
+
     func testEveryColorDefinesBothLightAndDarkVariants() {
         for color in NoteColor.allCases {
             for hex in [color.lightBodyHex, color.lightHeaderHex, color.darkBodyHex, color.darkHeaderHex] {

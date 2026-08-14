@@ -72,12 +72,31 @@ final class MarkdownFileTests: XCTestCase {
         XCTAssertEqual(doc.frontmatter.count, 2, "malformed lines should be dropped, not stored")
     }
 
-    func testUnterminatedFrontmatterConsumesRestOfDocument() {
-        // No closing `---`. Every key line is absorbed; body ends up empty.
-        // Documenting the behavior so a future change to it is deliberate.
-        let doc = MarkdownFile.parse("---\nid: ABC\nbody text\n")
+    /// Without a closing `---` there is no frontmatter — the file just opens
+    /// with a horizontal rule. Absorbing it as metadata left an empty body,
+    /// and the next save wrote that emptiness over the user's real text.
+    func testUnterminatedFrontmatterIsTreatedAsBody() {
+        let raw = "---\nid: ABC\nbody text\n"
+        let doc = MarkdownFile.parse(raw)
+        XCTAssertNil(doc.value(for: "id"))
+        XCTAssertEqual(doc.body, raw, "the document has to survive intact")
+    }
+
+    func testCRLFFrontmatterIsStillRecognized() {
+        let doc = MarkdownFile.parse("---\r\nid: ABC\r\ncolor: pink\r\n---\r\n\r\nbody")
         XCTAssertEqual(doc.value(for: "id"), "ABC")
-        XCTAssertEqual(doc.body, "")
+        XCTAssertEqual(doc.value(for: "color"), "pink")
+        XCTAssertTrue(doc.body.contains("body"))
+    }
+
+    /// A newline in a value used to split the record, so re-reading the file
+    /// truncated the title and dropped the line after it.
+    func testANewlineInAValueSurvivesARoundTrip() {
+        let document = MarkdownFile.Document(frontmatter: [("title", "a\nb")], body: "text")
+        let raw = MarkdownFile.serialize(document, forceQuoteKeys: ["title"])
+        let parsed = MarkdownFile.parse(raw)
+        XCTAssertEqual(parsed.value(for: "title"), "a\nb")
+        XCTAssertEqual(parsed.body, "text")
     }
 
     func testDropsExactlyOneBlankLineAfterFrontmatter() {

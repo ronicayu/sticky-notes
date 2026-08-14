@@ -11,6 +11,16 @@ enum LaunchAgent {
         Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app")
     }
 
+    /// True when the user previously switched the app off in System Settings.
+    /// `register()` succeeds in that state without actually enabling anything,
+    /// so only System Settings can undo it.
+    static var needsApproval: Bool {
+        SMAppService.mainApp.status == .requiresApproval
+    }
+
+    static let loginItemsSettingsURL =
+        URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
+
     @discardableResult
     static func setEnabled(_ enabled: Bool) -> Error? {
         do {

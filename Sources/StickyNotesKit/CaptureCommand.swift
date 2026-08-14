@@ -73,13 +73,17 @@ enum CaptureCommand: Equatable {
     /// Parsed through a synthesized hierarchical URL so percent-decoding
     /// behaves the same regardless of how the original URL was spelled.
     private static func queryItems(from query: String) -> [String: String] {
-        guard !query.isEmpty,
-              let components = URLComponents(string: "scheme://host?\(query)"),
+        // Substitute before decoding, not after: a caller that correctly
+        // encoded a literal plus as `%2B` means a plus, and rewriting the
+        // decoded value would turn "C++" into "C  ".
+        let normalized = query.replacingOccurrences(of: "+", with: "%20")
+        guard !normalized.isEmpty,
+              let components = URLComponents(string: "scheme://host?\(normalized)"),
               let items = components.queryItems else { return [:] }
         var out: [String: String] = [:]
         for item in items {
             guard let value = item.value else { continue }
-            out[item.name.lowercased()] = value.replacingOccurrences(of: "+", with: " ")
+            out[item.name.lowercased()] = value
         }
         return out
     }

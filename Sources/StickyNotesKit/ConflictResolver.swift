@@ -39,6 +39,24 @@ enum ConflictResolver {
         return merged
     }
 
+    /// Merge two versions of one file's body: the buffer the user has been
+    /// typing into, and an external write that landed while they typed. Same
+    /// rule as `merge` — the local text keeps the top, and anything the
+    /// external version adds is appended below a divider rather than lost.
+    static func mergeBodies(
+        local: String,
+        external: String,
+        externalDate: Date,
+        now: Date = Date()
+    ) -> String {
+        let localBody = normalize(local)
+        let externalBody = normalize(external)
+        guard !externalBody.isEmpty, externalBody != localBody else { return local }
+        if localBody.contains(externalBody) { return local }
+        if externalBody.contains(localBody) { return external }
+        return "\(local)\n\n\(divider(for: externalDate, now: now))\n\n\(external)"
+    }
+
     /// True when these versions actually disagree about anything worth
     /// merging. Identical copies are common — iCloud produces a conflict from
     /// two saves that happened to write the same text.

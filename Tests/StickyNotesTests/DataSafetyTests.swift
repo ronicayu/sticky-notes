@@ -29,6 +29,62 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertNil(ConflictResolver.merge([]))
     }
 
+    // MARK: - Body merge (editor buffer vs. an external write)
+
+    /// The case that used to lose text: the user is typing, another app writes
+    /// the same file, and one of the two versions gets overwritten.
+    func testBodyMergeKeepsBothSides() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "typed here", external: "written by Obsidian",
+            externalDate: Date(timeIntervalSince1970: 1_700_000_000), now: now
+        )
+        XCTAssertTrue(merged.contains("typed here"))
+        XCTAssertTrue(merged.contains("written by Obsidian"))
+    }
+
+    func testBodyMergeLeavesTheLocalTextOnTop() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "mine", external: "theirs",
+            externalDate: Date(timeIntervalSince1970: 1_700_000_000), now: now
+        )
+        XCTAssertTrue(merged.hasPrefix("mine"))
+    }
+
+    func testIdenticalBodiesDoNotProduceADivider() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "same text", external: "same text",
+            externalDate: Date(), now: now
+        )
+        XCTAssertEqual(merged, "same text")
+    }
+
+    /// An external write the local buffer already contains added nothing —
+    /// appending it would duplicate the user's own text back at them.
+    func testASupersededExternalBodyIsNotAppended() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "shopping list\n- milk", external: "shopping list",
+            externalDate: Date(), now: now
+        )
+        XCTAssertEqual(merged, "shopping list\n- milk")
+    }
+
+    /// The mirror case: the external version is the one that grew, e.g. the
+    /// file synced in from a phone while the Mac buffer sat untouched.
+    func testAnExternalBodyThatContainsTheLocalOneWins() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "shopping list", external: "shopping list\n- milk",
+            externalDate: Date(), now: now
+        )
+        XCTAssertEqual(merged, "shopping list\n- milk")
+    }
+
+    func testAnEmptyExternalBodyNeverClobbersLocalText() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "still here", external: "", externalDate: Date(), now: now
+        )
+        XCTAssertEqual(merged, "still here")
+    }
+
     /// The whole point: a merge must never lose what the other Mac wrote.
     func testBothVersionsTextSurvives() throws {
         let mine = note("written on the laptop", updated: 100)
@@ -264,6 +320,32 @@ final class TrashTests: XCTestCase {
         let future = Date().addingTimeInterval(NoteStore.trashRetention + 3600)
         XCTAssertEqual(store.purgeExpiredTrash(now: future), 1)
         XCTAssertTrue(store.loadTrashed().isEmpty)
+    }
+
+    /// Retention has to run from the deletion. Moving a file preserves its
+    /// modification date, so a note last edited months ago used to be purged
+    /// the moment it was deleted — the one thing the trash exists to prevent.
+    func testANoteDeletedTodaySurvivesEvenIfItWasEditedLongAgo() throws {
+        let store = NoteStore(rootURL: root, format: .json)
+        let note = makeNote()
+        store.save(note)
+        store.archive(note)
+
+        // Age the file on disk well past the retention window, then delete it.
+        let archived = try XCTUnwrap(
+            FileManager.default.contentsOfDirectory(
+                at: root.appendingPathComponent("archive", isDirectory: true),
+                includingPropertiesForKeys: nil
+            ).first
+        )
+        let longAgo = Date().addingTimeInterval(-(NoteStore.trashRetention + 86_400))
+        try FileManager.default.setAttributes(
+            [.modificationDate: longAgo], ofItemAtPath: archived.path
+        )
+        store.deleteForever(note)
+
+        XCTAssertEqual(store.purgeExpiredTrash(), 0)
+        XCTAssertEqual(store.loadTrashed().count, 1)
     }
 
     func testPurgingAnEmptyTrashIsHarmless() {

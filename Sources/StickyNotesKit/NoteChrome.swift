@@ -111,11 +111,21 @@ final class NoteDragZone: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// True once a click in this sequence already acted. A collapsed note
+    /// expands on the first click of a double-click, so letting the second
+    /// half toggle as well would collapse it straight back.
+    private var singleClickHandled = false
+
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 {
+            if singleClickHandled {
+                singleClickHandled = false
+                return
+            }
             delegate?.dragZoneDidDoubleClick()
             return
         }
+        singleClickHandled = false
         let origin = window?.frame.origin
         // performDrag runs its own event loop and returns when the mouse is
         // released — snapping here means the note settles once, on drop,
@@ -131,7 +141,10 @@ final class NoteDragZone: NSView {
         } ?? false
 
         if !moved {
-            if reportsSingleClick { delegate?.dragZoneDidClick() }
+            if reportsSingleClick {
+                delegate?.dragZoneDidClick()
+                singleClickHandled = true
+            }
             return
         }
         let optionHeld = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option)

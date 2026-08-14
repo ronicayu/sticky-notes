@@ -191,7 +191,9 @@ enum MarkdownStyler {
 
     private static func applyCheckboxes(in storage: NSTextStorage, full: NSRange) {
         guard let regex = try? NSRegularExpression(
-            pattern: #"^[ \t]*-\s\[([ xX])\]\s"#,
+            // `\s` also matches a newline, which let a match span two
+            // lines and paint the user\'s text invisible.
+            pattern: #"^[ \t]*-[ \t]\[([ xX])\](?:[ \t]|$)"#,
             options: [.anchorsMatchLines]
         ) else { return }
 
@@ -258,24 +260,35 @@ private struct LineOffsetTable {
     /// UTF-16 unit offset of the first character of each line, parallel to
     /// `utf8LineStarts`.
     private let utf16LineStarts: [Int]
+    /// Scalar index of the first character of each line, parallel to the two
+    /// offset tables. Without it, resolving a position meant walking the
+    /// scalars from the start of the document every single time — which, once
+    /// per AST node, made styling quadratic in the note's length.
+    private let scalarLineStarts: [String.UnicodeScalarView.Index]
 
     init(_ source: String) {
         self.source = source
+        let scalars = source.unicodeScalars
         var u8: [Int] = [0, 0]
         var u16: [Int] = [0, 0]
+        var starts: [String.UnicodeScalarView.Index] = [scalars.startIndex, scalars.startIndex]
         var u8Cursor = 0
         var u16Cursor = 0
-        for scalar in source.unicodeScalars {
-            let isNewline = scalar == "\n"
+        var i = scalars.startIndex
+        while i < scalars.endIndex {
+            let scalar = scalars[i]
             u8Cursor += UTF8.width(scalar)
             u16Cursor += UTF16.width(scalar)
-            if isNewline {
+            scalars.formIndex(after: &i)
+            if scalar == "\n" {
                 u8.append(u8Cursor)
                 u16.append(u16Cursor)
+                starts.append(i)
             }
         }
         self.utf8LineStarts = u8
         self.utf16LineStarts = u16
+        self.scalarLineStarts = starts
     }
 
     func nsRange(_ range: SourceRange) -> NSRange? {
@@ -295,11 +308,8 @@ private struct LineOffsetTable {
 
         // Walk unicode scalars within this line, summing UTF-8 and UTF-16
         // widths in lockstep, until we've consumed `column - 1` UTF-8 bytes.
-        let utf8 = source.utf8
-        guard let lineStartUtf8 = utf8.index(utf8.startIndex, offsetBy: lineU8Start, limitedBy: utf8.endIndex),
-              let lineStartScalar = lineStartUtf8.samePosition(in: source.unicodeScalars) else {
-            return nil
-        }
+        guard line < scalarLineStarts.count else { return nil }
+        let lineStartScalar = scalarLineStarts[line]
 
         var u8 = lineU8Start
         var u16 = utf16LineStarts[line]
@@ -471,7 +481,11 @@ private struct StylingVisitor: MarkupWalker {
         }
 
         let leadLength = 1
-        let trailStart = text.distance(from: text.startIndex, to: closeBracket.lowerBound)
+        // Offsets here index into the text storage, which counts UTF-16 units.
+        // Measuring in Characters instead makes every emoji in the link text
+        // pull the marker range one unit to the left, hiding a character the
+        // user typed.
+        let trailStart = text.utf16.distance(from: text.startIndex, to: closeBracket.lowerBound)
         let trailLength = (text as NSString).length - trailStart
         guard trailLength > 0, nsr.length > leadLength + trailLength else {
             descendInto(link)

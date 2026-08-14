@@ -27,6 +27,46 @@ final class AttachmentsTests: XCTestCase {
         return try XCTUnwrap(NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]))
     }
 
+    /// A space in the destination stops CommonMark seeing a link at all, so
+    /// the note showed raw markdown instead of an image — here and in Obsidian.
+    func testGeneratedAttachmentNamesContainNoSpaces() throws {
+        let reference = try XCTUnwrap(
+            Attachments.save(imageData: try pngData(), fileExtension: "png", for: store)
+        )
+        XCTAssertFalse(reference.contains(" "), "unusable in a markdown link: \(reference)")
+    }
+
+    /// Dropped files keep their original name, which we don't control.
+    func testASpaceInADroppedFileNameIsEscapedInTheLink() throws {
+        let source = root.appendingPathComponent("holiday photo.png")
+        try pngData().write(to: source)
+        let reference = try XCTUnwrap(Attachments.copy(fileAt: source, for: store))
+        let markdown = Attachments.markdown(for: reference, isImage: true)
+
+        // The label keeps the readable name; only the destination is escaped.
+        let destination = try XCTUnwrap(destinationOf(markdown))
+        XCTAssertFalse(destination.contains(" "), "unescaped space in destination: \(markdown)")
+        XCTAssertTrue(destination.contains("%20"), "expected an escaped space: \(markdown)")
+    }
+
+    /// The text between `](` and the closing paren.
+    private func destinationOf(_ markdown: String) -> String? {
+        guard let open = markdown.range(of: "]("), markdown.hasSuffix(")") else { return nil }
+        return String(markdown[open.upperBound..<markdown.index(before: markdown.endIndex)])
+    }
+
+    /// The escaped form has to survive the round trip back to a real file.
+    func testAnEscapedReferenceResolvesToTheFileOnDisk() throws {
+        let source = root.appendingPathComponent("holiday photo.png")
+        try pngData().write(to: source)
+        let reference = try XCTUnwrap(Attachments.copy(fileAt: source, for: store))
+        let escaped = try XCTUnwrap(
+            reference.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+        )
+        let file = try XCTUnwrap(Attachments.resolve(escaped, for: store))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "no file at \(file.path)")
+    }
+
     func testSavedImageLandsInTheAttachmentsFolder() throws {
         let reference = try XCTUnwrap(Attachments.save(imageData: try pngData(), fileExtension: "png", for: store))
         let file = try XCTUnwrap(Attachments.resolve(reference, for: store))

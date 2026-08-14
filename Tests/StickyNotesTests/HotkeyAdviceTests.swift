@@ -24,6 +24,14 @@ final class HotkeyAdviceTests: XCTestCase {
                        HotkeyAdvice.conflictNote(for: "⌘⇧S"))
     }
 
+    /// macOS renders modifiers in a fixed order, which is not the order the
+    /// table happened to be written in.
+    func testModifierOrderDoesNotAffectMatching() {
+        XCTAssertEqual(HotkeyAdvice.conflictNote(for: "⇧⌘S"),
+                       HotkeyAdvice.conflictNote(for: "⌘⇧S"))
+        XCTAssertNotNil(HotkeyAdvice.conflictNote(for: "⇧⌘S"))
+    }
+
     func testAdviceNamesSomethingConcrete() throws {
         let note = try XCTUnwrap(HotkeyAdvice.conflictNote(for: "⌘⇧S"))
         XCTAssertTrue(note.contains("Save As"), "advice should name the app command it collides with, got: \(note)")
@@ -39,36 +47,11 @@ final class HotkeyAdviceTests: XCTestCase {
                      .hideAll] {
             let description = HotkeyAdvice.describe(name)
             XCTAssertNotNil(description, "\(name) has no default shortcut")
-            // Either it's flagged or it isn't — both are valid; what matters
-            // is that lookup never crashes and returns a usable string.
-            _ = HotkeyAdvice.conflictNote(for: description)
+            // Feed the recorder's own rendering back in. Asserting nothing
+            // here is what hid the fact that it spells chords "⇧⌘S" while
+            // the conflict table was keyed "⌘⇧S", so nothing ever matched.
+            XCTAssertNotNil(HotkeyAdvice.conflictNote(for: description),
+                            "no advice for \(description ?? "nil")")
         }
-    }
-
-    // MARK: - Permission guidance
-
-    func testThePermissionLineIsATaskTheUserCanTickOff() throws {
-        let progress = try XCTUnwrap(
-            MarkdownEditing.checkboxProgress(in: HotkeyAdvice.permissionChecklistLine)
-        )
-        XCTAssertEqual(progress.total, 1)
-        XCTAssertEqual(progress.done, 0)
-    }
-
-    func testThePermissionLineNamesWhereToGo() {
-        let line = HotkeyAdvice.permissionChecklistLine
-        XCTAssertTrue(line.contains("Accessibility"), "got: \(line)")
-        XCTAssertTrue(line.contains("System Settings"), "got: \(line)")
-    }
-
-    /// One click rather than a scavenger hunt through System Settings.
-    func testTheSettingsDeepLinkTargetsTheAccessibilityPane() throws {
-        let url = try XCTUnwrap(HotkeyAdvice.accessibilitySettingsURL)
-        XCTAssertEqual(url.scheme, "x-apple.systempreferences")
-        XCTAssertTrue(url.absoluteString.contains("Privacy_Accessibility"))
-    }
-
-    func testThePermissionMenuTitleReadsAsAWarning() {
-        XCTAssertTrue(HotkeyAdvice.permissionMenuTitle.contains("Accessibility"))
     }
 }

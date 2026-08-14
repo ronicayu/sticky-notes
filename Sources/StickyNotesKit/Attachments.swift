@@ -26,8 +26,18 @@ enum Attachments {
     /// paths and URLs are returned untouched.
     static func resolve(_ reference: String, for store: NoteStore) -> URL? {
         if let url = URL(string: reference), url.scheme != nil { return url }
-        if reference.hasPrefix("/") { return URL(fileURLWithPath: reference) }
-        return URL(fileURLWithPath: reference, relativeTo: store.activeURL).standardizedFileURL
+        // The reference came out of a markdown link, where spaces and
+        // parentheses are percent-escaped. Decode only when the literal path
+        // isn't already a file — a name can legitimately contain "%20".
+        func resolved(_ path: String) -> URL {
+            path.hasPrefix("/")
+                ? URL(fileURLWithPath: path)
+                : URL(fileURLWithPath: path, relativeTo: store.activeURL).standardizedFileURL
+        }
+        let literal = resolved(reference)
+        if FileManager.default.fileExists(atPath: literal.path) { return literal }
+        guard let decoded = reference.removingPercentEncoding, decoded != reference else { return literal }
+        return resolved(decoded)
     }
 
     /// Write image data next to the notes and return the reference to insert.
@@ -66,8 +76,19 @@ enum Attachments {
     /// an `![](…)` pointing at a PDF renders as a broken image in Obsidian.
     static func markdown(for reference: String, isImage: Bool) -> String {
         let name = (reference as NSString).lastPathComponent
-        return isImage ? "![\(name)](\(reference))" : "[\(name)](\(reference))"
+            .replacingOccurrences(of: "[", with: "\\[")
+            .replacingOccurrences(of: "]", with: "\\]")
+        // A bare space or paren in the destination stops it being a link at
+        // all — here and in Obsidian. Dropped files keep their original name,
+        // so we can't assume it's clean.
+        let destination = reference.addingPercentEncoding(
+            withAllowedCharacters: destinationAllowed
+        ) ?? reference
+        return isImage ? "![\(name)](\(destination))" : "[\(name)](\(destination))"
     }
+
+    private static let destinationAllowed = CharacterSet.urlPathAllowed
+        .subtracting(CharacterSet(charactersIn: "()"))
 
     /// Handle a paste that carries a file or an image. Returns the markdown to
     /// insert, or nil when the pasteboard holds nothing worth saving — in
@@ -116,7 +137,7 @@ enum Attachments {
 
     private static let nameFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HHmmss"
+        f.dateFormat = "yyyy-MM-dd-HHmmss"
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()

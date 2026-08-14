@@ -247,6 +247,23 @@ final class MarkdownStylerTests: XCTestCase {
         XCTAssertTrue(markerRanges(storage).isEmpty, "markers from the old text were not cleared")
     }
 
+    /// Resolving each AST node's position used to walk the document from its
+    /// start, making a keystroke cost O(length²): a 50KB vault note took over
+    /// a second to restyle, per character typed. The bound here is loose
+    /// enough for a slow machine and still far under the old cost.
+    func testStylingALargeNoteStaysFast() {
+        let source = (0..<400).map { i in
+            "## Section \(i)\n\nSome **bold** and *italic* with a [link](https://example.com) and `code`.\n\n- [ ] task \(i)\n"
+        }.joined(separator: "\n")
+        let storage = NSTextStorage(string: source)
+        XCTAssertGreaterThan(storage.length, 40_000, "not a big enough sample to be meaningful")
+
+        let start = Date()
+        MarkdownStyler.apply(to: storage)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 0.5, "styling got quadratic again: \(elapsed)s")
+    }
+
     func testALongMixedDocumentStylesWithoutCrashing() {
         let source = """
         # Heading

@@ -17,7 +17,7 @@ final class LabelChipView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 7
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.08).cgColor
+        layer?.backgroundColor = Appearance.chipFill.cgColor
         toolTip = "Click to remove"
     }
 
@@ -36,7 +36,7 @@ final class LabelChipView: NSView {
         let text = "#\(labelName)" as NSString
         let attrs: [NSAttributedString.Key: Any] = [
             .font: LabelChipView.font,
-            .foregroundColor: NSColor.black.withAlphaComponent(0.65)
+            .foregroundColor: Appearance.chipInk
         ]
         let textSize = text.size(withAttributes: attrs)
         let x = (bounds.width - textSize.width) / 2

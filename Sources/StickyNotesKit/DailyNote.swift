@@ -1,8 +1,8 @@
 import Foundation
 
-/// Per-machine UI state for the singleton daily-note window. Lives in a
-/// sidecar JSON next to the notes folder so it rides the same iCloud /
-/// vault transport as the rest of the app's storage.
+/// Per-machine UI state for the singleton daily-note window. Lives in
+/// Application Support: it describes this Mac's screen, so syncing it with
+/// the vault only let two machines fight over one window position.
 struct DailyNoteState: Codable {
     var positionX: Double
     var positionY: Double
@@ -116,19 +116,42 @@ enum DailyNote {
             .appendingPathComponent(rendered)
     }
 
+    /// Window geometry and visibility are per-machine, so they belong in
+    /// Application Support rather than in the vault. Sharing one file over
+    /// iCloud meant hiding the note on one Mac hid it on the other, and each
+    /// machine's window position kept overwriting the other's.
     static var stateURL: URL? {
+        Settings.localRootURL
+            .appendingPathComponent("StickyNotes", isDirectory: true)
+            .appendingPathComponent("_daily.json")
+    }
+
+    /// Where the state used to live. Read once, to carry a user's existing
+    /// window position over instead of resetting it.
+    private static var legacyStateURL: URL? {
         guard let vault = Settings.shared.obsidianVaultPath else { return nil }
         return URL(fileURLWithPath: vault, isDirectory: true)
             .appendingPathComponent("StickyNotes/_daily.json")
     }
 
     static func loadState() -> DailyNoteState {
-        guard let url = stateURL,
-              let data = try? Data(contentsOf: url),
-              let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) else {
-            return DailyNoteState.defaultState
+        if let url = stateURL,
+           let data = try? Data(contentsOf: url),
+           let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) {
+            return state
         }
-        return state
+        if let legacy = legacyStateURL,
+           let data = try? Data(contentsOf: legacy),
+           let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) {
+            saveState(state)
+            // Only drop the old copy once the new one is definitely written,
+            // or a failed save would lose the window's position outright.
+            if let new = stateURL, FileManager.default.fileExists(atPath: new.path) {
+                try? FileManager.default.removeItem(at: legacy)
+            }
+            return state
+        }
+        return DailyNoteState.defaultState
     }
 
     static func saveState(_ state: DailyNoteState) {

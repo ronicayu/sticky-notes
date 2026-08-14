@@ -1,3 +1,4 @@
+import KeyboardShortcuts
 import Foundation
 
 /// The note a brand-new install opens with.
@@ -13,14 +14,9 @@ enum WelcomeNote {
 
     /// Create the welcome note if this install has never shown one and the
     /// store is empty. Returns it, or nil when nothing should be created.
-    /// - Parameter needsAccessibilityPermission: when true, the note gains a
-    ///   line explaining why the hotkeys it just described aren't firing.
-    ///   Without permission they silently do nothing, and a new user has no
-    ///   way to tell that apart from a broken app.
     static func makeIfNeeded(
         store: NoteStore,
         defaults: UserDefaults = .standard,
-        needsAccessibilityPermission: Bool = false,
         now: Date = Date()
     ) -> Note? {
         guard !defaults.bool(forKey: shownKey) else { return nil }
@@ -33,9 +29,7 @@ enum WelcomeNote {
         let note = Note(
             id: UUID(),
             title: "Welcome",
-            content: needsAccessibilityPermission
-                ? body + "\n\n" + HotkeyAdvice.permissionChecklistLine
-                : body,
+            content: body,
             positionX: 120, positionY: 260,
             width: 320, height: 340,
             collapsed: false,
@@ -50,12 +44,20 @@ enum WelcomeNote {
     }
 
     /// Exposed so a test can check the shortcuts stay in sync with the ones
-    /// the app actually registers.
-    static let body = """
+    /// the app actually registers. Chords are read from the live bindings
+    /// rather than spelled out, so a rebind before first launch can't leave
+    /// the note describing keys that do nothing.
+    static var body: String { bodyText() }
+
+    static func bodyText(
+        newNote: String = describe(.newNote, default: "⌘⇧S"),
+        find: String = describe(.quickSwitcher, default: "⌘⇧F")
+    ) -> String {
+        """
     This is a real note — edit it, or throw it away.
 
-    - [ ] Press **⌘⇧S** to make a new note
-    - [ ] Press **⌘⇧F** to find any note by typing
+    - [ ] Press **\(newNote)** to make a new note
+    - [ ] Press **\(find)** to find any note by typing
     - [ ] Try a `#label`, then hide it from the menu bar
     - [ ] Double-click this note's top bar to collapse it
 
@@ -64,4 +66,9 @@ enum WelcomeNote {
     Everything lives in plain files you can open anywhere — point Settings at \
     an Obsidian vault and these become Markdown.
     """
+    }
+
+    private static func describe(_ name: KeyboardShortcuts.Name, default fallback: String) -> String {
+        KeyboardShortcuts.getShortcut(for: name).map(String.init(describing:)) ?? fallback
+    }
 }

@@ -110,6 +110,23 @@ final class MarkdownLinkTests: XCTestCase {
         XCTAssertNotNil(link(storage, at: index(of: "naïve", in: source)))
     }
 
+    /// Emoji are two UTF-16 units. Measuring the link text in Characters made
+    /// the hidden marker range start one unit early, so the last character of
+    /// the link text disappeared along with the `](…)`.
+    func testLinkTextWithEmojiKeepsAllOfItsCharacters() {
+        let source = "see [🎉 party](https://example.com) now"
+        let storage = styled(source)
+        XCTAssertEqual(markerSubstrings(storage), ["[", "](https://example.com)"],
+                       "marker range swallowed part of the link text")
+        XCTAssertNotNil(link(storage, at: index(of: "party", in: source)))
+    }
+
+    func testLinkTextEndingInEmojiIsMeasuredCorrectly() {
+        let source = "[done 🎉](https://example.com)"
+        let storage = styled(source)
+        XCTAssertEqual(markerSubstrings(storage), ["[", "](https://example.com)"])
+    }
+
     func testBracketedTextThatIsNotALinkIsLeftAlone() {
         let storage = styled("a [bracketed] phrase")
         XCTAssertTrue(markerSubstrings(storage).isEmpty)

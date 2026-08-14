@@ -1,4 +1,5 @@
 import AppKit
+import KeyboardShortcuts
 
 /// Spotlight-style palette for jumping to any note — active or archived — by
 /// typing. The notes panel is a browser; this is the keyboard path for when you
@@ -245,6 +246,14 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     /// How many notes the current query matched.
     var resultCount: Int { results.count }
 
+    /// The chord the user actually has bound, not the shipped default.
+    private static var newNoteChord: String {
+        KeyboardShortcuts.getShortcut(for: .newNote).map(String.init(describing:)) ?? "the New Note hotkey"
+    }
+
+    /// Which result is highlighted, or -1 for none.
+    var selectedRow: Int { tableView.selectedRow }
+
     private func runQuery(_ query: String) {
         results = NoteSearch.rank(candidates, query: query)
         tableView.reloadData()
@@ -258,7 +267,7 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
 
     private func updateStatus(query: String) {
         if candidates.isEmpty {
-            statusLabel.stringValue = "No notes yet — ⌘⇧S makes one"
+            statusLabel.stringValue = "No notes yet — \(QuickSwitcherController.newNoteChord) makes one"
         } else if results.isEmpty {
             let name = query.trimmingCharacters(in: .whitespacesAndNewlines)
             statusLabel.stringValue = name.isEmpty
@@ -272,6 +281,29 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     }
 
     // MARK: - Selection
+
+    /// While the search field is being edited the field editor owns the key
+    /// events, so `NSTextField.keyDown` never sees Return or the arrows —
+    /// they arrive here as command selectors instead.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.moveDown(_:)):
+            moveSelection(by: 1)
+        case #selector(NSResponder.moveUp(_:)):
+            moveSelection(by: -1)
+        case #selector(NSResponder.insertNewline(_:)):
+            activateSelection()
+        // ⌥Return — make a note named after the query instead of opening a match.
+        case #selector(NSResponder.insertLineBreak(_:)),
+             #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+            createFromQuery()
+        case #selector(NSResponder.cancelOperation(_:)):
+            dismiss()
+        default:
+            return false
+        }
+        return true
+    }
 
     private func moveSelection(by delta: Int) {
         guard !results.isEmpty else { return }

@@ -98,18 +98,17 @@ final class WelcomeNoteTests: XCTestCase {
         XCTAssertEqual(progress.done, 0, "nothing should start already ticked")
     }
 
-    /// The note teaches shortcuts, so it must not teach the wrong ones.
+    /// The note teaches shortcuts, so it must not teach the wrong ones. It
+    /// now renders the live bindings, so this compares against exactly what
+    /// the app registers rather than against a chord spelled out by hand.
     @MainActor
-    func testTheAdvertisedShortcutsAreTheOnesTheAppRegisters() {
+    func testTheAdvertisedShortcutsAreTheOnesTheAppRegisters() throws {
         let body = WelcomeNote.body
-        XCTAssertTrue(body.contains("⌘⇧S"), "new-note shortcut missing")
-        XCTAssertTrue(body.contains("⌘⇧F"), "find-note shortcut missing")
-
-        // Match the defaults declared in KeyboardShortcutNames, so renaming a
-        // chord there fails here instead of quietly misleading a new user.
-        let newNote = KeyboardShortcuts.Name.newNote.defaultShortcut?.description ?? ""
+        let newNote = try XCTUnwrap(HotkeyAdvice.describe(.newNote))
+        let find = try XCTUnwrap(HotkeyAdvice.describe(.quickSwitcher))
+        XCTAssertTrue(body.contains(newNote), "new-note shortcut missing, got: \(body)")
+        XCTAssertTrue(body.contains(find), "find-note shortcut missing, got: \(body)")
         XCTAssertTrue(newNote.contains("S"), "new-note default is \(newNote)")
-        let find = KeyboardShortcuts.Name.quickSwitcher.defaultShortcut?.description ?? ""
         XCTAssertTrue(find.contains("F"), "find-note default is \(find)")
     }
 

@@ -131,6 +131,13 @@ final class TodoTextView: NSTextView {
             )
             return true
         }
+        // An attachment reference is relative to the note's folder, which only
+        // the controller can resolve — it owns the store.
+        if url.scheme == nil {
+            guard let resolved = attachmentResolver?(url.relativeString) else { return false }
+            NSWorkspace.shared.open(resolved)
+            return true
+        }
         NSWorkspace.shared.open(url)
         return true
     }
@@ -143,6 +150,10 @@ final class TodoTextView: NSTextView {
     /// insert, or nil to let the paste proceed normally. Set by the controller,
     /// which owns the store the file has to be written next to.
     var attachmentHandler: ((NSPasteboard) -> String?)?
+
+    /// Turns a note-relative attachment path into a file URL. Set by the
+    /// controller for the same reason as `attachmentHandler`.
+    var attachmentResolver: ((String) -> URL?)?
 
     /// Paste handling, in order: a file or image becomes an attachment; a URL
     /// pasted over selected text wraps the selection in a markdown link, since

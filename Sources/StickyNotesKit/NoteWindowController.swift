@@ -60,7 +60,17 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private var savingDisabled = false
     private var preCollapseHeight: CGFloat
     private var isHovering = false
-    private var pendingExternalContent: String?
+    /// An external edit that arrived while the user was mid-sentence. Held
+    /// back so the text doesn't jump under the caret, and merged — never
+    /// dropped — before the next save or on blur.
+    private var pendingExternalNote: Note?
+
+    /// What this controller last wrote to disk. The file watcher reports our
+    /// own saves back to us, and a mid-typing echo carries the *previous*
+    /// text — treating that as someone else's edit merged the note with a
+    /// stale copy of itself.
+    private var lastPersistedContent: String?
+    private var lastPersistedTitle: String?
 
     /// True until the user types into this note. An untouched note left by a
     /// misfired hotkey is swept up on blur; a note that was typed into is
@@ -114,7 +124,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     private static let blurAlpha: CGFloat = 0.7
     private static let activeAlpha: CGFloat = 1.0
-    private static let chromeColor = NSColor.black.withAlphaComponent(0.55)
+    private static var chromeColor: NSColor { Appearance.chromeInk }
 
     init(note: Note, store: NoteStore, onClosed: @escaping (UUID) -> Void) {
         self.note = note
@@ -252,7 +262,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         dateLabel = NSTextField(labelWithString: "")
         dateLabel.translatesAutoresizingMaskIntoConstraints = false
         dateLabel.font = NSFont.systemFont(ofSize: 10, weight: .regular)
-        dateLabel.textColor = NSColor.black.withAlphaComponent(0.40)
+        dateLabel.textColor = Appearance.secondaryInk
         dateLabel.lineBreakMode = .byClipping
 
         footerView = NSView()
@@ -383,6 +393,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         textView.attachmentHandler = { [weak self] pasteboard in
             guard let self = self else { return nil }
             return Attachments.handlePaste(pasteboard, for: self.store)
+        }
+        textView.attachmentResolver = { [weak self] reference in
+            guard let self = self else { return nil }
+            return Attachments.resolve(reference, for: self.store)
         }
         titleField.delegate = self
         layoutManager.delegate = self
@@ -519,12 +533,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     @objc private func closeNote() {
-        savingDisabled = true
         saveWorkItem?.cancel()
         saveWorkItem = nil
         let isEmpty = note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if isEmpty {
+            savingDisabled = true
             store.discardActive(note)
         } else {
             // Capture the frame first: the window is about to close, and
@@ -533,6 +547,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
                 note.positionX = Double(frame.origin.x)
                 note.positionY = Double(frame.origin.y)
             }
+            // `archive` only moves the file on disk, so anything typed since
+            // the last debounced save has to land first — including any
+            // external edit we deferred while the user was typing.
+            mergePendingExternalNote()
+            persist()
+            savingDisabled = true
             store.archive(note)
             onArchived?(note)
         }
@@ -583,6 +603,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         guard let raw = sender.representedObject as? String,
               let level = NoteFloatLevel(rawValue: raw) else { return }
         note.floatLevel = level
+        wasNeverEdited = false
         applyFloatLevel()
         scheduleSave()
     }
@@ -605,6 +626,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         guard let raw = sender.representedObject as? String,
               let color = NoteColor(rawValue: raw) else { return }
         note.color = color
+        wasNeverEdited = false
         applyAppearanceColors()
         scheduleSave()
     }
@@ -618,6 +640,16 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         titleLabel.textColor = MarkdownStyler.bodyTextColor
         textView.insertionPointColor = MarkdownStyler.bodyTextColor
         textView.typingAttributes[.foregroundColor] = MarkdownStyler.bodyTextColor
+
+        // Chrome paints itself on the note's paper, so nothing here follows
+        // the system appearance on its own.
+        for button in [expandButton, trashButton, colorButton, labelButton] {
+            button.contentTintColor = NoteWindowController.chromeColor
+        }
+        dateLabel.textColor = Appearance.secondaryInk
+        rebuildLabelChips()
+        resizeGrip.needsDisplay = true
+
         MarkdownStyler.apply(to: textView)
         refreshMarkerVisibility()
         textView.needsDisplay = true
@@ -716,13 +748,16 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         updateAlpha()
         updateChromeVisibility()
         hideLabelCompletion()
-        if pendingExternalContent != nil {
-            pendingExternalContent = nil
-            if let updated = store.loadNote(id: note.id),
-               updated.content != note.content || updated.title != note.title {
-                applyExternalNote(updated)
-            }
+        if pendingExternalNote != nil {
+            mergePendingExternalNote()
+            persist()
         }
+    }
+
+    /// Refresh the window's opacity from the outside, for a window that was
+    /// ordered in without ever becoming key.
+    func refreshAlpha() {
+        updateAlpha()
     }
 
     private func updateAlpha() {
@@ -763,7 +798,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         frame.origin.y += frame.size.height - storedHeight
         frame.size.width = storedWidth
         frame.size.height = storedHeight
+        // The display arrangement just changed, so the stored geometry can
+        // easily describe a spot that no longer exists — a monitor that was
+        // unplugged. Clamping only at launch stranded the note until relaunch.
+        frame = NoteWindow.clampToVisibleScreen(frame)
         window.setFrame(frame, display: true, animate: false)
+        note.positionX = Double(frame.origin.x)
+        note.positionY = Double(frame.origin.y)
     }
 
     // MARK: - NSTextViewDelegate
@@ -875,7 +916,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         let lineNS = lineText as NSString
 
         // Checkbox: "[indent]- [ ] " or "[indent]- [x] "
-        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)-\s\[[ xX]\]\s(.*)$"#),
+        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)-[ \t]\[[ xX]\][ \t]?(.*)$"#),
            let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
             let indent = lineNS.substring(with: m.range(at: 1))
             let rest = lineNS.substring(with: m.range(at: 2))
@@ -1213,8 +1254,14 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             let newHeight = preCollapseHeight
             frame.origin.y -= newHeight - frame.size.height
             frame.size.height = newHeight
+            // A collapsed note dragged near the bottom edge would otherwise
+            // expand straight off the screen, leaving only its title bar.
+            frame = NoteWindow.clampToVisibleScreen(frame)
             window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
-            note.height = Double(newHeight)
+            note.positionX = Double(frame.origin.x)
+            note.positionY = Double(frame.origin.y)
+            note.height = Double(frame.size.height)
+            preCollapseHeight = frame.size.height
         }
         updateExpandButtonIcon()
         updateChromeVisibility()
@@ -1251,6 +1298,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     @objc private func handleStoreChange() {
         guard let updated = store.loadNote(id: note.id) else { return }
+        // Our own write, echoed back by the watcher. Mid-burst this is the
+        // text as of the last debounce, which is not an external edit.
+        if updated.content == lastPersistedContent, updated.title == lastPersistedTitle { return }
         let contentChanged = updated.content != note.content
         let titleChanged = updated.title != note.title
         if !contentChanged && !titleChanged { return }
@@ -1259,11 +1309,40 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             let editing = win.firstResponder === textView ||
                 titleField.currentEditor() != nil
             if editing {
-                pendingExternalContent = updated.content
+                pendingExternalNote = updated
                 return
             }
         }
         applyExternalNote(updated)
+    }
+
+    /// Fold a deferred external edit into what the user has been typing. The
+    /// local buffer hasn't necessarily been saved yet, so writing either side
+    /// over the other loses text; `ConflictResolver` keeps both.
+    private func mergePendingExternalNote() {
+        guard let external = pendingExternalNote else { return }
+        pendingExternalNote = nil
+
+        var local = note
+        local.content = textView.string
+        local.title = titleField.stringValue
+        local.updatedAt = Date()
+
+        // The title is edited in its own field, and `needsMerge` only weighs
+        // bodies and labels — so a title-only difference used to fall through
+        // to "apply theirs" and wipe a rename the user was still typing.
+        let localTitleWins = local.title != external.title && titleField.currentEditor() != nil
+
+        guard ConflictResolver.needsMerge([local, external]),
+              var merged = ConflictResolver.merge([local, external])
+        else {
+            if localTitleWins { return }
+            applyExternalNote(external)
+            return
+        }
+        if localTitleWins { merged.title = local.title }
+        applyExternalNote(merged)
+        note.labels = merged.labels
     }
 
     private func applyExternalNote(_ updated: Note) {
@@ -1278,9 +1357,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         }
         if updated.content != note.content {
             note.content = updated.content
+            // The collapsed bar shows a checkbox count drawn from the body,
+            // so a content-only edit has to refresh it too.
+            refreshCollapsedTitle()
             let oldSelection = textView.selectedRange()
             let fullRange = NSRange(location: 0, length: textStorage.length)
             textStorage.replaceCharacters(in: fullRange, with: updated.content)
+            // The recorded undo operations refer to ranges in the text we just
+            // threw away; replaying them against the new string garbles it.
+            textView.undoManager?.removeAllActions()
             MarkdownStyler.apply(to: textView)
             refreshMarkerVisibility()
             updateDateLabel()
@@ -1310,6 +1395,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         let normalized = NoteLabel.normalize(raw)
         guard !normalized.isEmpty, !note.labels.contains(normalized) else { return }
         note.labels.append(normalized)
+        wasNeverEdited = false
         rebuildLabelChips()
         scheduleSave()
     }
@@ -1502,12 +1588,40 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         guard !savingDisabled else { return }
         saveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            guard let self = self, !self.savingDisabled else { return }
-            self.note.updatedAt = Date()
-            self.store.save(self.note)
+            guard let self = self else { return }
+            // Clear first: leaving it set made `flushPendingSave` believe a
+            // save was still owed, so quitting rewrote every open note.
+            self.saveWorkItem = nil
+            guard !self.savingDisabled else { return }
+            // A deferred external edit has to be folded in first, or this
+            // write silently overwrites it.
+            self.mergePendingExternalNote()
+            self.persist()
         }
         saveWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+    }
+
+    /// Write the note and remember exactly what went to disk. Our own writes
+    /// come back through the file watcher as `didChange`, and without this
+    /// record there is no way to tell that echo apart from someone else
+    /// editing the file.
+    private func persist() {
+        note.updatedAt = Date()
+        lastPersistedContent = note.content
+        lastPersistedTitle = note.title
+        store.save(note)
+    }
+
+    /// Write any debounced edit immediately. Saves are debounced by half a
+    /// second, so quitting (or archiving) mid-sentence would otherwise drop
+    /// everything typed since the last pause.
+    func flushPendingSave() {
+        guard saveWorkItem != nil, !savingDisabled else { return }
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        mergePendingExternalNote()
+        persist()
     }
 
     /// Tear down without persisting anything else. Used when the underlying

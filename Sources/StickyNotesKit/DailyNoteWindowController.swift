@@ -32,6 +32,11 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private var midnightTimer: Timer?
     private var pendingExternalContent: String?
 
+    /// True when the file exists but couldn't be read. Saving is suspended so
+    /// a placeholder buffer never lands on top of the real content.
+    private var fileUnavailable = false
+    private var unavailableRetry: DispatchWorkItem?
+
     /// Height used when expanding back from a collapsed state. Captured at
     /// collapse time, since while collapsed the live window frame is just
     /// the chrome strip.
@@ -84,7 +89,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         dateLabel = CenteredTitleLabel(frame: .zero)
         dateLabel.translatesAutoresizingMaskIntoConstraints = false
         dateLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        dateLabel.textColor = NSColor.black.withAlphaComponent(0.55)
+        dateLabel.textColor = Appearance.chromeInk
         dateLabel.placeholder = ""
 
         closeButton = DailyNoteWindowController.makeChromeButton(
@@ -150,6 +155,10 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
             guard let self = self else { return nil }
             return Attachments.handlePaste(pasteboard, for: self.attachmentStore)
         }
+        textView.attachmentResolver = { [weak self] reference in
+            guard let self = self else { return nil }
+            return Attachments.resolve(reference, for: self.attachmentStore)
+        }
 
         setupLayout()
         closeButton.target = self
@@ -162,6 +171,14 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         startWatching()
         scheduleMidnightRollover()
         observeWake()
+        // Borderless window painting its own paper: nothing here follows the
+        // system appearance on its own.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applyAppearanceColors),
+            name: Appearance.didChange,
+            object: nil
+        )
         // Match the on-disk collapsed flag without animating — the window
         // already opened at the right height so this is just sizing the
         // scroll view side of things.
@@ -179,7 +196,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
             .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
         image?.isTemplate = true
         button.image = image
-        button.contentTintColor = NSColor.black.withAlphaComponent(0.55)
+        button.contentTintColor = Appearance.chromeInk
         button.toolTip = tooltip
         return button
     }
@@ -189,6 +206,8 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     deinit {
         midnightTimer?.invalidate()
         fileWatcher?.stop()
+        unavailableRetry?.cancel()
+        NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
@@ -254,18 +273,38 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         dateLabel.text = "Daily Note · " + DailyNoteWindowController.dateFormatter.string(from: currentDay)
 
         guard let url = currentURL else {
+            fileUnavailable = false
             lastLoadedContent = ""
             applyExternalBody("")
             return
         }
 
         if let raw = try? String(contentsOf: url, encoding: .utf8) {
+            fileUnavailable = false
             lastLoadedContent = raw
             applyExternalBody(raw)
             return
         }
 
+        // Today's note exists but we can't read it yet. Seeding the template
+        // here would overwrite real content, so hold off.
+        //
+        // An evicted iCloud file is the important case and it does *not*
+        // answer to `fileExists` — iCloud replaces it with a hidden
+        // `.<name>.icloud` stub until something asks for the download.
+        if FileManager.default.fileExists(atPath: url.path) || hasICloudPlaceholder(for: url) {
+            fileUnavailable = true
+            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+            applyExternalBody("Waiting for today's note to download…")
+            // The watcher covers the usual case; this is the backstop for a
+            // read that fails for some reason a file event will never report,
+            // so the window can't sit on the placeholder forever.
+            scheduleUnavailableRetry()
+            return
+        }
+
         // File doesn't exist yet. Seed from template if configured.
+        fileUnavailable = false
         if let templated = DailyNote.renderedTemplate(for: currentDay, fileURL: url) {
             try? FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
@@ -283,7 +322,16 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     /// Reload from disk if the underlying file changed externally.
     private func reloadIfExternallyChanged() {
         guard let url = currentURL else { return }
-        let body = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        // A failed read means the file is mid-sync or undecodable, not empty —
+        // treating it as empty would blank the buffer and then save that over
+        // the real content. If we were waiting on a download, this is it.
+        guard let body = try? String(contentsOf: url, encoding: .utf8) else { return }
+        if fileUnavailable {
+            fileUnavailable = false
+            lastLoadedContent = body
+            applyExternalBody(body)
+            return
+        }
         if body == lastLoadedContent { return }
 
         if let win = window, win.isKeyWindow,
@@ -301,6 +349,9 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         let oldSelection = textView.selectedRange()
         let fullRange = NSRange(location: 0, length: textStorage.length)
         textStorage.replaceCharacters(in: fullRange, with: body)
+        // The recorded undo operations refer to ranges in the text we just
+        // threw away; replaying them against the new string garbles it.
+        textView.undoManager?.removeAllActions()
         MarkdownStyler.apply(to: textView)
         MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
         let len = textStorage.length
@@ -315,8 +366,67 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
+    /// Fold a deferred external edit into what the user has been typing. The
+    /// buffer hasn't necessarily been saved yet, so writing either side over
+    /// the other loses text.
+    @objc private func applyAppearanceColors() {
+        backgroundView.layer?.backgroundColor = NSColor(hex: state.color.bodyHex)?.cgColor
+        dateLabel.textColor = Appearance.chromeInk
+        for button in [closeButton, collapseButton] {
+            button.contentTintColor = Appearance.chromeInk
+        }
+        textView.insertionPointColor = MarkdownStyler.bodyTextColor
+        textView.typingAttributes[.foregroundColor] = MarkdownStyler.bodyTextColor
+        MarkdownStyler.apply(to: textView)
+        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
+        textView.needsDisplay = true
+    }
+
+    /// iCloud swaps an evicted file for a hidden `.<name>.icloud` stub, so
+    /// the note can be entirely real and still fail `fileExists`.
+    private func hasICloudPlaceholder(for url: URL) -> Bool {
+        let stub = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).icloud")
+        return FileManager.default.fileExists(atPath: stub.path)
+    }
+
+    private func scheduleUnavailableRetry() {
+        unavailableRetry?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.fileUnavailable else { return }
+            self.unavailableRetry = nil
+            self.loadCurrentFile()
+        }
+        unavailableRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+    }
+
+    private func mergePendingExternalContent() {
+        guard let external = pendingExternalContent else { return }
+        pendingExternalContent = nil
+        let merged = ConflictResolver.mergeBodies(
+            local: textView.string,
+            external: external,
+            externalDate: Date()
+        )
+        guard merged != textView.string else { return }
+        applyExternalBody(merged)
+    }
+
+    /// Write any debounced edit immediately, so quitting mid-sentence doesn't
+    /// drop it.
+    func flushPendingSave() {
+        guard saveWorkItem != nil else { return }
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        saveNow()
+    }
+
     private func saveNow() {
-        guard let url = currentURL else { return }
+        guard let url = currentURL, !fileUnavailable else { return }
+        // A deferred external edit has to be folded in first, or this write
+        // silently overwrites it.
+        mergePendingExternalContent()
         let body = textView.string
         if body == lastLoadedContent { return }
 
@@ -538,13 +648,17 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
-    @objc private func hideNote() {
+    /// Hide and remember it, so neither the next store change nor the next
+    /// launch brings the note back.
+    func hide() {
         // Flush before disappearing so an immediate reopen sees fresh content.
-        saveWorkItem?.cancel()
-        saveWorkItem = nil
-        saveNow()
+        flushPendingSave()
         window?.orderOut(nil)
         persistVisibility(false)
+    }
+
+    @objc private func hideNote() {
+        hide()
     }
 
     // MARK: - NSWindowDelegate
@@ -566,8 +680,8 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
 
     func windowDidResignKey(_ notification: Notification) {
         if pendingExternalContent != nil {
-            pendingExternalContent = nil
-            reloadIfExternallyChanged()
+            mergePendingExternalContent()
+            saveNow()
         }
     }
 

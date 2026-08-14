@@ -17,22 +17,27 @@ enum MarkdownFile {
 
     static func parse(_ raw: String) -> Document {
         let lines = raw.components(separatedBy: "\n")
-        guard lines.first?.trimmingCharacters(in: .whitespaces) == separator else {
+        // Trimming newlines as well as spaces keeps CRLF files working: a
+        // vault edited on Windows leaves a `\r` on every line, which used to
+        // stop `---` matching at all, so the metadata leaked into the body.
+        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == separator else {
             return Document(frontmatter: [], body: raw)
         }
 
         var i = 1
         var frontmatter: [(String, String)] = []
+        var closed = false
         while i < lines.count {
             let line = lines[i]
-            if line.trimmingCharacters(in: .whitespaces) == separator {
+            if line.trimmingCharacters(in: .whitespacesAndNewlines) == separator {
                 i += 1
+                closed = true
                 break
             }
             if let colon = line.firstIndex(of: ":") {
-                let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
+                let key = String(line[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
                 let value = String(line[line.index(after: colon)...])
-                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !key.isEmpty {
                     frontmatter.append((key, unquote(value)))
                 }
@@ -40,8 +45,15 @@ enum MarkdownFile {
             i += 1
         }
 
-        // Drop a single blank line after the closing separator (cosmetic gap)
-        if i < lines.count && lines[i].isEmpty { i += 1 }
+        // No closing separator: this isn't frontmatter, it's a document that
+        // happens to open with a horizontal rule. Consuming it as metadata
+        // left an empty body that the next save would write back over the
+        // user's real text.
+        guard closed else { return Document(frontmatter: [], body: raw) }
+
+        // Only a truly empty line (or a bare CR) is the cosmetic gap; a line
+        // of spaces is content, and dropping it would edit the user's note.
+        if i < lines.count, lines[i].isEmpty || lines[i] == "\r" { i += 1 }
         let body = lines[i...].joined(separator: "\n")
         return Document(frontmatter: frontmatter, body: body)
     }
@@ -92,9 +104,15 @@ enum MarkdownFile {
     }
 
     private static func forceQuote(_ value: String) -> String {
+        // Frontmatter is parsed line by line, so a raw newline in a value
+        // would split the record and corrupt everything after it. The reader
+        // already understands these escapes.
         let escaped = value
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
         return "\"\(escaped)\""
     }
 

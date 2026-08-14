@@ -343,6 +343,24 @@ private final class GeneralPaneView: NSView {
             alert.alertStyle = .warning
             alert.runModal()
             launchToggle.state = LaunchAgent.isEnabled ? .on : .off
+            return
+        }
+
+        // Registering can succeed and still leave the app switched off, if the
+        // user disabled it in System Settings before. The checkbox would then
+        // claim it's on when it isn't, and only System Settings can fix it.
+        if target && LaunchAgent.needsApproval {
+            launchToggle.state = .off
+            let alert = NSAlert()
+            alert.messageText = "Sticky Notes is turned off in Login Items"
+            alert.informativeText = "Switch Sticky Notes on under Login Items in System Settings to launch it at login."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Open System Settings")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() == .alertFirstButtonReturn,
+               let url = LaunchAgent.loginItemsSettingsURL {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 

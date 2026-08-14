@@ -368,4 +368,26 @@ final class NoteStoreTests: XCTestCase {
         }
         XCTAssertEqual(store.loadArchived().map(\.content), ["n100", "n50", "n0"])
     }
+
+    /// A note written in Obsidian and dropped into the folder carries no
+    /// `id:`. Minting a random one per load made every reload look like the
+    /// old note vanished and a new one appeared, so its window was torn down
+    /// and rebuilt on every store change.
+    func testAVaultFileWithoutAnIdKeepsTheSameIdentityAcrossLoads() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("StableId-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = NoteStore(rootURL: root, format: .markdown)
+        try "# Hand written\n\nsome text".write(
+            to: store.activeURL.appendingPathComponent("2026-08-14 120000.md"),
+            atomically: true, encoding: .utf8
+        )
+
+        let first = try XCTUnwrap(store.loadActive().first)
+        let second = try XCTUnwrap(NoteStore(rootURL: root, format: .markdown).loadActive().first)
+        XCTAssertEqual(first.id, second.id, "identity churned between loads")
+    }
+
 }

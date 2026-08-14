@@ -61,6 +61,45 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
         }
     }
 
+    /// While the search field is being edited, AppKit's field editor owns the
+    /// key events and delivers Return and the arrows as command selectors.
+    /// The palette used to override `keyDown` on the field instead, which the
+    /// field editor never calls — so Return and ↑/↓ did nothing at all.
+    private func send(_ selector: Selector, to controller: QuickSwitcherController) -> Bool {
+        controller.control(NSControl(), textView: NSTextView(), doCommandBy: selector)
+    }
+
+    func testReturnOpensTheHighlightedResult() throws {
+        var chosen: QuickSwitcherController.Outcome?
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { chosen = $0 })
+        controller.prepare()
+        controller.search("Groceries")
+
+        XCTAssertTrue(send(#selector(NSResponder.insertNewline(_:)), to: controller),
+                      "Return was not handled")
+        guard case .open = try XCTUnwrap(chosen) else {
+            return XCTFail("Return should open the highlighted note, got \(String(describing: chosen))")
+        }
+    }
+
+    func testArrowKeysMoveTheSelection() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+
+        XCTAssertTrue(send(#selector(NSResponder.moveDown(_:)), to: controller))
+        XCTAssertEqual(controller.selectedRow, 1, "down arrow did not move the selection")
+        XCTAssertTrue(send(#selector(NSResponder.moveUp(_:)), to: controller))
+        XCTAssertEqual(controller.selectedRow, 0, "up arrow did not move the selection")
+    }
+
+    /// Anything the palette doesn't claim has to fall through, or typing in the
+    /// search field breaks.
+    func testUnrelatedCommandsAreNotSwallowed() throws {
+        let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
+        controller.prepare()
+        XCTAssertFalse(send(#selector(NSResponder.deleteBackward(_:)), to: controller))
+    }
+
     func testEmptyQueryListsEveryNote() throws {
         let controller = QuickSwitcherController(store: seededStore(), onChoose: { _ in })
         controller.prepare()

@@ -101,7 +101,10 @@ enum MarkdownEditing {
         if hadNewline { line.removeLast() }
 
         let replacement: String
-        if let match = firstMatch(#"^([ \t]*)- \[([ xX])\] (.*)$"#, in: line) {
+        // Same grammar the styler renders, tab separators included —
+        // otherwise a line that looks like a checkbox gets a second
+        // checkbox prefixed onto it.
+        if let match = firstMatch(#"^([ \t]*)-[ \t]\[([ xX])\][ \t]?(.*)$"#, in: line) {
             let indent = match[1], state = match[2], rest = match[3]
             let nowChecked = state == " "
             replacement = "\(indent)- [\(nowChecked ? "x" : " ")] \(rest)"
@@ -127,7 +130,7 @@ enum MarkdownEditing {
     /// Completed and total checkbox counts, or nil when the note has no tasks.
     static func checkboxProgress(in text: String) -> (done: Int, total: Int)? {
         guard let regex = try? NSRegularExpression(
-            pattern: #"^[ \t]*- \[([ xX])\] "#,
+            pattern: #"^[ \t]*-[ \t]\[([ xX])\](?:[ \t]|$)"#,
             options: [.anchorsMatchLines]
         ) else { return nil }
 

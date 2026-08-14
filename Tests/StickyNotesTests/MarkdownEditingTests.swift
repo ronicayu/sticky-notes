@@ -217,6 +217,22 @@ final class MarkdownEditingTests: XCTestCase {
         XCTAssertEqual(progress?.total, 3)
     }
 
+    /// The styler renders a tab after the dash as a checkbox, so the editor
+    /// has to recognise one too. It used to fall through to the plain-text
+    /// branch and prefix a second checkbox onto the line.
+    func testTogglingATabSeparatedCheckboxFlipsItInsteadOfNesting() {
+        let source = "-\t[ ] task"
+        let edit = MarkdownEditing.toggleCheckbox(source, selection: NSRange(location: 0, length: 0))
+        XCTAssertFalse(edit.text.contains("- [ ] -"), "prefixed a second checkbox: \(edit.text)")
+        XCTAssertTrue(edit.text.contains("[x]"), "did not tick the box: \(edit.text)")
+    }
+
+    func testProgressCountsTabSeparatedCheckboxes() {
+        let progress = MarkdownEditing.checkboxProgress(in: "-\t[x] a\n- [ ] b")
+        XCTAssertEqual(progress?.total, 2)
+        XCTAssertEqual(progress?.done, 1)
+    }
+
     func testProgressIsNilWithoutTasks() {
         XCTAssertNil(MarkdownEditing.checkboxProgress(in: "just some notes\n- a bullet"))
         XCTAssertNil(MarkdownEditing.checkboxProgress(in: ""))
