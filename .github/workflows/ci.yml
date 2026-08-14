@@ -14,6 +14,10 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags make build-app.sh stamp a real version into Info.plist
+          # instead of falling back to 0.0.0-dev.
+          fetch-depth: 0
 
       - name: Cache SwiftPM dependencies
         uses: actions/cache@v4

@@ -27,7 +27,10 @@ cp Resources/Info.plist "${APP_DIR}/Contents/Info.plist"
 
 # Substitute the version placeholder in the copied Info.plist. Pass VERSION
 # explicitly (e.g. release.sh does this) or fall back to the latest git tag.
-APP_VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+# `|| true` matters: with `set -euo pipefail`, a repo with no tags — a fresh
+# clone, or a CI checkout that didn't fetch them — makes `git describe` exit
+# 128 and takes the whole script down before the bundle is assembled.
+APP_VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)}"
 APP_VERSION="${APP_VERSION:-0.0.0-dev}"
 sed -i '' "s|__APP_VERSION__|${APP_VERSION}|g" "${APP_DIR}/Contents/Info.plist"
 
