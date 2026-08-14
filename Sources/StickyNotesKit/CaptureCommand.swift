@@ -18,11 +18,28 @@ enum CaptureCommand: Equatable {
     static func parse(_ url: URL) -> CaptureCommand? {
         guard url.scheme?.lowercased() == "stickynotes" else { return nil }
 
-        // stickynotes://new and stickynotes:new both reach people's muscle
-        // memory; take the action from whichever part carries it.
-        let action = (url.host?.isEmpty == false ? url.host : nil)
-            ?? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let query = queryItems(of: url)
+        // Read the action out of the raw string rather than from `host` or
+        // `path`. Foundation disagrees across macOS versions about where the
+        // action in `stickynotes:new?text=hi` (no slashes) surfaces: macOS 15+
+        // reports it as `path`, macOS 14 treats the URL as opaque and reports
+        // neither, which made that spelling silently do nothing there.
+        let raw = url.absoluteString
+        guard let colon = raw.firstIndex(of: ":") else { return nil }
+        var remainder = raw[raw.index(after: colon)...]
+        if remainder.hasPrefix("//") { remainder = remainder.dropFirst(2) }
+
+        let actionPart: Substring
+        let queryPart: Substring
+        if let mark = remainder.firstIndex(of: "?") {
+            actionPart = remainder[..<mark]
+            queryPart = remainder[remainder.index(after: mark)...]
+        } else {
+            actionPart = remainder
+            queryPart = ""
+        }
+
+        let action = actionPart.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let query = queryItems(from: String(queryPart))
 
         switch action.lowercased() {
         case "new":
@@ -52,8 +69,12 @@ enum CaptureCommand: Equatable {
     /// `+` means a space in a query string, which `URLComponents` doesn't
     /// decode — a note captured from a shell script would otherwise arrive
     /// full of plus signs.
-    private static func queryItems(of url: URL) -> [String: String] {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+    ///
+    /// Parsed through a synthesized hierarchical URL so percent-decoding
+    /// behaves the same regardless of how the original URL was spelled.
+    private static func queryItems(from query: String) -> [String: String] {
+        guard !query.isEmpty,
+              let components = URLComponents(string: "scheme://host?\(query)"),
               let items = components.queryItems else { return [:] }
         var out: [String: String] = [:]
         for item in items {

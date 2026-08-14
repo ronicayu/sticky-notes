@@ -115,8 +115,9 @@ final class CaptureCommandTests: XCTestCase {
                        .new(title: nil, text: "hi", color: nil, labels: []))
     }
 
-    /// `stickynotes:new` with no slashes puts the action in the path rather
-    /// than the host, and people type both.
+    /// Foundation reports the action for `stickynotes:new` as `path` on
+    /// macOS 15+, and as nothing at all on macOS 14 — where this spelling
+    /// silently stopped working until the parser stopped relying on either.
     func testSchemeWithoutSlashesStillWorks() {
         XCTAssertEqual(parse("stickynotes:new?text=hi"),
                        .new(title: nil, text: "hi", color: nil, labels: []))
@@ -125,5 +126,26 @@ final class CaptureCommandTests: XCTestCase {
 
     func testTrailingSlashIsTolerated() {
         XCTAssertEqual(parse("stickynotes://daily/"), .daily)
+        XCTAssertEqual(parse("stickynotes:daily/"), .daily)
+    }
+
+    /// Every spelling of the same command has to reach the same place, on
+    /// every macOS version.
+    func testEverySpellingOfACommandAgrees() {
+        let expected = CaptureCommand.new(title: nil, text: "hi", color: nil, labels: [])
+        for spelling in [
+            "stickynotes://new?text=hi",
+            "stickynotes:new?text=hi",
+            "stickynotes:///new?text=hi",
+            "stickynotes://NEW?text=hi",
+            "stickynotes:New?text=hi"
+        ] {
+            XCTAssertEqual(parse(spelling), expected, "\(spelling) did not parse")
+        }
+    }
+
+    func testQueryDecodingIsTheSameWithAndWithoutSlashes() {
+        XCTAssertEqual(parse("stickynotes:new?text=a%20b+c"),
+                       parse("stickynotes://new?text=a%20b+c"))
     }
 }
