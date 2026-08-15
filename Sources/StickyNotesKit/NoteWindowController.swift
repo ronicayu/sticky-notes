@@ -12,6 +12,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// whether the window belongs on screen under the label filter.
     var labels: [String] { note.labels }
 
+    /// Identity of the note this window is showing.
+    var noteId: UUID { note.id }
+
     /// The collapsed title bar is all you can see of a collapsed note, so a
     /// task list shows its remaining count there. Every path that changes the
     /// title or the body routes through here so the two can't drift apart.
@@ -28,7 +31,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private let expandButton: NSButton
     private let trashButton: NSButton
     private let colorButton: NSButton
-    private let titleField: FlushLeftTextField    // editable; visible expanded
+    let titleField: FlushLeftTextField            // editable; visible expanded
     private let titleLabel: CenteredTitleLabel    // read-only; visible collapsed
     private let dateLabel: NSTextField
     private let footerView: NSView
@@ -49,7 +52,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     private var dragZoneHeightConstraint: NSLayoutConstraint!
 
-    private let textView: TodoTextView
+    let textView: TodoTextView
     private let textStorage: NSTextStorage
     private let layoutManager: NSLayoutManager
     private let scrollView: NSScrollView
@@ -63,7 +66,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// An external edit that arrived while the user was mid-sentence. Held
     /// back so the text doesn't jump under the caret, and merged — never
     /// dropped — before the next save or on blur.
-    private var pendingExternalNote: Note?
+    var pendingExternalNote: Note?
 
     /// What this controller last wrote to disk. The file watcher reports our
     /// own saves back to us, and a mid-typing echo carries the *previous*
@@ -532,7 +535,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         performToggleCollapse()
     }
 
-    @objc private func closeNote() {
+    @objc func closeNote() {
         saveWorkItem?.cancel()
         saveWorkItem = nil
         let isEmpty = note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1296,7 +1299,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     // MARK: - External change sync
 
-    @objc private func handleStoreChange() {
+    @objc func handleStoreChange() {
         guard let updated = store.loadNote(id: note.id) else { return }
         // Our own write, echoed back by the watcher. Mid-burst this is the
         // text as of the last debounce, which is not an external edit.
@@ -1305,6 +1308,19 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         let titleChanged = updated.title != note.title
         if !contentChanged && !titleChanged { return }
 
+        // Anything typed since the last write only exists in this buffer, so
+        // applying the incoming version over the top would discard it. Defer
+        // instead and let the merge decide — the same rule every other save
+        // path follows. Relying on the window being key was not enough:
+        // clicking the note's own title bar mid-sentence drops first
+        // responder, and the next store change would take the text with it.
+        if hasUnsavedEdits {
+            pendingExternalNote = updated
+            return
+        }
+
+        // No unsaved work, but still don't yank the text out from under a
+        // caret that is sitting in it.
         if let win = window, win.isKeyWindow {
             let editing = win.firstResponder === textView ||
                 titleField.currentEditor() != nil
@@ -1314,6 +1330,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             }
         }
         applyExternalNote(updated)
+    }
+
+    /// True when the buffer holds text that has not reached disk — either a
+    /// save is still armed, or what we last wrote no longer matches.
+    private var hasUnsavedEdits: Bool {
+        if saveWorkItem != nil { return true }
+        guard let persistedContent = lastPersistedContent,
+              let persistedTitle = lastPersistedTitle else { return false }
+        return textView.string != persistedContent || titleField.stringValue != persistedTitle
     }
 
     /// Fold a deferred external edit into what the user has been typing. The
