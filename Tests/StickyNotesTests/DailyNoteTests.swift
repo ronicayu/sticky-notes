@@ -13,6 +13,9 @@ final class DailyNoteTests: XCTestCase {
         return cal.date(from: comps)!
     }()
 
+    /// A fixed "now" for merge dividers.
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
     private var utc: Calendar = {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "UTC")!
@@ -231,5 +234,149 @@ final class DailyNoteTests: XCTestCase {
         """
         let state = try JSONDecoder().decode(DailyNoteState.self, from: Data(raw.utf8))
         XCTAssertEqual(state.color, .yellow)
+    }
+
+    // MARK: - iCloud duplicate healing
+
+    /// The midnight collision: two Macs both create today's note in the same
+    /// second, iCloud can't merge two independent creates, and the vault ends
+    /// up with `2026-08-26.md` and `2026-08-26 2.md`.
+    private func makeVaultFolder() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DailyDupes-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
+
+    private func write(_ body: String, _ name: String, in dir: URL) throws {
+        try body.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
+    private func read(_ name: String, in dir: URL) throws -> String {
+        try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
+    }
+
+    private func exists(_ name: String, in dir: URL) -> Bool {
+        FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path)
+    }
+
+    /// Delete rather than trash, so a test run doesn't fill the user's Trash.
+    private let deleteInstead: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+
+    func testDuplicateBaseRecognizesICloudsNumbering() {
+        XCTAssertEqual(DailyNote.duplicateBase(of: "2026-08-26 2"), "2026-08-26")
+        XCTAssertEqual(DailyNote.duplicateBase(of: "2026-08-26 3"), "2026-08-26")
+        // iCloud keeps appending, so the third copy of "note 2" is "note 2 3".
+        XCTAssertEqual(DailyNote.duplicateBase(of: "note 2 3"), "note 2")
+    }
+
+    func testDuplicateBaseIgnoresNamesAPersonWouldChoose() {
+        XCTAssertNil(DailyNote.duplicateBase(of: "2026-08-26"))
+        XCTAssertNil(DailyNote.duplicateBase(of: "Groceries"))
+        // iCloud starts numbering at 2 — a "1" was somebody's own choice.
+        XCTAssertNil(DailyNote.duplicateBase(of: "Sprint 1"))
+        XCTAssertNil(DailyNote.duplicateBase(of: "2"))
+    }
+
+    func testHealingFoldsTheDuplicatesTextIntoTheOriginal() throws {
+        let dir = try makeVaultFolder()
+        try write("typed on the laptop", "2026-08-26.md", in: dir)
+        try write("typed on the desktop", "2026-08-26 2.md", in: dir)
+
+        XCTAssertEqual(DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead), 1)
+
+        let merged = try read("2026-08-26.md", in: dir)
+        XCTAssertTrue(merged.contains("typed on the laptop"))
+        XCTAssertTrue(merged.contains("typed on the desktop"), "the duplicate's text must survive")
+        XCTAssertTrue(merged.hasPrefix("typed on the laptop"), "the original keeps the top")
+        XCTAssertFalse(exists("2026-08-26 2.md", in: dir))
+    }
+
+    func testHealingLeavesNoDividerWhenBothCopiesSayTheSameThing() throws {
+        let dir = try makeVaultFolder()
+        // The common case: both Macs wrote the same rendered template.
+        try write("## Today\n\n- [ ] ", "2026-08-26.md", in: dir)
+        try write("## Today\n\n- [ ] ", "2026-08-26 2.md", in: dir)
+
+        XCTAssertEqual(DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead), 1)
+        XCTAssertEqual(try read("2026-08-26.md", in: dir), "## Today\n\n- [ ] ")
+        XCTAssertFalse(exists("2026-08-26 2.md", in: dir))
+    }
+
+    func testHealingFoldsInEveryDuplicate() throws {
+        let dir = try makeVaultFolder()
+        try write("one", "2026-08-26.md", in: dir)
+        try write("two", "2026-08-26 2.md", in: dir)
+        try write("three", "2026-08-26 3.md", in: dir)
+
+        XCTAssertEqual(DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead), 2)
+
+        let merged = try read("2026-08-26.md", in: dir)
+        for text in ["one", "two", "three"] {
+            XCTAssertTrue(merged.contains(text), "lost \(text)")
+        }
+    }
+
+    /// The safety rule: a numbered name is only a duplicate when the file it
+    /// shadows is right there beside it.
+    func testAFileWithNoOriginalBesideItIsLeftAlone() throws {
+        let dir = try makeVaultFolder()
+        try write("part two of my notes", "Groceries 2.md", in: dir)
+
+        XCTAssertEqual(DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead), 0)
+        XCTAssertEqual(try read("Groceries 2.md", in: dir), "part two of my notes")
+    }
+
+    func testOrdinaryNotesAreUntouched() throws {
+        let dir = try makeVaultFolder()
+        try write("today", "2026-08-26.md", in: dir)
+        try write("yesterday", "2026-08-25.md", in: dir)
+
+        XCTAssertEqual(DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead), 0)
+        XCTAssertEqual(try read("2026-08-26.md", in: dir), "today")
+        XCTAssertEqual(try read("2026-08-25.md", in: dir), "yesterday")
+    }
+
+    func testNonMarkdownNeighborsAreIgnored() throws {
+        let dir = try makeVaultFolder()
+        try write("original", "diagram.png", in: dir)
+        try write("copy", "diagram 2.png", in: dir)
+
+        XCTAssertEqual(DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead), 0)
+        XCTAssertTrue(exists("diagram 2.png", in: dir))
+    }
+
+    /// If the duplicate can't be disposed of, its text has already been merged
+    /// in — so a second sweep must not append it all over again.
+    func testASecondSweepDoesNotDoubleUpTheMergedText() throws {
+        let dir = try makeVaultFolder()
+        try write("mine", "2026-08-26.md", in: dir)
+        try write("theirs", "2026-08-26 2.md", in: dir)
+
+        _ = DailyNote.healDuplicates(in: dir, now: now, dispose: { _ in })  // dispose fails
+        let first = try read("2026-08-26.md", in: dir)
+        _ = DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead)
+        let second = try read("2026-08-26.md", in: dir)
+
+        XCTAssertEqual(first, second, "re-merging the same duplicate must be a no-op")
+        XCTAssertEqual(second.components(separatedBy: "theirs").count - 1, 1)
+    }
+
+    func testTheDuplicateSurvivesWhenItCannotBeDisposedOf() throws {
+        let dir = try makeVaultFolder()
+        try write("mine", "2026-08-26.md", in: dir)
+        try write("theirs", "2026-08-26 2.md", in: dir)
+
+        XCTAssertEqual(DailyNote.healDuplicates(in: dir, now: now, dispose: { _ in
+            throw CocoaError(.fileWriteNoPermission)
+        }), 0)
+        XCTAssertTrue(exists("2026-08-26 2.md", in: dir), "never lose the file we couldn't dispose of")
+    }
+
+    func testHealingAnAbsentFolderIsHarmless() {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NotThere-\(UUID().uuidString)", isDirectory: true)
+        XCTAssertEqual(DailyNote.healDuplicates(in: missing, now: now, dispose: deleteInstead), 0)
     }
 }

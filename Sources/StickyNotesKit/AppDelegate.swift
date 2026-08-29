@@ -95,7 +95,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         if dailyNoteController == nil {
             dailyNoteController = DailyNoteWindowController()
         }
-        dailyNoteController?.show()
+        // Reopening what was already on screen isn't a fresh request for
+        // today's note, so it doesn't create the file — every Mac does this
+        // unattended at launch, and only one of them should be creating.
+        dailyNoteController?.show(userInitiated: false)
     }
 
     deinit {

@@ -167,6 +167,88 @@ enum DailyNote {
         }
     }
 
+    // MARK: - Duplicate healing
+
+    /// iCloud's name for a losing copy: `2026-08-26 2.md` sitting beside
+    /// `2026-08-26.md`. This is *not* an `NSFileVersion` conflict — the two
+    /// files were created independently on two Macs, so iCloud never links
+    /// them as versions of one document — which is why `NoteStore`'s
+    /// conflict sweep can't see it and it needs healing by name.
+    private static let duplicateSuffix = try? NSRegularExpression(pattern: #"^(.+) (\d+)$"#)
+
+    /// Fold iCloud's numbered duplicates back into the notes they were
+    /// copied from, for every `.md` in `directory`.
+    ///
+    /// A file only counts as a duplicate when the note it shadows sits right
+    /// beside it, so one the user deliberately named "Groceries 2" is left
+    /// alone unless "Groceries" is there too. Nothing is discarded: the
+    /// duplicate's text is merged in first, and the file itself goes to the
+    /// Trash rather than being deleted, so a wrong guess is recoverable.
+    ///
+    /// Returns how many duplicates were folded in.
+    @discardableResult
+    static func healDuplicates(
+        in directory: URL,
+        now: Date = Date(),
+        dispose: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+    ) -> Int {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return 0 }
+        var healed = 0
+
+        // Sorted so "note 2" merges before "note 3": each one lands on top of
+        // the previous merge instead of racing it.
+        for name in names.sorted() {
+            let duplicate = directory.appendingPathComponent(name)
+            guard duplicate.pathExtension.lowercased() == "md",
+                  let base = duplicateBase(of: duplicate.deletingPathExtension().lastPathComponent)
+            else { continue }
+
+            let original = directory
+                .appendingPathComponent(base)
+                .appendingPathExtension(duplicate.pathExtension)
+            guard fm.fileExists(atPath: original.path),
+                  let duplicateBody = try? String(contentsOf: duplicate, encoding: .utf8),
+                  let originalBody = try? String(contentsOf: original, encoding: .utf8)
+            else { continue }
+
+            let merged = ConflictResolver.mergeBodies(
+                local: originalBody,
+                external: duplicateBody,
+                externalDate: modificationDate(of: duplicate) ?? now,
+                now: now
+            )
+            if merged != originalBody {
+                // A failed write means the duplicate is still the only copy
+                // of its text, so leave it where it is.
+                do { try merged.write(to: original, atomically: true, encoding: .utf8) }
+                catch { continue }
+            }
+            do { try dispose(duplicate) } catch { continue }
+            healed += 1
+        }
+        return healed
+    }
+
+    /// `"2026-08-26 2"` -> `"2026-08-26"`. Nil when the name isn't one of
+    /// iCloud's numbered copies.
+    static func duplicateBase(of name: String) -> String? {
+        guard let regex = duplicateSuffix else { return nil }
+        let ns = name as NSString
+        guard let match = regex.firstMatch(
+            in: name, options: [], range: NSRange(location: 0, length: ns.length)
+        ) else { return nil }
+
+        let base = ns.substring(with: match.range(at: 1))
+        // iCloud starts at 2 — "note 1" is a name somebody chose.
+        guard let index = Int(ns.substring(with: match.range(at: 2))), index >= 2 else { return nil }
+        return base.isEmpty ? nil : base
+    }
+
+    private static func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
     // MARK: - Template
 
     /// Resolve the template file. Accepts either an absolute path or a

@@ -22,7 +22,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private let closeButton: NSButton
     private let collapseButton: NSButton
     private let backgroundView: HoverTrackingView
-    private let textView: TodoTextView
+    let textView: TodoTextView  // internal so the end-to-end tests can type into it
     private let textStorage: NSTextStorage
     private let layoutManager: NSLayoutManager
     private let scrollView: NSScrollView
@@ -271,6 +271,9 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         currentDay = Calendar.current.startOfDay(for: Date())
         currentURL = DailyNote.resolvedURL(for: currentDay)
         dateLabel.text = "Daily Note · " + DailyNoteWindowController.dateFormatter.string(from: currentDay)
+        // Before reading: a duplicate left by an earlier collision holds text
+        // that belongs in the file we're about to load.
+        healDuplicates()
 
         guard let url = currentURL else {
             fileUnavailable = false
@@ -303,25 +306,38 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
             return
         }
 
-        // File doesn't exist yet. Seed from template if configured.
+        // File doesn't exist yet. Seed the buffer from the template, but
+        // leave the file itself uncreated — see `seedBuffer`.
         fileUnavailable = false
-        if let templated = DailyNote.renderedTemplate(for: currentDay, fileURL: url) {
-            try? FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try? templated.write(to: url, atomically: true, encoding: .utf8)
-            lastLoadedContent = templated
-            applyExternalBody(templated)
-        } else {
-            lastLoadedContent = ""
-            applyExternalBody("")
+        seedBuffer(with: DailyNote.renderedTemplate(for: currentDay, fileURL: url) ?? "", at: url)
+    }
+
+    /// Put today's starting text in the buffer, writing it to disk only if
+    /// the file is already there.
+    ///
+    /// Creating the file here is what made two Macs collide. The midnight
+    /// timer fires at the same wall-clock second on every machine, so each
+    /// one wrote the same brand-new path within milliseconds of the other,
+    /// and iCloud can't merge two independent creates — it keeps both and
+    /// renames one `<name> 2.md`. Holding an untouched template in the buffer
+    /// instead leaves the create to a person: opening the note on purpose
+    /// (`createTodaysFileIfMissing`) or typing in it. Writing over a file
+    /// that already exists is fine — that path is established, so it syncs as
+    /// an edit rather than a create.
+    private func seedBuffer(with body: String, at url: URL) {
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? body.write(to: url, atomically: true, encoding: .utf8)
         }
+        lastLoadedContent = body
+        applyExternalBody(body)
     }
 
     /// Reload from disk if the underlying file changed externally.
     private func reloadIfExternallyChanged() {
         guard let url = currentURL else { return }
+        // A duplicate arrives as an ordinary new file in the folder we watch.
+        // Heal first so the reload below picks up the merged text.
+        healDuplicatesIfDue()
         // A failed read means the file is mid-sync or undecodable, not empty —
         // treating it as empty would blank the buffer and then save that over
         // the real content. If we were waiting on a download, this is it.
@@ -444,6 +460,26 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
+    // MARK: - Duplicate healing
+
+    /// Sweeping reads the whole folder, and the watcher fires on our own
+    /// saves too, so rate-limit it. iCloud takes far longer than this to
+    /// deliver a duplicate in the first place.
+    private static let duplicateSweepInterval: TimeInterval = 5
+    private var lastDuplicateSweep = Date.distantPast
+
+    private func healDuplicates(now: Date = Date()) {
+        guard let url = currentURL else { return }
+        lastDuplicateSweep = now
+        DailyNote.healDuplicates(in: url.deletingLastPathComponent(), now: now)
+    }
+
+    private func healDuplicatesIfDue(now: Date = Date()) {
+        guard now.timeIntervalSince(lastDuplicateSweep)
+            > DailyNoteWindowController.duplicateSweepInterval else { return }
+        healDuplicates(now: now)
+    }
+
     // MARK: - Watching
 
     private func startWatching() {
@@ -556,27 +592,56 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         guard isEmpty else { return }
 
         if let templated = DailyNote.renderedTemplate(for: currentDay, fileURL: url) {
-            try? FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try? templated.write(to: url, atomically: true, encoding: .utf8)
-            lastLoadedContent = templated
-            applyExternalBody(templated)
+            seedBuffer(with: templated, at: url)
         }
     }
 
     // MARK: - Show / hide
 
-    func show() {
+    /// - Parameter userInitiated: true when the user asked for today's note
+    ///   (menu bar, hotkey, the notes panel). Choosing to open it is a
+    ///   deliberate enough act to create the file, so it shows up in Obsidian
+    ///   whether or not they end up typing. Pass false for the launch-time
+    ///   restore: that isn't a fresh choice, and it runs unattended on every
+    ///   Mac, which is the shape of thing that collides.
+    func show(userInitiated: Bool = true) {
         // Re-resolve in case the day rolled over while hidden (the
         // belt-and-suspenders companion to the midnight timer and wake
         // observer — covers a reopen that races ahead of either).
         rolloverIfNeeded()
+        if userInitiated { createTodaysFileIfMissing() }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         persistVisibility(true)
+    }
+
+    /// Write today's note out if it isn't on disk yet, so opening it here is
+    /// enough to make it real for Obsidian and for `[[wiki links]]`.
+    ///
+    /// The buffer is what gets written — the rendered template, or nothing at
+    /// all when none is configured — because that's what the user is looking
+    /// at, so it's what the file should say. Safe against the midnight race
+    /// in a way the rollover isn't: a person opening a window is not two
+    /// machines acting on the same clock tick.
+    func createTodaysFileIfMissing() {
+        guard let url = currentURL, !fileUnavailable else { return }
+        // A file that exists — or is only waiting to come down from iCloud —
+        // must never be written over with an empty buffer.
+        guard !FileManager.default.fileExists(atPath: url.path),
+              !hasICloudPlaceholder(for: url) else { return }
+
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let body = textView.string
+        do {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            lastLoadedContent = body
+        } catch {
+            // Best-effort — the first keystroke writes it anyway.
+        }
     }
 
     // MARK: - Collapse / expand
