@@ -7,7 +7,7 @@ PLAN.md, UX-PLAN.md and BUGFIX-PLAN.md are fully shipped; nothing here re-propos
 ## Status (2026-11-15)
 
 Phases 0–3 and the hotfix 1.0 are implemented on branch `masterpiece`; Phase 5 is deferred by
-the owner. 1120 tests (4 skipped: opt-in benchmarks and one test that needs a real key window),
+the owner. 1204 tests (5 skipped: opt-in benchmarks and tests that need a real key window),
 CI green on macos-15 with `-strict-concurrency=complete`. Every item had an Opus review; every
 finding was fixed or is listed below. The TLA+ model in `model/` was re-run against the new code
 twice; its findings N1–N6 and the review's C1 are fixed (see `model/REPORT.md`).
@@ -33,6 +33,10 @@ Not done, or left on purpose:
 - A storage switch runs on the main thread and may wait up to 5 s for iCloud downloads.
 - Find Next (⌘G); the daily note's geometry is still in `_daily.json`, not `layout.json`.
 - Attachment link rewriting misses `x.png|200` and similar forms.
+- Typing freezes (owner report: minutes long, short notes): fixed by never reading a dataless
+  iCloud file on the main thread (`IOPOL_MATERIALIZE_DATALESS_FILES_OFF` backstop), ignoring our
+  own FSEvents echoes, per-file cache refresh, and moving every iCloud daemon call off main. Not
+  yet confirmed on the owner's hardware; storage switch and JSON migration still list folders on main.
 - PERF.md has the restyle and idle-cost rows; launch, hotkey-to-caret and memory rows are not
   measured.
 
