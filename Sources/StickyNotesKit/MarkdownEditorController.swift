@@ -53,14 +53,11 @@ final class SlashReplacement: NSObject {
     private let clock: AppClock
     private let markerLayout = HiddenMarkerLayoutDelegate()
     let restyler = MarkdownRestyler()
-    /// What has changed in the text since it was last styled.
-    private enum PendingEdit: Equatable {
-        case none
-        case one(range: NSRange, changeInLength: Int)
-        /// More than one change: the slice a restyle would use is not known.
-        case several
-    }
-    private var pendingEdit = PendingEdit.none
+    /// What has changed in the text since it was last styled: the text now at
+    /// `range`, and how much longer the text became in all. Several edits are
+    /// merged into the one range that holds them all. Nil when nothing changed.
+    private var pendingEdit: (range: NSRange, changeInLength: Int)?
+    private var orphanCheckQueued = false
     /// The selection the hidden markers were last worked out for. Markers away
     /// from it, and from what was restyled, are already right.
     private var visibilitySelection: NSRange?
@@ -128,20 +125,37 @@ final class SlashReplacement: NSObject {
     /// Restyle the whole text and re-hide the markers the caret is not in.
     func restyle() {
         let restyled = restyler.restyleAll(textStorage)
-        pendingEdit = .none
+        pendingEdit = nil
         rehideMarkers(restyled: restyled, edit: nil)
     }
 
-    /// Restyle after the user changed the text: only the paragraphs around a single
-    /// edit, or everything when the change is not one edit.
+    /// Restyle after the text changed: only the paragraphs around the edits, or
+    /// everything when nothing says what changed. While a composition (an input
+    /// method's marked text) is open nothing is touched: restyling would reset the
+    /// marked text's attributes. The restyle happens when it is committed.
     private func restyleAfterEdit() {
-        guard case .one(let range, let delta) = pendingEdit else {
+        guard !textView.hasMarkedText() else { return }
+        guard let edit = pendingEdit else {
             restyle()
             return
         }
-        pendingEdit = .none
-        let restyled = restyler.restyle(textStorage, edited: range, changeInLength: delta)
-        rehideMarkers(restyled: restyled, edit: (range, delta))
+        pendingEdit = nil
+        let restyled = restyler.restyle(textStorage, edited: edit.range, changeInLength: edit.changeInLength)
+        rehideMarkers(restyled: restyled, edit: edit)
+    }
+
+    /// The text can change with no `textDidChange` after it: a composition cancelled
+    /// with Escape or backspaced to nothing, Writing Tools, an inline prediction.
+    /// When the turn of the run loop that made the change is over and the delegate
+    /// has not been told, the restyle is done here.
+    private func checkForUnreportedEdit() {
+        guard !orphanCheckQueued else { return }
+        orphanCheckQueued = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.orphanCheckQueued = false
+            if self.pendingEdit != nil && !self.textView.hasMarkedText() { self.restyleAfterEdit() }
+        }
     }
 
     /// Hiding is a layout decision, so changing which markers are hidden has to
@@ -157,8 +171,8 @@ final class SlashReplacement: NSObject {
     /// caret can be found in the new text.
     private func rehideMarkers(restyled: NSRange?, edit: (range: NSRange, changeInLength: Int)?) {
         // An edit is in flight: the text has moved but its markers have not been
-        // restyled yet, and `textDidChange` will refresh once they have.
-        guard pendingEdit == .none else { return }
+        // restyled yet, and the restyle that follows will refresh once they have.
+        guard pendingEdit == nil else { return }
         let selection = textView.selectedRange()
         let dirty = dirtyRanges(selection: selection, restyled: restyled, edit: edit)
         visibilitySelection = selection
@@ -244,12 +258,35 @@ final class SlashReplacement: NSObject {
     ) {
         guard editedMask.contains(.editedCharacters) else { return }
         MainActor.assumeIsolated {
-            pendingEdit = pendingEdit == .none ? .one(range: editedRange, changeInLength: delta) : .several
+            pendingEdit = Self.merged(pendingEdit, with: (editedRange, delta))
+            checkForUnreportedEdit()
         }
     }
 
+    /// The one edit that stands for `first` followed by `second`: the range that
+    /// holds both, with `first` moved to where `second` left it.
+    private static func merged(
+        _ first: (range: NSRange, changeInLength: Int)?, with second: (range: NSRange, changeInLength: Int)
+    ) -> (range: NSRange, changeInLength: Int) {
+        guard let first = first else { return second }
+        let removedEnd = second.range.location + second.range.length - second.changeInLength
+        func moved(_ position: Int) -> Int {
+            if position <= second.range.location { return position }
+            return position >= removedEnd ? position + second.changeInLength : second.range.location
+        }
+        let start = min(moved(first.range.location), second.range.location)
+        let end = max(moved(NSMaxRange(first.range)), NSMaxRange(second.range))
+        return (NSRange(location: start, length: end - start), first.changeInLength + second.changeInLength)
+    }
+
     func textViewDidChangeSelection(_ notification: Notification) {
-        refreshMarkerVisibility()
+        if pendingEdit != nil {
+            // Typing moves the caret before it reports the change, and that report
+            // restyles. If none comes, the check restyles instead.
+            checkForUnreportedEdit()
+        } else {
+            refreshMarkerVisibility()
+        }
         // Caret moved away from the active `#word` → kill the panel.
         if labelTriggerStart != nil { detectLabelTrigger() }
     }

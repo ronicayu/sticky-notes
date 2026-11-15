@@ -72,12 +72,13 @@ import XCTest
     }
 
     private func keyEvent(
-        _ key: String, _ modifiers: NSEvent.ModifierFlags, in window: NSWindow, repeating: Bool = false
+        _ key: String, _ modifiers: NSEvent.ModifierFlags, in window: NSWindow, repeating: Bool = false,
+        keyCode: UInt16 = 0
     ) throws -> NSEvent {
         try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
             windowNumber: window.windowNumber, context: nil,
-            characters: key, charactersIgnoringModifiers: key, isARepeat: repeating, keyCode: 0
+            characters: key, charactersIgnoringModifiers: key, isARepeat: repeating, keyCode: keyCode
         ))
     }
 
@@ -327,6 +328,17 @@ import XCTest
         XCTAssertEqual(cycled, [1, -1])
     }
 
+    func testShiftCommandBacktickAsTheKeyboardSendsItGoesToThePreviousNote() throws {
+        canCycle = true
+        menu.update()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        let event = try keyEvent("~", [.command, .shift], in: window, keyCode: 50)
+
+        XCTAssertTrue(menu.performKeyEquivalent(with: event))
+
+        XCTAssertEqual(cycled, [-1])
+    }
+
     func testTheDeskCyclesOldestNoteFirstSkippingHiddenOnesAndWrapping() throws {
         let isolated = IsolatedSettings()
         defer { isolated.tearDown() }
@@ -355,7 +367,37 @@ import XCTest
 
         windows[2].orderOut(nil)
         XCTAssertNil(desk.cycleTarget(by: 1, from: windows[0]), "one visible note has nowhere to go")
+
+        let other = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        other.isReleasedWhenClosed = false
+        defer { other.close() }
+        XCTAssertTrue(desk.cycleTarget(by: 1, from: other) === windows[0], "from the panel or Settings, go to the first note")
+        XCTAssertTrue(desk.cycleTarget(by: -1, from: other) === windows[0])
+        windows[0].orderOut(nil)
+        XCTAssertNil(desk.cycleTarget(by: 1, from: other), "no visible note to go to")
         XCTAssertFalse(desk.canCycleNotes)
+    }
+
+    func testNextNoteIsAvailableFromAnotherAppWindowThatIsKey() throws {
+        let isolated = IsolatedSettings()
+        defer { isolated.tearDown() }
+        let clock = ManualClock()
+        let desk = DeskController(
+            store: store, settings: isolated.settings, clock: clock, undo: UndoCenter(clock: clock),
+            recovery: RecoveryFiles(settings: isolated.settings, store: store, clock: clock)
+        )
+        defer { desk.windowControllers.values.forEach { $0.window?.close() } }
+        desk.makeNote(title: "Only")
+        let note = try XCTUnwrap(desk.windowControllers.values.first?.window)
+        let other = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        other.isReleasedWhenClosed = false
+        defer { other.close() }
+        other.makeKeyAndOrderFront(nil)
+        try XCTSkipUnless(other.isKeyWindow, "this host does not give windows key status")
+
+        XCTAssertTrue(desk.canCycleNotes)
+        desk.cycleNotes(by: 1)
+        XCTAssertTrue(note.isKeyWindow, "Next Note from another window did not reach the note")
     }
 
     // MARK: - Key repeat
@@ -453,11 +495,17 @@ import XCTest
         keyNote = controller
         let window = try XCTUnwrap(controller.window)
         window.makeFirstResponder(controller.titleField)
-        XCTAssertNotNil(controller.titleField.currentEditor())
+        let editor = try XCTUnwrap(controller.titleField.currentEditor())
+        editor.string = "Typed title"
+        NotificationCenter.default.post(
+            Notification(name: NSControl.textDidChangeNotification, object: controller.titleField))
 
         try perform("Collapse")
 
         XCTAssertNil(controller.titleField.currentEditor())
+        XCTAssertEqual(controller.bufferedNote.title, "Typed title", "the typed title was lost")
+        XCTAssertTrue(controller.flushPendingSave())
+        XCTAssertEqual(store.loadNote(id: controller.noteId)?.title, "Typed title", "the typed title was not saved")
     }
 
     // MARK: - The editor's chords belong to the editor
@@ -472,7 +520,7 @@ import XCTest
         for key in ["b", "i", "e"] {
             _ = controller.textView.performKeyEquivalent(with: try keyEvent(key, .command, in: window))
         }
-        _ = controller.textView.performKeyEquivalent(with: try keyEvent("\r", .command, in: window))
+        _ = controller.textView.performKeyEquivalent(with: try keyEvent("\r", .command, in: window, keyCode: 36))
 
         XCTAssertEqual(controller.textView.string, "word")
     }

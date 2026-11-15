@@ -144,24 +144,27 @@ import AppKit
         return all.filter(\.isVisible)
     }
 
-    /// There is somewhere to go: one of our windows is key and another is visible.
+    /// There is a note window to go to and one of the app's windows is key. From a
+    /// note, Next and Previous move along the notes; from any other window, the
+    /// notes panel or Settings, they go to the first note.
     var canCycleNotes: Bool {
-        let windows = cyclableWindows()
-        return windows.count > 1 && windows.contains { $0.isKeyWindow }
+        !cyclableWindows().isEmpty && NSApp.windows.contains { $0.isKeyWindow }
     }
 
-    /// The window `step` places after `current` in the cycle, wrapping around
-    /// at the ends. Nil when `current` is not one of the cycled windows or there
-    /// is nowhere else to go.
+    /// The window `step` places after `current` in the cycle, wrapping around at
+    /// the ends. When `current` is not one of the cycled windows, the first one.
+    /// Nil when there is no note window, or `current` is the only one.
     func cycleTarget(by step: Int, from current: NSWindow?) -> NSWindow? {
         let windows = cyclableWindows()
-        guard windows.count > 1, let index = windows.firstIndex(where: { $0 === current }) else { return nil }
+        guard let first = windows.first else { return nil }
+        guard let index = windows.firstIndex(where: { $0 === current }) else { return first }
+        guard windows.count > 1 else { return nil }
         return windows[(index + step % windows.count + windows.count) % windows.count]
     }
 
     /// Make the next (`step` 1) or previous (-1) visible note window key.
     func cycleNotes(by step: Int) {
-        let current = cyclableWindows().first { $0.isKeyWindow }
+        let current = NSApp.windows.first { $0.isKeyWindow }
         cycleTarget(by: step, from: current)?.makeKeyAndOrderFront(nil)
     }
 

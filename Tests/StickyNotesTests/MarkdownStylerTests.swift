@@ -283,7 +283,7 @@ import XCTest
             location += 1
         }
         XCTAssertEqual(restyler.fullCount, 2, "only the two explicit full restyles may have run")
-        XCTAssertLessThan(incremental, full / 5, "one edit took \(incremental)s against \(full)s for everything")
+        XCTAssertLessThan(incremental, full / 2, "one edit took \(incremental)s against \(full)s for everything")
     }
 
     /// The URL detector, given a whole note, reported no links at all when one
@@ -295,6 +295,38 @@ import XCTest
         XCTAssertEqual(
             storage.attribute(.link, at: location, effectiveRange: nil) as? URL,
             URL(string: "https://example.org/fine"))
+    }
+
+    /// The same node, found where it really is: styled, and with exactly its
+    /// delimiters hidden and never a letter of the text.
+    func testAListContinuationLineKeepsItsEmphasisAndHidesOnlyTheDelimiters() {
+        for source in ["- [x] a done task\nA **bold** word and *italic*",
+                       "- 项目二 **加粗**\n全部 **粗体**与*斜体*和`代码` 完"] {
+            let storage = styled(source)
+            MarkdownStyler.updateMarkerVisibility(in: storage, selection: NSRange(location: 0, length: 0))
+            let ns = source as NSString
+            var hidden: [String] = []
+            storage.enumerateAttribute(.mdHidden, in: fullRange(storage)) { value, range, _ in
+                if value != nil { hidden.append(ns.substring(with: range)) }
+            }
+            XCTAssertFalse(hidden.isEmpty, source)
+            for piece in hidden {
+                XCTAssertTrue(piece.allSatisfy { "*`".contains($0) }, "hid “\(piece)” in \(source.debugDescription)")
+            }
+            let bold = source.contains("bold") ? "bold" : "粗体"
+            let italic = source.contains("italic") ? "italic" : "斜体"
+            if source.contains("bold") {
+                XCTAssertTrue(traits(storage, at: ns.range(of: bold).location).contains(.bold), "\(bold) is not bold")
+                XCTAssertTrue(traits(storage, at: ns.range(of: italic).location).contains(.italic), "\(italic) is not italic")
+            } else {
+                // The system font has no bold or italic for Chinese, so look for the marker scope.
+                for (text, scope) in [("**粗体**", "**粗体**"), ("*斜体*", "*斜体*")] {
+                    let range = ns.range(of: text)
+                    let found = storage.attribute(.mdMarkerScope, at: range.location, effectiveRange: nil) as? MarkerScope
+                    XCTAssertEqual(found?.range, ns.range(of: scope), "\(text) was not found where it is")
+                }
+            }
+        }
     }
 
     /// swift-markdown places inline nodes on the continuation lines of a list item

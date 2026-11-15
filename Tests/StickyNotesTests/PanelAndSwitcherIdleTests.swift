@@ -142,6 +142,20 @@ import XCTest
         XCTAssertTrue(panel.visibleTitles.contains("saved just before hiding"))
     }
 
+    func testAPanelThatBecomesVisibleWithoutShowWindowReloadsWhatItSkipped() {
+        let panel = makePanel()
+        seed("saved while the app was hidden")
+        drainMainQueue()
+        XCTAssertFalse(panel.visibleTitles.contains("saved while the app was hidden"))
+
+        // The app unhiding orders the window back without calling showWindow.
+        panel.window?.orderFront(nil)
+        defer { panel.window?.orderOut(nil) }
+        NotificationCenter.default.post(name: NSApplication.didUnhideNotification, object: NSApp)
+
+        XCTAssertTrue(panel.visibleTitles.contains("saved while the app was hidden"))
+    }
+
     // MARK: - Quick switcher
 
     func testAHiddenSwitcherDoesNotReadTheStoreWhenItChanges() {

@@ -30,7 +30,8 @@ import XCTest
         "***both*** here", "some ~~struck~~ text", "inline `code` and ``two`` ticks", "see [a link](https://example.com/a)",
         "a [[Wiki Note]] link", "bare https://example.org/path/x link", "party 🎉 time with café", "[ref]: https://example.com",
         "![img](a.png)", "| a | b |\n|---|---|\n| 1 | 2 |", "---", "[[x]](y)", "**[nested](u)** and `[[w]]`",
-        "- [ ] **bold task** [[Note]]", "Setext\n=====", "[ref] and [other][ref]", "tab\there", "line one\nline two\nline three"
+        "- [ ] **bold task** [[Note]]", "**粗体**与*斜体*和`代码`", "# 标题 二", "- [ ] 买菜，做饭", "全角：＊＊粗＊＊ ｜ ［［链接］］",
+        "[链接](https://例子.cn/路径) 和 ~~删除~~", "- 项目一\n- 项目二 **加粗**", "Setext\n=====", "[ref] and [other][ref]", "tab\there", "line one\nline two\nline three"
     ]
 
     /// Blocks whose reading depends on other paragraphs. Rare in the notes, so
@@ -43,7 +44,7 @@ import XCTest
 
     private static let pieces = [
         "\n\n", "\n", " ", "**", "*", "`", "[[", "]]", "](", "[", "]", "# ", "## ", "- ", "- [ ] ", "- [x] ", "1. ", "> ",
-        "x", "word", "🎉", "é", "\t", "~~", "https://a.example.com", "(u)", "\n\n\n", "***", "_"
+        "x", "word", "🎉", "é", "你", "好吗", "，", "。", "＊", "粗体", "\t", "~~", "https://a.example.com", "(u)", "\n\n\n", "***", "_"
     ]
 
     private static let rareEditPieces = ["```", "~~~", "    ", "<!--", "<pre>", "\n\n    ", "\n\n  ", "\u{2028}"]
@@ -315,5 +316,112 @@ import XCTest
         XCTAssertTrue(editor.textView.string.contains("# para 4"))
         XCTAssertNil(firstDifference(
             editor.textStorage, fullyStyled(editor.textView.string, selection: editor.textView.selectedRange())))
+    }
+
+    // MARK: - Changes the delegate is never told about, and input methods
+
+    private func makeEditor(_ text: String, options: MarkdownEditorController.Options = .note)
+        throws -> (MarkdownEditorController, NSWindow, URL)
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RestyleIME-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let editor = MarkdownEditorController(
+            text: text, store: NoteStore(rootURL: root), clock: ManualClock(), options: options)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = editor.textView
+        return (editor, window, root)
+    }
+
+    private func assertStyledLikeAFullRestyle(
+        _ editor: MarkdownEditorController, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let expected = fullyStyled(editor.textStorage.string, selection: editor.textView.selectedRange())
+        XCTAssertNil(firstDifference(editor.textStorage, expected), file: file, line: line)
+    }
+
+    func testMarkersFollowTheCaretAfterTheTextChangedWithoutTheDelegateHearing() throws {
+        let (editor, window, root) = try makeEditor("intro\n\nsome **bold** text and more\n\nlast *line* here")
+        defer { _ = window; try? FileManager.default.removeItem(at: root) }
+        let text = editor.textStorage.string as NSString
+
+        // What Writing Tools or an inline prediction does: the text changes, no didChangeText.
+        editor.textStorage.replaceCharacters(in: NSRange(location: 0, length: 5), with: "introduction")
+        editor.textView.setSelectedRange(NSRange(location: text.range(of: "bold").location + 9, length: 0))
+        for _ in 0..<3 { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        assertStyledLikeAFullRestyle(editor)
+
+        editor.textView.setSelectedRange(NSRange(location: 0, length: 0))
+        assertStyledLikeAFullRestyle(editor)
+        let bold = (editor.textStorage.string as NSString).range(of: "**bold**")
+        XCTAssertNotNil(editor.textStorage.attribute(.mdHidden, at: bold.location, effectiveRange: nil),
+                        "the markers stayed shown after the caret left")
+    }
+
+    private func compose(_ pinyin: String, at location: Int, in editor: MarkdownEditorController) {
+        editor.textView.setSelectedRange(NSRange(location: location, length: 0))
+        editor.textView.setMarkedText(
+            pinyin, selectedRange: NSRange(location: (pinyin as NSString).length, length: 0),
+            replacementRange: NSRange(location: location, length: 0))
+    }
+
+    private func settle() {
+        for _ in 0..<3 { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    }
+
+    func testAPinyinCompositionInsideAndNextToMarkersCommitsToAFullRestyleAndStaysShownMeanwhile() throws {
+        let contexts: [(text: String, marker: String, offset: Int)] = [
+            ("前 **粗体** 后", "**粗", 3), ("前 **粗体** 后", "**粗", 2), ("前 **粗体** 后", "**粗", 7),
+            ("# 标题\n\n正文", "# ", 2), ("# \n\n正文", "# ", 2),
+            ("- [ ] 买菜\n- [ ] 做饭", "- [ ] ", 6), ("- [ ] \n- [ ] 做饭", "- [ ] ", 6)
+        ]
+        for context in contexts {
+            let (editor, window, root) = try makeEditor(context.text)
+            defer { _ = window; try? FileManager.default.removeItem(at: root) }
+            let start = (context.text as NSString).range(of: context.marker).location + context.offset
+
+            compose("n", at: start, in: editor)
+            compose("ni", at: start, in: editor)
+            XCTAssertTrue(editor.textView.hasMarkedText())
+            let marked = editor.textView.markedRange()
+            XCTAssertEqual(marked.length, 2, context.text)
+            settle()
+            editor.textStorage.enumerateAttribute(.mdHidden, in: marked) { value, range, _ in
+                XCTAssertNil(value, "composition text was hidden at \(range) in \(context.text.debugDescription)")
+            }
+
+            editor.textView.insertText("你", replacementRange: editor.textView.markedRange())
+            XCTAssertFalse(editor.textView.hasMarkedText())
+            settle()
+            assertStyledLikeAFullRestyle(editor)
+            XCTAssertTrue(editor.textStorage.string.contains("你"))
+        }
+    }
+
+    func testCancellingACompositionToNothingLeavesTheStylingAFullRestyleWouldGive() throws {
+        for text in ["前 **粗体** 后\n\n# 标题\n\n- [ ] 买菜", "plain **bold** text"] {
+            let (editor, window, root) = try makeEditor(text)
+            defer { _ = window; try? FileManager.default.removeItem(at: root) }
+            let start = (text as NSString).range(of: "**").location + 3
+
+            compose("ni", at: start, in: editor)
+            // Backspaced to empty, then Escape.
+            editor.textView.setMarkedText(
+                "", selectedRange: NSRange(location: 0, length: 0),
+                replacementRange: editor.textView.markedRange())
+            editor.textView.unmarkText()
+            settle()
+
+            XCTAssertEqual(editor.textStorage.string, text)
+            assertStyledLikeAFullRestyle(editor)
+            editor.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            settle()
+            assertStyledLikeAFullRestyle(editor)
+
+            compose("ni", at: start, in: editor)
+            editor.textView.unmarkText()
+            settle()
+            assertStyledLikeAFullRestyle(editor)
+        }
     }
 }

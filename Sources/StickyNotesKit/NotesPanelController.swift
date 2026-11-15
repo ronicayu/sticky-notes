@@ -78,6 +78,11 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
             name: NoteStore.didChange,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(becameVisible), name: NSApplication.didUnhideNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(becameVisible),
+            name: NSWindow.didChangeOcclusionStateNotification, object: window)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -86,13 +91,20 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// A change in the store was skipped while the panel could not be seen.
+    private var needsReload = false
+
     /// A hidden panel does no work for a change in the store: it has nobody to
-    /// show the answer to, and `showWindow` reloads before anyone sees it.
+    /// show the answer to. It notes that it is stale instead, and reloads when it
+    /// is shown, when the app is unhidden, or when its window becomes visible.
     @objc private func handleStoreChange() {
-        guard window?.isVisible == true else { return }
+        guard window?.isVisible == true else {
+            needsReload = true
+            return
+        }
         DispatchQueue.main.async { [weak self] in
-            guard self?.window?.isVisible == true else { return }
-            self?.reload()
+            guard let self = self else { return }
+            if self.window?.isVisible == true { self.reload() } else { self.needsReload = true }
         }
     }
 
@@ -101,6 +113,12 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     override func showWindow(_ sender: Any?) {
         reload()
         super.showWindow(sender)
+    }
+
+    /// The panel became visible by some way other than `showWindow`: the app was
+    /// unhidden, or the window came out from behind others.
+    @objc private func becameVisible() {
+        if needsReload && window?.isVisible == true { reload() }
     }
 
     private func setupUI() {
@@ -276,6 +294,7 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
     func reload() {
         reloadCount += 1
+        needsReload = false
         let previousSelection = selectedNote()?.id
         rebuildLabelMenu()
 

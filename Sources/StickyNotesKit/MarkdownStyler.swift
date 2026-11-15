@@ -350,6 +350,11 @@ private struct LineOffsetTable {
         self.paragraphBounds = bounds
     }
 
+    func paragraphBounds(ofLine line: Int) -> Range<Int>? {
+        guard line >= 1 && line < paragraphBounds.count else { return nil }
+        return paragraphBounds[line]
+    }
+
     /// Like `nsRange`, but nil when the range does not lie within the paragraph its
     /// first line is in. swift-markdown puts inline nodes on the continuation
     /// lines of a list item or quote too far right by the width of the item's
@@ -370,6 +375,15 @@ private struct LineOffsetTable {
             return nil
         }
         return NSRange(location: start, length: max(0, end - start))
+    }
+
+    /// `nsRange` with the start and end columns moved left by the given numbers of
+    /// bytes, for ranges swift-markdown placed too far right.
+    func nsRange(_ range: SourceRange, startShift: Int, endShift: Int) -> NSRange? {
+        guard let start = utf16Offset(line: range.lowerBound.line, column: range.lowerBound.column - startShift),
+              let end = utf16Offset(line: range.upperBound.line, column: range.upperBound.column - endShift),
+              end >= start else { return nil }
+        return NSRange(location: start, length: end - start)
     }
 
     private func utf16Offset(line: Int, column: Int) -> Int? {
@@ -602,10 +616,8 @@ private struct StylingVisitor: MarkupWalker {
     mutating func visitInlineCode(_ code: InlineCode) {
         // Backtick spans can be opened with ``one``, ``two``, etc. Recover
         // marker length from the source rather than assuming 1.
-        guard let range = code.range, let nsr = table.nsRangeWithinParagraph(range) else { return }
-        let text = source.substring(with: nsr)
-        let backticks = text.prefix(while: { $0 == "`" }).count
-        guard backticks > 0, nsr.length >= backticks * 2 else { return }
+        guard let nsr = locateInline(code, isValid: { backtickRunLength(in: $0) != nil }),
+              let backticks = backtickRunLength(in: nsr) else { return }
         applyInlineMarkerRange(
             nsr,
             markerLen: backticks,
@@ -616,14 +628,57 @@ private struct StylingVisitor: MarkupWalker {
         )
     }
 
+    /// The length of the backtick run that opens and closes a code span at `range`,
+    /// or nil when the source there is not such a span.
+    private func backtickRunLength(in range: NSRange) -> Int? {
+        var length = 0
+        while length < range.length, source.character(at: range.location + length) == 0x60 { length += 1 }
+        guard length > 0, range.length >= length * 2 else { return nil }
+        for offset in 1...length where source.character(at: NSMaxRange(range) - offset) != 0x60 { return nil }
+        return length
+    }
+
+    /// Whether `range` begins and ends with the same run of `length` emphasis
+    /// characters (`*`, `_` or `~`).
+    private func hasMatchingDelimiters(_ range: NSRange, length: Int) -> Bool {
+        guard range.length >= length * 2 else { return false }
+        let first = source.character(at: range.location)
+        guard first == 0x2A || first == 0x5F || first == 0x7E else { return false }
+        for offset in 0..<length {
+            if source.character(at: range.location + offset) != first { return false }
+            if source.character(at: NSMaxRange(range) - length + offset) != first { return false }
+        }
+        return true
+    }
+
+    /// Where an inline node really is. swift-markdown places a node on a
+    /// continuation line of a list item or quote too far right, by the width in
+    /// bytes of the item's marker; the start and the end are each moved left until
+    /// the source there looks like the node's delimiters. A node whose delimiters
+    /// are nowhere is left alone, so that no letter of the text is ever taken for
+    /// a marker.
+    private func locateInline(_ node: Markup, isValid: (NSRange) -> Bool) -> NSRange? {
+        guard let range = node.range,
+              let bounds = table.paragraphBounds(ofLine: range.lowerBound.line) else { return nil }
+        let widest = 16
+        for startShift in 0...min(widest, max(0, range.lowerBound.column - 1)) {
+            for endShift in 0...min(widest, max(0, range.upperBound.column - 1)) {
+                guard let candidate = table.nsRange(range, startShift: startShift, endShift: endShift),
+                      candidate.location >= bounds.lowerBound, NSMaxRange(candidate) <= bounds.upperBound,
+                      NSMaxRange(candidate) <= source.length, isValid(candidate) else { continue }
+                return candidate
+            }
+        }
+        return nil
+    }
+
     private func applyInlineMarker(
         node: Markup,
         markerLen: Int,
         innerAttrs: [NSAttributedString.Key: Any] = [:],
         fontTraits: NSFontDescriptor.SymbolicTraits = []
     ) {
-        guard let range = node.range, let nsr = table.nsRangeWithinParagraph(range) else { return }
-        guard nsr.length >= markerLen * 2 else { return }
+        guard let nsr = locateInline(node, isValid: { hasMatchingDelimiters($0, length: markerLen) }) else { return }
         applyInlineMarkerRange(nsr, markerLen: markerLen, innerAttrs: innerAttrs, fontTraits: fontTraits)
     }
 
