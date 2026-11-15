@@ -130,6 +130,15 @@ final class WelcomeNoteTests: XCTestCase {
         XCTAssertTrue(find.contains("F"), "find-note default is \(find)")
     }
 
+    /// A label on the welcome note itself would hide the note the checklist
+    /// lives in, so the task sends the label to another note.
+    func testTheLabelTaskPutsTheLabelOnAnotherNote() throws {
+        let body = WelcomeNote.body
+        let task = try XCTUnwrap(WelcomeNote.taskLine(for: .hideLabel, in: body))
+        let line = (body as NSString).substring(with: task.line)
+        XCTAssertTrue(line.contains("#label` on a new note"), line)
+    }
+
     func testTheWelcomeNoteOpensOnScreen() throws {
         let store = makeStore()
         let note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))

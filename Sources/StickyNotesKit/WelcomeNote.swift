@@ -106,7 +106,7 @@ enum WelcomeNote {
 
     - [ ] Press **\(newNote)** to make a new note
     - [ ] Press **\(find)** to find any note by typing
-    - [ ] Try a `#label`, then hide it from the menu bar
+    - [ ] Try a `#label` on a new note, then hide it from the menu bar
     - [ ] Double-click this note's top bar to collapse it
 
     **⌘B** bolds, **⌘↩** turns a line into a task, and **⇥** indents a list.
