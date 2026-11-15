@@ -162,8 +162,8 @@ import XCTest
         screensChange(controller, to: [laptop, external])
 
         XCTAssertEqual(controller.window?.frame.origin, NSPoint(x: laptop.minX + 300, y: laptop.minY + 250))
-        XCTAssertEqual(layout.layout(for: note.id)?.x, laptop.minX + 300)
-        XCTAssertEqual(layout.layout(for: note.id)?.y, laptop.minY + 250)
+        XCTAssertEqual(layout.layout(for: note.id)?.x, Double(laptop.minX + 300))
+        XCTAssertEqual(layout.layout(for: note.id)?.y, Double(laptop.minY + 250))
     }
 
     func testCollapsingAStoodInNoteKeepsItsLayoutTopEdge() throws {
@@ -242,7 +242,7 @@ import XCTest
         controller.isPersonDraggingOrResizing = { false }
 
         controller.toggleCollapse()
-        XCTAssertEqual(layout.layout(for: note.id)?.y, chosen.maxY - NoteWindowController.collapsedHeight)
+        XCTAssertEqual(layout.layout(for: note.id)?.y, Double(chosen.maxY - NoteWindowController.collapsedHeight))
         controller.toggleCollapse()
 
         XCTAssertEqual(layout.layout(for: note.id)?.frame, chosen)
@@ -286,7 +286,7 @@ import XCTest
         let bar = NoteWindowController.collapsedHeight
         let expected = NSRect(x: chosen.minX, y: chosen.maxY - bar, width: chosen.width, height: bar)
         XCTAssertEqual(controller.window?.frame, expected)
-        XCTAssertEqual(layout.layout(for: note.id)?.y, expected.minY, "the collapse was not recorded")
+        XCTAssertEqual(layout.layout(for: note.id)?.y, Double(expected.minY), "the collapse was not recorded")
         XCTAssertEqual(layout.layout(for: note.id)?.collapsed, true)
         screensChange(controller, to: [laptop, neighbour])
         XCTAssertEqual(controller.window?.frame, expected)
