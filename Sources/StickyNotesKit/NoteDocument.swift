@@ -93,6 +93,22 @@ final class NoteDocument {
 
     var id: UUID { buffer.id }
 
+    /// Start over from `note`, as just read from disk: the buffer, the baseline
+    /// and every armed save or held-back edit are replaced. For an owner whose
+    /// document moves to another file, such as the daily note on a new day. The
+    /// caller must have saved or kept whatever the buffer held.
+    func reset(to note: Note) {
+        saveTask?.cancel()
+        saveTask = nil
+        pendingExternal = nil
+        buffer = note
+        persistedContent = note.content
+        persistedTitle = note.title
+        persistedFingerprint = nil
+        wasNeverEdited = true
+        isClosed = false
+    }
+
     // MARK: - Changes from the person
 
     /// A change to what the person wrote or chose: text, title, labels, colour.

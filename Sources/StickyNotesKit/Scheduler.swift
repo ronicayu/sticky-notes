@@ -11,7 +11,8 @@ protocol Scheduler {
     func schedule(after delay: TimeInterval, _ work: @escaping () -> Void) -> ScheduledWork
 }
 
-/// The main queue.
+/// The main queue, on the wall clock: a delay that spans the Mac sleeping still
+/// ends on time by the calendar, as a midnight rollover needs.
 struct MainScheduler: Scheduler {
     private final class Item: ScheduledWork {
         let item: DispatchWorkItem
@@ -21,7 +22,7 @@ struct MainScheduler: Scheduler {
 
     func schedule(after delay: TimeInterval, _ work: @escaping () -> Void) -> ScheduledWork {
         let scheduled = Item(work)
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: scheduled.item)
+        DispatchQueue.main.asyncAfter(wallDeadline: .now() + delay, execute: scheduled.item)
         return scheduled
     }
 }
