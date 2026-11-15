@@ -555,6 +555,11 @@ final class SlashReplacement: NSObject {
 
     // MARK: - Label completion
 
+    /// How far back from the caret a `#` can be and still start a label. A label is
+    /// a word, and a paragraph of Chinese has no spaces to end the scan at, so
+    /// without a limit every keystroke walked back to the start of the paragraph.
+    static let labelTriggerReach = 64
+
     /// Look back from the caret for an active `#word` token and either show
     /// or update the completion panel. Dismiss it when the cursor leaves
     /// the token's span.
@@ -562,21 +567,18 @@ final class SlashReplacement: NSObject {
         guard labelProvider != nil else { return }
         let selection = textView.selectedRange()
         guard selection.length == 0 else { dismissLabelCompletion(); return }
-        let str = textView.string as NSString
-        let cursor = selection.location
+        // The storage's own string: no copy of the document per keystroke.
+        let str = textStorage.mutableString
+        let cursor = min(selection.location, str.length)
+        let limit = max(0, cursor - Self.labelTriggerReach)
+
+        func isSpace(_ unit: unichar) -> Bool { unit == 0x20 || unit == 0x09 || unit == 0x0A }
 
         var i = cursor - 1
-        while i >= 0 {
-            let ch = str.substring(with: NSRange(location: i, length: 1))
-            if ch == "#" {
-                let prevOK: Bool
-                if i == 0 {
-                    prevOK = true
-                } else {
-                    let prev = str.substring(with: NSRange(location: i - 1, length: 1))
-                    prevOK = (prev == " " || prev == "\t" || prev == "\n")
-                }
-                if prevOK {
+        while i >= limit {
+            let unit = str.character(at: i)
+            if unit == 0x23 {  // "#"
+                if i == 0 || isSpace(str.character(at: i - 1)) {
                     let typedLen = cursor - i - 1
                     let typed = typedLen > 0
                         ? str.substring(with: NSRange(location: i + 1, length: typedLen))
@@ -588,7 +590,7 @@ final class SlashReplacement: NSObject {
                 return
             }
             // Spaces / newlines end the token.
-            if ch == " " || ch == "\t" || ch == "\n" {
+            if isSpace(unit) {
                 dismissLabelCompletion()
                 return
             }

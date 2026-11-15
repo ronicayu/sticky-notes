@@ -37,6 +37,65 @@ import XCTest
         editor.textView(editor.textView, doCommandBy: #selector(NSResponder.insertNewline(_:)))
     }
 
+    // MARK: - Label completion
+
+    private func editorOfferingLabels() -> MarkdownEditorController {
+        let editor = makeEditor()
+        editor.labelProvider = { ["work", "工作"] }
+        return editor
+    }
+
+    func testALabelAfterALongParagraphWithNoSpacesIsStillOffered() {
+        let editor = editorOfferingLabels()
+
+        type(String(repeating: "中", count: 5000) + " #wo", into: editor)
+
+        XCTAssertTrue(editor.isShowingLabelCompletion)
+    }
+
+    func testAChineseLabelIsOffered() {
+        let editor = editorOfferingLabels()
+
+        type("今天的事 #工", into: editor)
+
+        XCTAssertTrue(editor.isShowingLabelCompletion)
+    }
+
+    func testAHashFarBackInUnbrokenTextOffersNothing() {
+        let editor = editorOfferingLabels()
+        let reach = MarkdownEditorController.labelTriggerReach
+
+        type("#" + String(repeating: "中", count: reach + 20), into: editor)
+
+        XCTAssertFalse(editor.isShowingLabelCompletion, "the scan went back past its reach")
+    }
+
+    func testAHashWithinTheReachIsStillFound() {
+        let editor = editorOfferingLabels()
+
+        type("先 #" + String(repeating: "w", count: MarkdownEditorController.labelTriggerReach - 8), into: editor)
+
+        XCTAssertTrue(editor.isShowingLabelCompletion)
+    }
+
+    func testAHashInsideAWordIsNotALabel() {
+        let editor = editorOfferingLabels()
+
+        type("issue#12", into: editor)
+
+        XCTAssertFalse(editor.isShowingLabelCompletion)
+    }
+
+    func testASpaceEndsTheLabel() {
+        let editor = editorOfferingLabels()
+        type("#wo", into: editor)
+        XCTAssertTrue(editor.isShowingLabelCompletion, "precondition")
+
+        type("#wo ", into: editor)
+
+        XCTAssertFalse(editor.isShowingLabelCompletion)
+    }
+
     // MARK: - Typing
 
     func testTypingTellsTheHostTheTextBeforeItIsRestyled() {
