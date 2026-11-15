@@ -1,0 +1,147 @@
+# Model notes (v2)
+
+Code modelled: commit `c16cef1` (branch `masterpiece`, Phase 0 and 1 complete). Every file:line below is
+`git show c16cef1:<path>`. HEAD was `6838780` when the work began; later commits (to `83e94dc`) change
+geometry and comments in `NoteDocument.swift` and `DailyDocument.swift` and add layout pruning to
+`DeskController.reconcileOpenWindows`, which do not change a modelled transition.
+
+The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of the first run.
+
+## Files
+
+| File | What |
+| --- | --- |
+| `LineMerge.tla` | Text operators shared by both models: `Covered`, `Superset`, `MergeVersions`, `MergeBodies`, `ThreeWay`, `NoRepeat` |
+| `NoteDocument.tla` | Model (a): one note in Obsidian vault mode, vault in iCloud Drive |
+| `DailyDocument.tla` | Model (b): today's daily note across midnight, this Mac plus the other Mac through iCloud |
+| `n-*.cfg`, `d-*.cfg` | Configs; `*-regress-*` are the faithfulness configs; `-r2`, `-r3` are peel rounds |
+| `note-doc-view.mjs`, `daily-doc-view.mjs` | Chart views |
+| `out-v2/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config |
+| `run-all.sh` | Reruns every config and the base check |
+
+## Switch convention
+
+- `ALLOW_OLD_*` = FALSE is the code as it is. TRUE brings back one behaviour that a commit since the first
+  run fixed. (In v1 the sign was the other way round.)
+- `ALLOW_OWN_COPY_BLOCK`, `ALLOW_BLANK_WINNER_BLOCK`, `ALLOW_LINEAGE_RESET`, `ALLOW_LINEAGE_NEEDS_NEWEST`,
+  `ALLOW_CLOSE_REFUSED_UNREADABLE`, `ALLOW_NO_MERGE_RETRY` are the new findings N1-N6: TRUE is the code as it
+  is, FALSE is the proposed fix. Round 1 configs set them TRUE; later rounds set one more FALSE.
+- Environment constants (`ALLOW_EXTERNAL_EDIT`, ...) only switch an actor on.
+
+## Abstractions
+
+- A body is a sequence of line tokens. `c` captured text, `a` `b` typed lines, `r` the first line after a
+  backspace or mid-line edit (replaces it), `x` `y` lines another writer appended, `D` a divider. Sequences,
+  not sets, so that a merge that repeats a line is visible (`NoRepeatedText`) and so that `isCovered`
+  (multiset of lines) and `isSuperset` (subsequence) are the real tests. A cut-off last line (the prefix rule
+  in `isCovered`) is not modelled: every line is whole.
+- The fingerprint is a relation: `fp` = "ok" (the document's fingerprint matches the file now), "stale",
+  or "none" (the document expects no file). Own writes and adopting a read make it "ok"; any outside write,
+  a frontmatter-only rewrite or an iCloud download makes it "stale". A save with "ok" writes, with "stale" or
+  "none" finds a conflict, merges and writes.
+- `base` is `persistedContent`. `lin`/`linNew` are `WriteLineage` (set of own written bodies, newest). A read
+  that finds a file that is not the newest own write clears it (`readMainSnapshot`, `DailyFile.read`); a
+  relaunch clears it.
+- Provenance for `NoSpuriousConflictBlock`: a block under a divider is warranted when each side holds text the
+  other lacks and one side's extra text is outside-authored (`Outside` = `x`, `y` / `b2`). Two versions of this
+  person's own text are not a conflict.
+- `persist()`'s three attempts and `resolveConflict` are one atomic step: they run on the main thread. The
+  check-then-write gap in `NoteStore.save` (comment at NoteStore.swift:260) is left out.
+- One conflict version at a time. Title, labels, colour, geometry and `preserved` are not modelled; the body
+  decides everything in the properties above.
+- Time: debounces, retry back-off and the 5 s sweep limit are interleavings, not clocks. "30 days pass" is one
+  step. Failures are finite: `flaky` (2) bounds how often the disk, the listing or iCloud misbehave, so the
+  no-stuck rules can be checked.
+- Use case (MASTERPIECE-PLAN Conclusion): the second Mac has no window. It writes after a sync
+  (`ExternalEdit`, `BEditsOnline`), edits an older copy offline (`ExternalConflict`, `BEditsOffline`: a
+  conflict version), or creates the day's file offline (`BCreatesOffline`: a numbered duplicate). Two people
+  editing at once, R8 and the two-Mac form of R10 are dropped.
+- Kept from before: sync delay (`unseen`), iCloud self-conflicts, Obsidian on the same Mac, eviction to a
+  placeholder, duplicate healing, Quit and Relaunch, Trash retention.
+
+## Model (a) actions -> code (c16cef1)
+
+| Action | Code |
+| --- | --- |
+| `Init` | `DeskController.makeNote` 189-235 (a blank note has no file; a captured one is written at once, 217-220); `NoteDocument.init` 141-154 |
+| `Type` | `NoteDocument.edit` 194-199 -> `scheduleSave` 445-463 (`createsFileOnFirstEdit` guard 447) |
+| `SaveFires` | `scheduleSave` work item 451-462 -> `mergePendingExternal` 329-375 -> `persist` 486-525 |
+| `SwitchAway` | `NoteWindowController.windowDidResignKey` 704-718; abandoned capture -> `close(.discard)` NoteDocument.swift 606-644; else `blur` 306-310 |
+| `CloseNote`, `PanelArchive` | `NoteWindowController.closeNote` 503-513 -> `closeThroughDocument` 515-528 -> `NoteDocument.close(.archive)` 624-643; `DeskController.archiveNote` 154-161; `onCloseRefused` 118-128 (stranded -> recovery) |
+| `Quit` | `AppDelegate.applicationShouldTerminate` 76-83 -> `DeskController.flushForQuit` 612-617 -> `NoteDocument.flush` 596-602, `RecoveryFiles.write` |
+| `Relaunch` | `NoteStore.init` -> `purgeExpiredTrash` 612-633, `restoreActiveNotes`; `WriteLineage` is in memory (NoteStore.swift:95) |
+| `Restore`, `DeleteForever`, `RestoreFromTrash`, `MonthPasses` | NoteStore.swift 518-530, 545-574, 580-590 |
+| `WindowHears` | `NoteStore.handleFileSystemEvent` 979-983 -> `NoteDocument.storeDidChange` 245-253 -> `externalChange` 257-297 |
+| `Reconcile` | `DeskController.reconcileOpenWindows` 379-403, `isGone` 409-415, `closeKeepingText` 420-425 -> `NoteDocument.close(.externalDeletion)` 614-623 |
+| `ConflictSweep` | `NoteStore.resolveConflict` 1269-1335 with `beforeResolvingConflicts` (DeskController 39-41 -> `flushPendingSave`) and `ConflictResolver.versionsToMerge` 95-103, `merge` 25-68 |
+| persist cases | `save` 272-326 (`.gone` 305, `.failed(locationUnknown)` 295), `writeIfUnchanged` 330-349; `NoteDocument.persist` 486-525; `keepTextElsewhere` 544-564 via `whereIs` 372-394, `save(in:)` 414-425, `saveRecoveredCopy` 430-448 |
+| `ExternalEdit`, `ExternalMetaWrite`, `ObsidianStaleRewrite` | Obsidian or the other Mac writes the file |
+| `ExternalConflict`, `ICloudSelfConflict` | iCloud keeps a conflict version (`NSFileVersion`); self-conflict is hypothesis H1 of the first report |
+| `ExternalMove` | the other Mac runs `archive` 491-497, `discardActive` 502-516, or deletes the file |
+| `FileVanishes`, `PlaceholderAppears` | `listActive` nil / `.failed(unreadableOnDisk)` 336 / `whereIs` unknown 393 |
+| `DiskFills` | any write fails (`.failed`) |
+
+## Model (b) actions -> code (c16cef1)
+
+| Action | Code |
+| --- | --- |
+| `Midnight` | wall clock |
+| `Rollover`, `UnavailableRetry` | `DailyDocument.rolloverIfNeeded` 466-477 (flush first, `.blocked` if it fails, `armRolloverRetry` 479-486), `load` 306-345 (heal 314, resolve conflicts 317, read 323, placeholder 331-341, seed 344), unavailable retry 336-340 |
+| `Type`, `RewriteTypo`, `SaveFires` | `setBody` 361-364 (refused while unavailable), `NoteDocument.edit` / `persist` through `DailyFile.save` 62-87 |
+| `PersonOpensToday` | `createTodaysFileIfMissing` 536-544 |
+| `SwitchAway` | `blur` 367-369 |
+| `WatcherDelivers` | `storeDidChange` 381-401: flush + heal when due (387-388), `resolveConflictVersions` 409-413 (flush must succeed), read, adopt or `externalChange` |
+| heal | `DailyNote.healDuplicates` (DailyDocument.swift 415-428) |
+| conflict merge | `DailyFile.resolveConflicts` 139-188 with `WriteLineage` (read 47-59, write 93-98) |
+| `Upload`, `Download`, `Evict`, `SelfConflict`, `BEditsOnline`, `BEditsOffline`, `BCreatesOffline`, `BUploads` | iCloud Drive and the other Mac |
+
+## Predictions and outcome
+
+Written from reading the code before the first run, compared after.
+
+| Prediction | Outcome |
+| --- | --- |
+| All rules hold on the current code, except the lineage trade-off that the code comment names (N4, N5) and a blank winner in `ConflictResolver.merge` (N2: `isSuperset` returns false for a blank base) | N2, N4, N5 confirmed; **three surprises**: N1 (outside rewrite back to an older own copy), N3 (close refused while the file cannot be read), N6 (a merge that cannot be written has no retry) |
+| Every regress config breaks | 36 of 44 break. **Surprise:** 8 single-switch configs held because a newer fix hides the old bug (`stale-fp-echo`, `no-echo-filter`, `sweep-no-flush` in both models, `heal-no-flush`, `panel-no-flush`, and each half of F3). Each has a pair config that breaks (with `UNBASED_MERGE`, with `RECONCILE_DROPS`, or both F3 halves) |
+| `CloseAlwaysWorks` holds | held on every config once N3 was fixed; broke on `ALLOW_OLD_STRANDED_CLOSE_REFUSED` |
+| Daily `NoSpuriousConflictBlock` cannot break (daily edits only append) | broke once `RewriteTypo` was added: the daily lineage is what stops it |
+
+## Model artefacts found and fixed during the work
+
+1. `ExternalEdit` reused a token after `EraseAll` cleared `typed`, so the same line was appended twice. Fixed: a
+   separate `used` set.
+2. `Genuine` asked for outside text on the loser side only, so "this Mac's text against the other Mac's text"
+   with the other Mac winning looked spurious. Fixed: symmetric, outside text on either side.
+3. `ALLOW_BLANK_WINNER_BLOCK` was passed to `MergeVersions` with the wrong sign. Fixed.
+4. `Download`/`Upload` did not mark the stored fingerprint stale or the file as foreign, so a daily save
+   after a download overwrote it and `prev` held the other Mac's text. Fixed (`StaleFp`, `diskOwn`).
+5. `Quit` cleared the lineage from the pre-flush state. Fixed.
+6. Recovery files replaced each other in the model; the code writes a new file each time. Fixed: `recDir` is a
+   set.
+7. `NoRepeatedText` broke on an outside writer saving the same text the window shows (`ExternalCopy`). That
+   action is a duplicate-typing artefact in a token model and was removed, together with the
+   `NO_BASE_ON_EQUAL` switch it served (`testAFileThatMatchesTheBufferBecomesTheBaseForLaterMerges` is
+   not checkable here).
+8. The liveness check as `ENABLED` of a close step made TLC 100 times slower; it is now a state predicate
+   (`CloseAlwaysWorks`). A temporal property over the daily conflict versions did not finish; it is now the
+   invariant `ConflictVersionsMerged`.
+
+## Left out
+
+Labels, title, colour, geometry, frontmatter beyond the fingerprint bit (1.8), the storage switch (1.5, R12),
+the sweep moved off the launch path (1.6, same ordering as before), retry back-off timing, the check-then-write
+gap in `NoteStore.save`, an unreadable file with a different name being judged missing, R8 and the two-Mac form
+of R10 (dropped by the use case), several conflict versions at once, nested divider counts (one `D` token).
+
+## How to rerun
+
+```sh
+cd /Users/ronica/projects/sticky-notes/.claude/worktrees/masterpiece/model
+R=/Users/ronica/.claude/plugins/cache/ronica-skills/statechart/0.3.0/skills/statechart/scripts/statechart
+export TLA2TOOLS=$HOME/.cache/statechart/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk/bin/java
+$R NoteDocument.tla --config n-edits.cfg --view note-doc-view.mjs --out out-new/n-edits
+$R DailyDocument.tla --config d-create.cfg --view daily-doc-view.mjs --out out-new/d-create
+./run-all.sh out-new      # every config, then the base check of every regress config
+```
+
+Use a new `--out` folder each run.

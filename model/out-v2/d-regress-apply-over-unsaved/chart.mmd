@@ -1,0 +1,61 @@
+---
+title: "Today's daily note on this Mac across midnight, with iCloud and the other Mac"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: Breaks DailyTextKept in some cases
+    lg1: Path to the DailyTextKept bug
+    state "Terms" as terms {
+      direction TB
+      state " " as tc0 {
+        direction LR
+        tm0: person = The owner, using Sticky Notes on this Mac.
+        tm1: save timer = The 0.4 second pause after typing before the daily note is written.
+        tm2: file watcher = The part of the app that notices the daily folder changed.
+        tm3: other Mac = The owner's second Mac, used in turn, not at the same time.
+      }
+      state " " as tc1 {
+        direction LR
+        tm4: iCloud = iCloud Drive, which syncs the vault between the Macs.
+        tm5: placeholder = A hidden stand-in file iCloud leaves for a file it has not downloaded.
+        tm6: conflict version = A second copy of the file that iCloud keeps when two saves disagree.
+        tm7: numbered duplicate = A second file '#60;date> 2.md' that iCloud makes when two Macs create the same file.
+      }
+    }
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  state "At the same time" as all {
+    state "This Mac" as r0 {
+      s0: Showing today's note (day 1)
+      s1: Showing yesterday's note
+      s2: Today's note shown, file not created
+      s3: Typing, save pending
+      [*] --> s0
+      s0 --> s1: the clock passes midnight
+      s1 --> s2: the midnight timer or wake switches to today
+      s2 --> s3: the person types in the daily note
+    }
+    --
+    state "iCloud" as r1 {
+      s4: Day 1, no day-2 file
+      s5: No file for today in iCloud
+      s6: The other Mac created today's file offline
+      s7: One file for today in iCloud
+      [*] --> s4
+      s4 --> s5: the clock passes midnight
+      s5 --> s6: the other Mac creates today's file offline [when Typing, save pending]
+      s6 --> s7: iCloud uploads the other Mac's new file
+    }
+  }
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 mayBreak
+  class s7 bugPath
