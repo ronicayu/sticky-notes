@@ -464,25 +464,74 @@ final class NoteStore {
         return resolved
     }
 
+    /// A conflict version of a file as `resolveConflict` needs it. Production
+    /// builds these from `NSFileVersion`; tests supply their own, because real
+    /// conflict versions only exist inside iCloud.
+    struct ConflictVersionHandle {
+        let url: URL
+        let savingComputer: String?
+        let modificationDate: Date?
+        let markResolved: () -> Void
+    }
+
+    var conflictVersionsProvider: (URL) -> [ConflictVersionHandle] = { url in
+        (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []).map { version in
+            ConflictVersionHandle(
+                url: version.url,
+                savingComputer: version.localizedNameOfSavingComputer,
+                modificationDate: version.modificationDate,
+                markResolved: { version.isResolved = true }
+            )
+        }
+    }
+    var otherVersionsRemover: (URL) -> Void = { url in
+        try? NSFileVersion.removeOtherVersionsOfItem(at: url)
+    }
+    var thisComputerName: String? = NoteStore.computerName
+
+    private static let computerName = Host.current().localizedName
+
     /// Merge one file's conflict versions back into it. iCloud exposes losing
     /// versions through `NSFileVersion`; ignoring them, as we used to, silently
     /// threw away whatever the other Mac wrote.
     private func resolveConflict(at url: URL) -> Bool {
-        let conflicts = NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []
+        let conflicts = conflictVersionsProvider(url)
         guard !conflicts.isEmpty else { return false }
 
-        var versions: [Note] = []
-        if let current = read(url) { versions.append(current) }
-        for version in conflicts {
-            if let note = read(version.url) { versions.append(note) }
+        let current = read(url)
+        var candidates: [ConflictResolver.ConflictCandidate] = []
+        // A version that can't be read yet (iCloud has not downloaded it) is
+        // left unresolved for a later sweep; resolving it now would lose it.
+        var unreadable = Set<Int>()
+        for (index, version) in conflicts.enumerated() {
+            guard let note = read(version.url) else {
+                unreadable.insert(index)
+                continue
+            }
+            candidates.append(.init(
+                note: note,
+                savingComputer: version.savingComputer,
+                modificationDate: version.modificationDate
+            ))
         }
 
-        // Whatever happens, mark the conflicts resolved — leaving them
-        // unresolved means being asked about them forever.
         defer {
-            for version in conflicts { version.isResolved = true }
-            try? NSFileVersion.removeOtherVersionsOfItem(at: url)
+            // Mark the rest resolved — leaving them unresolved means being
+            // asked about them forever.
+            for (index, version) in conflicts.enumerated() where !unreadable.contains(index) {
+                version.markResolved()
+            }
+            if unreadable.isEmpty { otherVersionsRemover(url) }
         }
+
+        let currentModified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate
+        let versions = ConflictResolver.versionsToMerge(
+            current: current,
+            candidates: candidates,
+            thisComputer: thisComputerName,
+            currentModified: currentModified
+        )
 
         guard ConflictResolver.needsMerge(versions),
               let merged = ConflictResolver.merge(versions) else { return false }
@@ -491,7 +540,7 @@ final class NoteStore {
         // back through the watcher, which sweeps again — and a conflict that
         // won't clear would keep that cycle running every few seconds,
         // dropping the cache and reloading every window each time.
-        if let current = versions.first, current.content == merged.content,
+        if let current, current.content == merged.content,
            current.title == merged.title, current.labels == merged.labels {
             return false
         }

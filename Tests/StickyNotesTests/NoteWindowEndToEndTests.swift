@@ -215,6 +215,45 @@ final class NoteWindowEndToEndTests: XCTestCase {
         XCTAssertTrue(archived.content.contains("theirs"), "lost the external text: \(archived.content)")
     }
 
+    /// After the window shows one outside edit it must still follow the next
+    /// one. It used to keep its record of the last save from before the first
+    /// edit, so it believed it held unsaved work and held every later edit back.
+    func testTwoVaultEditsInARowBothReachAnIdleWindow() throws {
+        let controller = try openNote(content: "start")
+        type("start\ntyped here", into: controller)
+        controller.flushPendingSave()
+
+        var first = try onDisk(controller)
+        first.content = "start\ntyped here\nfrom Obsidian"
+        store.save(first)
+        controller.handleStoreChange()
+        XCTAssertEqual(controller.textView.string, "start\ntyped here\nfrom Obsidian")
+
+        var second = try onDisk(controller)
+        second.content = "start\ntyped here\nfrom Obsidian\nand again"
+        store.save(second)
+        controller.handleStoreChange()
+
+        XCTAssertEqual(controller.textView.string, "start\ntyped here\nfrom Obsidian\nand again",
+                       "the second outside edit was held back")
+        XCTAssertNil(controller.pendingExternalNote)
+    }
+
+    /// Obsidian writing back an older copy while the person is mid-edit adds
+    /// nothing, so it must not come back as a "Conflicted copy" block.
+    func testADeferredOlderCopyIsDroppedWithoutAConflictBlock() throws {
+        let controller = try openNote(content: "a\nb")
+        type("a\nX\nb", into: controller)
+
+        var older = try onDisk(controller)
+        older.content = "a\nb"
+        older.updatedAt = Date().addingTimeInterval(-1)
+        controller.pendingExternalNote = older
+        controller.flushPendingSave()
+
+        XCTAssertEqual(try onDisk(controller).content, "a\nX\nb")
+    }
+
     // MARK: - Round trip through the vault
 
     /// What a vault user actually does: edit in Obsidian, come back, edit

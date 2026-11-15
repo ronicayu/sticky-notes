@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import StickyNotesKit
 
@@ -180,6 +181,116 @@ final class ConflictResolverTests: XCTestCase {
             note("a", updated: 100, id: id), note("b", updated: 200, id: id)
         ], now: now))
         XCTAssertEqual(merged.id, id)
+    }
+
+    // MARK: - Line-based merge rule
+
+    func testAConflictVersionWithNothingNewLeavesTheNoteAlone() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("a\nb", updated: 100), note("a\nX\nb", updated: 200)
+        ], now: now))
+        XCTAssertEqual(merged.content, "a\nX\nb")
+    }
+
+    func testAnOlderSaveCutMidWordIsNotAppended() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("line one\nline tw", updated: 100),
+            note("line one\nline two\nline three", updated: 200),
+            note("line one\na new line\nline two\nline three", updated: 300)
+        ], now: now))
+        XCTAssertEqual(merged.content, "line one\na new line\nline two\nline three")
+    }
+
+    func testAnOutsideAppendIsTakenWithoutAConflictBlock() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("a\nb", updated: 200), note("a\nb\nc", updated: 100)
+        ], now: now))
+        XCTAssertEqual(merged.content, "a\nb\nc")
+    }
+
+    func testTwoGenuinelyDivergentVersionsStillGetADivider() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("a\nmine", updated: 200), note("a\ntheirs", updated: 100)
+        ], now: now))
+        XCTAssertTrue(merged.content.hasPrefix("a\nmine"), "got \(merged.content)")
+        XCTAssertEqual(merged.content.components(separatedBy: "Conflicted copy").count, 2)
+        XCTAssertTrue(merged.content.hasSuffix("theirs"), "got \(merged.content)")
+    }
+
+    func testTwoDivergentVersionsWithTheSameTextAreAppendedOnce() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("base\nmine", updated: 300),
+            note("base\ntheirs", updated: 100),
+            note("base\ntheirs", updated: 200)
+        ], now: now))
+        XCTAssertEqual(merged.content.components(separatedBy: "theirs").count, 2, "got \(merged.content)")
+    }
+
+    func testBodyMergeTakesAnOutsideAppendWithoutADivider() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "a\nb", external: "a\nb\nc", externalDate: now, now: now
+        )
+        XCTAssertEqual(merged, "a\nb\nc")
+    }
+
+    func testBodyMergeDropsAnOlderCopyThatIsNotASubstring() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "a\nX\nb", external: "a\nb", externalDate: now, now: now
+        )
+        XCTAssertEqual(merged, "a\nX\nb")
+    }
+
+    // MARK: - Choosing which conflict versions to merge
+
+    private func candidate(
+        _ text: String, computer: String?, saved: TimeInterval?
+    ) -> ConflictResolver.ConflictCandidate {
+        .init(
+            note: note(text, updated: 0),
+            savingComputer: computer,
+            modificationDate: saved.map { Date(timeIntervalSince1970: $0) }
+        )
+    }
+
+    func testAnOlderVersionFromThisMacIsNotAppendedAsAConflict() {
+        let current = note("current", updated: 200)
+        let versions = ConflictResolver.versionsToMerge(
+            current: current,
+            candidates: [candidate("older own save", computer: "Mac A", saved: 100)],
+            thisComputer: "Mac A",
+            currentModified: Date(timeIntervalSince1970: 200)
+        )
+        XCTAssertEqual(versions.map(\.content), ["current"])
+    }
+
+    func testAConflictVersionFromAnotherMacIsStillMerged() {
+        let versions = ConflictResolver.versionsToMerge(
+            current: note("current", updated: 200),
+            candidates: [candidate("from the desktop", computer: "Mac B", saved: 100)],
+            thisComputer: "Mac A",
+            currentModified: Date(timeIntervalSince1970: 200)
+        )
+        XCTAssertEqual(versions.map(\.content), ["current", "from the desktop"])
+    }
+
+    func testAVersionFromThisMacThatIsNewerThanTheFileIsStillMerged() {
+        let versions = ConflictResolver.versionsToMerge(
+            current: note("current", updated: 200),
+            candidates: [candidate("newer own save", computer: "Mac A", saved: 300)],
+            thisComputer: "Mac A",
+            currentModified: Date(timeIntervalSince1970: 200)
+        )
+        XCTAssertEqual(versions.count, 2)
+    }
+
+    func testAVersionWithUnknownOriginIsStillMerged() {
+        let versions = ConflictResolver.versionsToMerge(
+            current: note("current", updated: 200),
+            candidates: [candidate("who knows", computer: nil, saved: nil)],
+            thisComputer: "Mac A",
+            currentModified: Date(timeIntervalSince1970: 200)
+        )
+        XCTAssertEqual(versions.count, 2)
     }
 
     // MARK: - needsMerge
@@ -393,5 +504,89 @@ final class TrashTests: XCTestCase {
         store.save(makeNote("untouched"))
         XCTAssertEqual(store.resolveConflicts(), 0)
         XCTAssertEqual(store.loadActive().map(\.content), ["untouched"])
+    }
+}
+
+final class ConflictSweepTests: XCTestCase {
+    private var root: URL!
+    private var store: NoteStore!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ConflictSweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        store = NoteStore(rootURL: root, format: .markdown)
+        store.thisComputerName = "Mac A"
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func savedNote(_ content: String) -> Note {
+        var note = Note.makeNew(frame: NSRect(x: 0, y: 0, width: 240, height: 200))
+        note.content = content
+        store.save(note)
+        return note
+    }
+
+    /// A stand-in for an `NSFileVersion`: a real file holding `content`, so
+    /// the sweep reads it exactly as it would a downloaded conflict version.
+    private func version(
+        of note: Note, content: String?, computer: String?, resolved: @escaping () -> Void
+    ) throws -> NoteStore.ConflictVersionHandle {
+        let url = root.appendingPathComponent("version-\(UUID().uuidString).md")
+        if let content {
+            let raw = "---\nid: \(note.id.uuidString)\nupdated: 1970-01-01T00:00:01Z\n---\n\(content)\n"
+            try raw.write(to: url, atomically: true, encoding: .utf8)
+        }
+        return .init(
+            url: url, savingComputer: computer,
+            modificationDate: Date(timeIntervalSince1970: 1), markResolved: resolved
+        )
+    }
+
+    func testAnUnreadableConflictVersionIsKeptForLater() throws {
+        let note = savedNote("current text")
+        var resolved: [String] = []
+        var removed = false
+        let readable = try version(of: note, content: "from the desktop", computer: "Mac B") { resolved.append("readable") }
+        let missing = try version(of: note, content: nil, computer: "Mac B") { resolved.append("missing") }
+        store.conflictVersionsProvider = { _ in [readable, missing] }
+        store.otherVersionsRemover = { _ in removed = true }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+
+        XCTAssertEqual(resolved, ["readable"], "the unreadable version must stay unresolved")
+        XCTAssertFalse(removed, "other versions were removed while one was still unread")
+        let content = try XCTUnwrap(store.loadNote(id: note.id)).content
+        XCTAssertTrue(content.contains("from the desktop"), "got \(content)")
+    }
+
+    func testEveryReadVersionIsResolvedAndTheOthersRemoved() throws {
+        let note = savedNote("current text")
+        var resolved = 0
+        var removed = false
+        let other = try version(of: note, content: "from the desktop", computer: "Mac B") { resolved += 1 }
+        store.conflictVersionsProvider = { _ in [other] }
+        store.otherVersionsRemover = { _ in removed = true }
+
+        store.resolveConflicts()
+
+        XCTAssertEqual(resolved, 1)
+        XCTAssertTrue(removed)
+    }
+
+    func testAnOlderSaveFromThisMacLeavesTheNoteUntouchedButIsResolved() throws {
+        let note = savedNote("current text")
+        var resolved = 0
+        let own = try version(of: note, content: "current tex\nold line", computer: "Mac A") { resolved += 1 }
+        store.conflictVersionsProvider = { _ in [own] }
+        store.otherVersionsRemover = { _ in }
+
+        XCTAssertEqual(store.resolveConflicts(), 0)
+
+        XCTAssertEqual(try XCTUnwrap(store.loadNote(id: note.id)).content, "current text")
+        XCTAssertEqual(resolved, 1)
     }
 }
