@@ -310,7 +310,11 @@ import XCTest
 
         XCTAssertEqual(asked, [CGSize(width: 310, height: 270)])
         let placed = try XCTUnwrap(layout.layout(for: note.id))
-        XCTAssertEqual(placed.frame, NotePlacement.next(previous: nil, screen: screen, size: CGSize(width: 310, height: 270)))
+        // The window then keeps itself on a real screen, whose size differs by host.
+        let expected = NoteWindow.clampToVisibleScreen(
+            NotePlacement.next(previous: nil, screen: screen, size: CGSize(width: 310, height: 270))
+        )
+        XCTAssertEqual(placed.frame, expected)
         XCTAssertFalse(placed.collapsed)
     }
 
@@ -471,9 +475,9 @@ import XCTest
 
         XCTAssertEqual(laptop.layout(for: note.id)?.collapsed, true)
         XCTAssertEqual(try Data(contentsOf: url), bytes, "collapsing wrote the note file")
-        let otherMac = open(note, layout: desktop, placing: { _ in NSRect(x: 600, y: 300, width: 240, height: 200) })
+        let otherMac = open(note, layout: desktop, placing: { _ in NSRect(x: 160, y: 200, width: 240, height: 200) })
         XCTAssertEqual(desktop.layout(for: note.id)?.collapsed, false)
-        XCTAssertEqual(desktop.layout(for: note.id)?.x, 600, "the other Mac took this Mac's place")
+        XCTAssertEqual(desktop.layout(for: note.id)?.x, 160, "the other Mac took this Mac's place")
         XCTAssertGreaterThan(try XCTUnwrap(otherMac.window).frame.height, NoteWindowController.collapsedHeight)
     }
 

@@ -35,6 +35,13 @@ final class WelcomeNoteTests: XCTestCase {
         )
     }
 
+    /// What is on disk and what the store last failed at, for the message of a
+    /// failed assertion, so a failure on another machine names its cause.
+    private func diagnostics(_ store: NoteStore) -> String {
+        let paths = (FileManager.default.enumerator(atPath: root.path)?.allObjects as? [String]) ?? []
+        return "files: \(paths.sorted()); last failure: \(String(describing: store.lastFailure))"
+    }
+
     func testAFreshInstallGetsAWelcomeNote() throws {
         let store = makeStore()
         let note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
@@ -47,7 +54,7 @@ final class WelcomeNoteTests: XCTestCase {
         XCTAssertNotNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
         XCTAssertNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults),
                      "a second launch should not create another")
-        XCTAssertEqual(store.loadActive().count, 1)
+        XCTAssertEqual(store.loadActive().count, 1, diagnostics(store))
     }
 
     /// Deleting it is a normal thing to do; it must not come back.
@@ -65,8 +72,8 @@ final class WelcomeNoteTests: XCTestCase {
     func testAnExistingLibraryGetsNoWelcomeNote() {
         let store = makeStore()
         store.save(makeNote())
-        XCTAssertNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
-        XCTAssertEqual(store.loadActive().count, 1)
+        XCTAssertNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults), diagnostics(store))
+        XCTAssertEqual(store.loadActive().count, 1, diagnostics(store))
     }
 
     func testAnArchiveOnlyLibraryAlsoCountsAsExisting() {
@@ -83,7 +90,7 @@ final class WelcomeNoteTests: XCTestCase {
         let store = makeStore()
         let note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
 
-        var edited = try XCTUnwrap(store.loadActive().first)
+        var edited = try XCTUnwrap(store.loadActive().first, diagnostics(store))
         edited.content = "I made this mine"
         store.save(edited)
 
