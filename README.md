@@ -24,11 +24,11 @@ Built with AppKit. Two dependencies: [`KeyboardShortcuts`](https://github.com/si
 - **Dark mode** — notes follow the system appearance, with deep desaturated paper rather than dimmed pastels. The stored color name doesn't change, so a note is the same color on a light Mac and a dark one.
 - **Tidy desk** — dragging a note snaps it to screen edges and to nearby notes (hold `⌥` to place it freely). **Arrange Notes** in the menu bar packs everything into a grid or a cascade.
 - **Float level** — per note, from the palette button: float above every app (the default) or stick to the desktop, classic-Stickies style.
-- **Auto-save** — every edit, move, resize, recolor, and collapse is debounced and persisted to disk as a per-note JSON file.
+- **Auto-save** — every edit, move, resize, recolor, and collapse is debounced and persisted to disk as a per-note Markdown file.
 - **Notes panel** — lists every active and archived note with previews, plus search, a label filter, and sorting by last edited / created / title / color. `↩` opens the selected note, `⌘⌫` archives it. Restore or permanently delete archived notes.
 - **Labels** — tag a note by typing `#label`, with autocomplete. Hide a whole label's notes from the menu bar (**Show Labels**) to put `#work` away for the evening without archiving anything.
 - **iCloud Drive sync** — opt in from Settings to sync notes across your Macs through iCloud Drive.
-- **Obsidian vault mode** — point Settings at a vault and notes become `.md` files with YAML frontmatter, editable from Obsidian and synced back live.
+- **Obsidian vault mode** — point Settings at a vault (or any folder Obsidian opens) and the notes are `.md` files with YAML frontmatter, editable from Obsidian and synced back live.
 - **Daily note** — open today's Obsidian daily note as a floating window; it rolls over to the new day on its own.
 - **Launch at login** — toggle from Settings.
 - **Recoverable delete** — "Delete permanently" moves a note to a **Trash** tab in the notes panel, where it stays put-back-able for 30 days before being swept on launch.
@@ -97,7 +97,7 @@ Services and the URL scheme both need the built `.app` bundle; neither works und
 Open with `⌘,` or **Settings…** in the menu bar. Three panes:
 
 - **General** — default note color, launch at login, and rebindable hotkeys for every global shortcut.
-- **Storage** — where notes live: local, iCloud Drive, or an Obsidian vault (Markdown mode).
+- **Storage** — where notes live: local, iCloud Drive, or an Obsidian vault. Notes are Markdown files in all three.
 - **Daily note** — the vault-relative path pattern and optional template.
 
 Hotkeys are registered through `KeyboardShortcuts` and persisted to `UserDefaults`.
@@ -107,17 +107,17 @@ Hotkeys are registered through `KeyboardShortcuts` and persisted to `UserDefault
 ```
 ~/Library/Application Support/StickyNotes/      (or iCloud Drive root, or <vault>/StickyNotes/)
 ├── notes/
-│   └── {uuid}.json          # one file per active note
+│   └── {yyyy-MM-dd HHmmss}-{id}.md   # one file per active note
 ├── archive/
-│   └── {uuid}.json          # archived notes (closed via the × button)
+│   └── {yyyy-MM-dd HHmmss}-{id}.md   # archived notes (closed via the × button)
 ├── attachments/             # images and files pasted into notes
 └── .trash/
-    └── {uuid}.json          # deleted notes, purged after 30 days
+    └── {yyyy-MM-dd HHmmss}-{id}.md   # deleted notes, purged after 30 days
 ```
 
-Each file holds the note's content, position, size, color, labels, collapsed flag, and timestamps. Files are mutated atomically and per-note, so iCloud Drive can sync them without merge conflicts.
+Each file holds the note's metadata (position, size, color, labels, collapsed flag, timestamps) in YAML frontmatter and its text as plain Markdown, so Obsidian can open the folder as a vault. Files are written atomically and per-note, and edits made outside the app are picked up live.
 
-In Obsidian vault mode the same tree holds `.md` files named `{yyyy-MM-dd HHmmss}-{id}.md`, with the metadata in YAML frontmatter and the note body as plain Markdown — readable and editable directly in Obsidian. Edits made outside the app are picked up live.
+Earlier versions stored notes as `{uuid}.json` outside a vault. On first launch the app converts those files in `notes/`, `archive/` and `.trash/` to Markdown in place: it writes the `.md`, checks that it reads back as the same note, and only then deletes the JSON. A file that cannot be converted is left where it is and reported from the menu bar.
 
 ## License
 
