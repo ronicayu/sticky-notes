@@ -118,6 +118,16 @@ import XCTest
         }
     }
 
+    /// The chord is drawn from the key equivalent: it was once typed into the
+    /// title, where a rebind or a change of the real key would leave it wrong.
+    func testTheStatusMenuShowsSettingsChordAsAKeyEquivalent() throws {
+        let menu = try XCTUnwrap(menuBar.statusMenu)
+        let settings = try item(titled: "Settings…", in: menu)
+        XCTAssertEqual(settings.keyEquivalent, ",")
+        XCTAssertEqual(settings.keyEquivalentModifierMask, .command)
+        XCTAssertFalse(menu.items.contains { $0.title.contains("⌘") }, "a title spells out a chord")
+    }
+
     func testOpeningTheMenuReflectsWhetherNotesAreHiddenAndWhetherAnyExist() throws {
         let menu = try XCTUnwrap(menuBar.statusMenu)
         let hideAll = try item(titled: "Hide All Notes", in: menu)

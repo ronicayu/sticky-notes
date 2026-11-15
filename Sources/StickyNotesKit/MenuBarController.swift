@@ -202,7 +202,7 @@ import KeyboardShortcuts
         menu.addItem(notesItem)
 
         menu.addItem(.separator())
-        add("Settings…  ⌘,", #selector(StorageCoordinator.openSettings), target: storage, to: menu)
+        add("Settings…", #selector(StorageCoordinator.openSettings), target: storage, key: ",", to: menu)
         add("Show Storage Folder", #selector(StorageCoordinator.revealStorage), target: storage, to: menu)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
