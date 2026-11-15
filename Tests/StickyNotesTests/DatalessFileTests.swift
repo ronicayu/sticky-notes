@@ -532,31 +532,20 @@ private final class OnlyReader: @unchecked Sendable { var value: String? }
 
     // MARK: - Switching storage waits for downloads
 
-    func testSwitchingStorageCopiesANoteThatDownloadsWhileTheSwitchWaits() throws {
-        let note = makeNote("copied after the download")
+    func testSwitchingStorageAsksForDatalessNotesWithoutWaitingAndLeavesThemInTheOldRoot() throws {
+        let note = makeNote("left for later")
         store.save(note)
         let url = try file(of: note)
         markDataless(url)
-        store.startDownload = { [unowned self] in
-            downloads.append($0.lastPathComponent)
-            markDownloaded($0)
-        }
+        let began = CFAbsoluteTimeGetCurrent()
 
         let report = store.reconfigure(rootURL: root.appendingPathComponent("elsewhere", isDirectory: true))
 
-        XCTAssertEqual(report.notReadable, 0)
-        XCTAssertEqual(store.loadActive().map(\.content), ["copied after the download"])
-    }
-
-    func testSwitchingStorageCountsANoteThatNeverDownloadsAsNotReadable() throws {
-        let note = makeNote("never arrives")
-        store.save(note)
-        markDataless(try file(of: note))
-        store.downloadWait = 0.2
-
-        let report = store.reconfigure(rootURL: root.appendingPathComponent("elsewhere", isDirectory: true))
-
-        XCTAssertEqual(report.notReadable, 1)
+        XCTAssertLessThan(CFAbsoluteTimeGetCurrent() - began, 1, "the switch waited")
+        XCTAssertEqual(report.notReadable, 1, "counted as left for later")
+        XCTAssertTrue(downloads.contains(url.lastPathComponent), "its download was not asked for")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "the old root was changed")
+        XCTAssertEqual(store.loadActive().count, 0)
     }
 }
 

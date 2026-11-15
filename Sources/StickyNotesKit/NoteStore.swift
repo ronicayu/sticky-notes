@@ -1081,7 +1081,7 @@ final class NoteStore {
         invalidateCache()
 
         knownLabels.removeAll()
-        awaitDownloads(in: rootURL, includingPlaceholders: false)
+        requestDownloads(in: rootURL, includingPlaceholders: false)
         // Heals duplicate ids the way every load does, so each note is copied once.
         for dir in [activeURL, archiveURL, trashURL] { _ = loadAll(from: dir) }
         let source = switchSource(report: &report)
@@ -1100,7 +1100,7 @@ final class NoteStore {
         // when it was last used, says nothing about what is in them now.
         invalidateCache()
         ensureDirectories()
-        awaitDownloads(in: newRoot)
+        requestDownloads(in: newRoot)
         migrateJSONNotes()
 
         let links = copyAttachments(from: oldAttachments, report: &report)
@@ -1174,17 +1174,15 @@ final class NoteStore {
 
     // MARK: - Files not downloaded yet
 
-    /// How long a switch waits for files of the new root that are still in iCloud
-    /// before it goes on without them.
-    var downloadWait: TimeInterval = 5
-
-    /// Ask for every placeholder and every dataless note in `root`, and wait a
-    /// bounded time for them. A switch has to read the notes it copies, which
-    /// nothing else on the main thread may do with a file that is not downloaded.
-    /// What stays undownloaded is handled by name; see `switchDestination`.
+    /// Ask for every placeholder and every dataless note in `root`, without waiting:
+    /// a switch is made on the main thread, which must not wait for iCloud. A file
+    /// that is still not downloaded when the switch reads it is counted as not
+    /// readable and left for later (the root being left is never changed, so it
+    /// still holds the note); a later switch or a relaunch picks it up. What stays
+    /// undownloaded in the new root is handled by name; see `switchDestination`.
     /// `includingPlaceholders` is false for the root being left: a placeholder
     /// there is counted as not readable, as it always was.
-    private func awaitDownloads(in root: URL, includingPlaceholders: Bool = true) {
+    private func requestDownloads(in root: URL, includingPlaceholders: Bool = true) {
         let fm = FileManager.default
         func undownloaded() -> [URL] {
             var found: [URL] = []
@@ -1204,17 +1202,7 @@ final class NoteStore {
             }
             return found
         }
-        var waiting = undownloaded()
-        guard !waiting.isEmpty else { return }
-        for url in waiting { dataless.request(url) }
-        let deadline = Date().addingTimeInterval(downloadWait)
-        while Date() < deadline {
-            waiting = waiting.filter { !fm.fileExists(atPath: $0.path) || dataless.isDataless($0) }
-            if waiting.isEmpty { return }
-            // The main run loop keeps turning while the switch waits, so the app does
-            // not freeze; a switch is the person's own action and this is a bounded wait.
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
-        }
+        for url in undownloaded() { dataless.request(url) }
     }
 
     /// `.name.icloud` stands for `name`.

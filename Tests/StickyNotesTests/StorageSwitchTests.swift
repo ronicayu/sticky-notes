@@ -326,7 +326,6 @@ final class StorageSwitchTests: XCTestCase {
 
     func testANoteWhoseFileIsStillDownloadingInAnotherFolderIsNotWrittenAgain() throws {
         let store = NoteStore(rootURL: folder("a"))
-        store.downloadWait = 0
         let note = makeNote("archived on the other Mac")
         store.save(note)
         let name = try XCTUnwrap(markdownFiles("a", "notes").first).url.lastPathComponent
@@ -342,7 +341,6 @@ final class StorageSwitchTests: XCTestCase {
 
     func testANoteWhoseFileIsStillDownloadingInTheSameFolderIsNotWrittenBesideIt() throws {
         let store = NoteStore(rootURL: folder("a"))
-        store.downloadWait = 0
         let note = makeNote("here and there")
         store.save(note)
         let name = try XCTUnwrap(markdownFiles("a", "notes").first).url.lastPathComponent
@@ -356,7 +354,6 @@ final class StorageSwitchTests: XCTestCase {
 
     func testAnIdInAGeneratedNameIsEnoughToHoldBackANote() throws {
         let store = NoteStore(rootURL: folder("a"))
-        store.downloadWait = 0
         let note = makeNote("renamed elsewhere")
         store.save(note)
         let name = try XCTUnwrap(markdownFiles("a", "notes").first).url.lastPathComponent
@@ -371,7 +368,6 @@ final class StorageSwitchTests: XCTestCase {
 
     func testAnAttachmentNameThatIsStillDownloadingIsTakenSoTheIncomingFileIsRenamed() throws {
         let store = NoteStore(rootURL: folder("a"))
-        store.downloadWait = 0
         try addAttachment("shot.png", bytes: "from a", to: store)
         let note = makeNote("see \(imageLink("shot.png"))")
         store.save(note)
