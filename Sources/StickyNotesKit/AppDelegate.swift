@@ -82,7 +82,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(handleStoreChange),
+            selector: #selector(storeDidChange(_:)),
             name: NoteStore.didChange,
             object: nil
         )
@@ -133,10 +133,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     /// Bring open windows in line with what's on disk. Triggered by
-    /// `NoteStore.didChange`, which fires both for our own writes (no-op here)
-    /// and for external file changes — Obsidian edits, files arriving via
-    /// iCloud Drive, archives created on another Mac, etc.
-    @objc private func handleStoreChange() {
+    /// `NoteStore.didChange`, which fires both for our own writes and for
+    /// external file changes — Obsidian edits, files arriving via iCloud
+    /// Drive, archives created on another Mac, etc.
+    @objc private func storeDidChange(_ notification: Notification) {
+        // A save by this store of a note that already has a window changes
+        // nothing on disk the app does not know. All that can differ is
+        // whether its labels now hide it.
+        if case let .saved(id) = NoteStore.change(in: notification),
+           notification.object as AnyObject === noteStore, windowControllers[id] != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyVisibility()
+            }
+            return
+        }
+        handleStoreChange()
+    }
+
+    private func handleStoreChange() {
         DispatchQueue.main.async { [weak self] in
             self?.reconcileOpenWindows()
         }

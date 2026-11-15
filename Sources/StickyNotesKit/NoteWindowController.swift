@@ -438,7 +438,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(handleStoreChange),
+            selector: #selector(storeDidChange(_:)),
             name: NoteStore.didChange,
             object: nil
         )
@@ -1304,6 +1304,16 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     // MARK: - External change sync
+
+    @objc private func storeDidChange(_ notification: Notification) {
+        // A save by this store is already in memory, and another note's save
+        // is not about this file: neither is worth a disk read.
+        if case let .saved(id) = NoteStore.change(in: notification),
+           id != note.id || notification.object as AnyObject === store {
+            return
+        }
+        handleStoreChange()
+    }
 
     @objc func handleStoreChange() {
         guard let updated = store.loadNote(id: note.id) else { return }

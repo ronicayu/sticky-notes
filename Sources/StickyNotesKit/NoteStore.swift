@@ -65,6 +65,32 @@ enum WriteLineage {
 final class NoteStore {
     static let didChange = Notification.Name("NoteStore.didChange")
 
+    enum Folder { case active, archive, trash }
+
+    /// What a `didChange` notification reports, so an observer can skip the
+    /// disk reads that do not concern it. Delivered in `userInfo` under
+    /// `changeKey`; the notification's object is the store that posted it.
+    enum Change: Equatable {
+        /// This store wrote the note. Memory already holds what is on disk.
+        case saved(UUID)
+        case moved(UUID, from: Folder, to: Folder)
+        /// Unlinked rather than moved.
+        case removed(UUID)
+        /// A sweep rewrote these notes from other copies of them.
+        case external(Set<UUID>)
+        /// Anything may have changed: a file-system event, which names no
+        /// note, or a switch to another folder.
+        case reset
+    }
+
+    static let changeKey = "change"
+
+    /// The change a `didChange` notification carries. A notification without
+    /// one is a `.reset`: the observer must assume everything changed.
+    static func change(in notification: Notification) -> Change {
+        notification.userInfo?[changeKey] as? Change ?? .reset
+    }
+
     /// Posted when `lastFailure` changes in either direction — a new failure,
     /// or a later write succeeding and clearing it.
     static let healthDidChange = Notification.Name("NoteStore.healthDidChange")
@@ -150,8 +176,33 @@ final class NoteStore {
         resolveConflicts()
     }
 
-    func save(_ note: Note) {
-        if knownIds.contains(note.id), existingURL(for: note.id, in: activeURL) == nil {
+    /// Writes whatever is on disk over. For a note this process is creating, or
+    /// one whose owner holds no fingerprint yet; an owner that has read the file
+    /// saves with `save(_:expecting:)`, which cannot overwrite what it has not seen.
+    @discardableResult
+    func save(_ note: Note) -> SaveResult {
+        save(note, expectation: .anything)
+    }
+
+    /// Compare-and-swap. `expected` is the fingerprint of the file the caller
+    /// last read or wrote; nil means the caller is creating the note and expects
+    /// no file. If the file differs, nothing is written and the result carries
+    /// what is there. The check and the write are two steps with no lock between
+    /// them, so a writer that lands inside that gap is still overwritten.
+    func save(_ note: Note, expecting expected: Fingerprint?) -> SaveResult {
+        save(note, expectation: expected.map(Expectation.fingerprint) ?? .nothing)
+    }
+
+    private enum Expectation {
+        case anything
+        case nothing
+        case fingerprint(Fingerprint)
+    }
+
+    private func save(_ note: Note, expectation: Expectation) -> SaveResult {
+        var expectsFile = false
+        if case .fingerprint = expectation { expectsFile = true }
+        if knownIds.contains(note.id) || expectsFile, existingURL(for: note.id, in: activeURL) == nil {
             // Seen before but no active file now — externally deleted (or
             // archived). Don't resurrect it here.
             //
@@ -169,21 +220,58 @@ final class NoteStore {
                 // pays for another full scan of the notes directory.
                 confirmedDeletedIds.insert(note.id)
                 markdownPathIndex.removeValue(forKey: note.id)
-                return
+                return .gone
             }
         }
         let url = existingURL(for: note.id, in: activeURL) ?? generateURL(for: note, in: activeURL)
-        // Nothing reached disk — don't record the path or cache the note as
-        // saved, so the next attempt retries from a clean slate.
-        guard write(note, to: url) else { return }
-        markdownPathIndex[note.id] = url
-        knownIds.insert(note.id)
+        let result = writeIfUnchanged(note, to: url, expecting: expectation)
+        switch result {
+        case .saved:
+            markdownPathIndex[note.id] = url
+            knownIds.insert(note.id)
 
-        // A save touches exactly one known file, so patch the cache rather
-        // than dropping it. Debounced saves fire on every keystroke; throwing
-        // the tree away each time would make the cache useless while typing.
-        upsertInCache(note, dir: activeURL)
-        notifyObservers()
+            // A save touches exactly one known file, so patch the cache rather
+            // than dropping it. Debounced saves fire on every keystroke; throwing
+            // the tree away each time would make the cache useless while typing.
+            upsertInCache(note, dir: activeURL)
+            notifyObservers(.saved(note.id))
+        case let .conflict(onDisk, _):
+            upsertInCache(onDisk, dir: activeURL)
+        case .gone, .failed:
+            break
+        }
+        return result
+    }
+
+    /// Check the file at `url` against `expectation`, then write. A file that
+    /// cannot be read is not overwritten: nothing is known about what it holds.
+    private func writeIfUnchanged(_ note: Note, to url: URL, expecting expectation: Expectation) -> SaveResult {
+        switch expectation {
+        case .anything:
+            break
+        case .nothing, .fingerprint:
+            if FileManager.default.fileExists(atPath: url.path) {
+                guard let current = readMainSnapshot(url) else { return .failed(SaveError.unreadableOnDisk) }
+                if case let .fingerprint(expected) = expectation, current.fingerprint == expected {
+                    break
+                }
+                return .conflict(onDisk: current.note, fingerprint: current.fingerprint)
+            } else if case .fingerprint = expectation {
+                return .gone
+            }
+        }
+        switch writeReporting(note, to: url) {
+        case let .success(fingerprint): return .saved(fingerprint)
+        case let .failure(error): return .failed(error)
+        }
+    }
+
+    /// A note and the fingerprint of the file it came from, read from disk now.
+    /// This, not `loadNote`, is what a document takes its fingerprint from.
+    func snapshot(id: UUID, archived: Bool = false) -> NoteSnapshot? {
+        let dir = archived ? archiveURL : activeURL
+        guard let url = existingURL(for: id, in: dir) else { return nil }
+        return readMainSnapshot(url)
     }
 
     func loadActive() -> [Note] {
@@ -194,8 +282,17 @@ final class NoteStore {
         loadAll(from: archiveURL).sorted { $0.updatedAt > $1.updatedAt }
     }
 
+    /// Served from the cache while it is warm, so a burst of observers asking
+    /// about their own note costs one directory read between them, not one each.
+    /// A cold cache reads just the one file. Either way the answer can be older
+    /// than the file by the watcher's delay; a caller that is about to write must
+    /// use `snapshot` or `save(_:expecting:)`, which look at the file itself.
     func loadNote(id: UUID, archived: Bool = false) -> Note? {
         let dir = archived ? archiveURL : activeURL
+        if let cached = cache[dirKey(dir)] {
+            // Last match: a directory scan lets the last file with an id win the path index.
+            return cached.last { $0.id == id }
+        }
         guard let url = existingURL(for: id, in: dir) else { return nil }
         return readMain(url)
     }
@@ -205,7 +302,7 @@ final class NoteStore {
         let to = generateURL(for: note, in: archiveURL)
         guard moveFile(from: from, to: to) else { return }
         markdownPathIndex[note.id] = to
-        notifyChange()
+        notifyChange(.moved(note.id, from: .active, to: .archive))
     }
 
     func discardActive(_ note: Note) {
@@ -214,7 +311,7 @@ final class NoteStore {
         }
         markdownPathIndex.removeValue(forKey: note.id)
         knownIds.remove(note.id)
-        notifyChange()
+        notifyChange(.removed(note.id))
     }
 
     func restore(_ note: Note) {
@@ -228,7 +325,7 @@ final class NoteStore {
             restored.collapsed = false
             write(restored, to: to)
         }
-        notifyChange()
+        notifyChange(.moved(note.id, from: .archive, to: .active))
     }
 
     /// Union of every label across active + archived notes, normalized and
@@ -245,10 +342,12 @@ final class NoteStore {
     /// sheet is a poor last line of defence for something irreversible —
     /// files stay recoverable for `trashRetention` and are swept on launch.
     func deleteForever(_ note: Note) {
+        var change = Change.removed(note.id)
         if let url = existingURL(for: note.id, in: archiveURL) {
             let destination = uniqueTrashURL(for: url)
             if moveFile(from: url, to: destination) {
                 stampDeletionDate(on: destination)
+                change = .moved(note.id, from: .archive, to: .trash)
             } else {
                 // Couldn't reach the trash — fall back to removing it, since
                 // the user asked for the note to be gone.
@@ -257,7 +356,7 @@ final class NoteStore {
         }
         markdownPathIndex.removeValue(forKey: note.id)
         knownIds.remove(note.id)
-        notifyChange()
+        notifyChange(change)
     }
 
     /// How long a deleted note stays recoverable.
@@ -276,7 +375,7 @@ final class NoteStore {
         let to = generateURL(for: note, in: archiveURL)
         guard moveFile(from: from, to: to) else { return }
         markdownPathIndex[note.id] = to
-        notifyChange()
+        notifyChange(.moved(note.id, from: .trash, to: .archive))
     }
 
     /// Moving a file preserves its modification date, so a note last edited
@@ -312,7 +411,7 @@ final class NoteStore {
             guard now.timeIntervalSince(deleted) > NoteStore.trashRetention else { continue }
             if (try? fm.removeItem(at: url)) != nil { removed += 1 }
         }
-        if removed > 0 { notifyChange() }
+        if removed > 0 { notifyChange(.reset) }
         return removed
     }
 
@@ -357,7 +456,7 @@ final class NoteStore {
         }
 
         startWatching()
-        notifyChange()
+        notifyChange(.reset)
         return true
     }
 
@@ -378,9 +477,9 @@ final class NoteStore {
         url.resolvingSymlinksInPath().standardizedFileURL.path
     }
 
-    private func notifyChange() {
+    private func notifyChange(_ change: Change) {
         invalidateCache()
-        notifyObservers()
+        notifyObservers(change)
     }
 
     private func invalidateCache() {
@@ -390,8 +489,12 @@ final class NoteStore {
         confirmedDeletedIds.removeAll()
     }
 
-    private func notifyObservers() {
-        NotificationCenter.default.post(name: NoteStore.didChange, object: self)
+    private func notifyObservers(_ change: Change) {
+        NotificationCenter.default.post(
+            name: NoteStore.didChange,
+            object: self,
+            userInfo: [NoteStore.changeKey: change]
+        )
     }
 
     /// Replace-or-append a note in a warm cache. A cold cache is left cold —
@@ -413,14 +516,20 @@ final class NoteStore {
         try? fm.createDirectory(at: trashURL, withIntermediateDirectories: true)
     }
 
+    /// What the watcher does with an event. Internal so a test can stand in for
+    /// the watcher without waiting for FSEvents.
+    func handleFileSystemEvent() {
+        resolveConflictsIfDue()
+        notifyChange(.reset)
+    }
+
     private func startWatching() {
         watcher = FileWatcher { [weak self] in
             guard let self = self else { return }
             // Conflict copies arrive as ordinary file changes. Merging only at
             // launch left the other Mac's edits invisible — and diverging
             // further — for the rest of the session.
-            self.resolveConflictsIfDue()
-            self.notifyChange()
+            self.handleFileSystemEvent()
         }
         watcher?.watch([activeURL, archiveURL, trashURL])
     }
@@ -504,15 +613,19 @@ final class NoteStore {
     @discardableResult
     func resolveConflicts() -> Int {
         var resolved = 0
+        var changedIds = Set<UUID>()
         for dir in [activeURL, archiveURL] {
             guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
                 continue
             }
             for url in files where url.pathExtension == fileExtension {
-                if resolveConflict(at: url) { resolved += 1 }
+                if let id = resolveConflict(at: url) {
+                    resolved += 1
+                    changedIds.insert(id)
+                }
             }
         }
-        if resolved > 0 { notifyChange() }
+        if resolved > 0 { notifyChange(.external(changedIds)) }
         return resolved
     }
 
@@ -562,24 +675,30 @@ final class NoteStore {
     /// Read a note's own file. Unless it holds the newest text this process
     /// wrote, the lineage ends: the file is not ours to vouch for any more.
     private func readMain(_ url: URL) -> Note? {
-        guard let note = read(url) else { return nil }
+        readMainSnapshot(url)?.note
+    }
+
+    private func readMainSnapshot(_ url: URL) -> NoteSnapshot? {
+        guard let snapshot = readSnapshot(url) else { return nil }
         let key = NoteStore.lineageKey(url)
-        if !WriteLineage.isNewest(NoteStore.contentHash(note), for: key) {
+        if !WriteLineage.isNewest(NoteStore.contentHash(snapshot.note), for: key) {
             WriteLineage.clear(key)
         }
-        return note
+        return snapshot
     }
 
     /// Merge one file's conflict versions back into it. iCloud exposes losing
     /// versions through `NSFileVersion`; ignoring them, as we used to, silently
     /// threw away whatever the other Mac wrote.
-    private func resolveConflict(at url: URL) -> Bool {
+    /// Returns the merged note's id when it rewrote the file.
+    private func resolveConflict(at url: URL) -> UUID? {
         let conflicts = conflictVersionsProvider(url)
-        guard !conflicts.isEmpty else { return false }
+        guard !conflicts.isEmpty else { return nil }
 
         // Without the current file nothing can be judged, and resolving the
         // versions now would discard the only readable copies.
-        guard let current = readMain(url) else { return false }
+        guard let snapshot = readMainSnapshot(url) else { return nil }
+        let current = snapshot.note
 
         var conflictNotes: [Note] = []
         // A version that can't be read yet (iCloud has not downloaded it) is
@@ -593,13 +712,18 @@ final class NoteStore {
             conflictNotes.append(note)
         }
 
+        // Cleared when the merged text did not reach the file: the versions
+        // may then hold the only copy of it.
+        var mergeLanded = true
         defer {
             // Mark the rest resolved — leaving them unresolved means being
             // asked about them forever.
-            for (index, version) in conflicts.enumerated() where !unreadable.contains(index) {
-                version.markResolved()
+            if mergeLanded {
+                for (index, version) in conflicts.enumerated() where !unreadable.contains(index) {
+                    version.markResolved()
+                }
+                if unreadable.isEmpty { otherVersionsRemover(url) }
             }
-            if unreadable.isEmpty { otherVersionsRemover(url) }
         }
 
         let versions = ConflictResolver.versionsToMerge(
@@ -610,7 +734,7 @@ final class NoteStore {
         )
 
         guard ConflictResolver.needsMerge(versions),
-              let merged = ConflictResolver.merge(versions, now: clock.now()) else { return false }
+              let merged = ConflictResolver.merge(versions, now: clock.now()) else { return nil }
 
         // A merge that changed nothing must not be written: the write comes
         // back through the watcher, which sweeps again — and a conflict that
@@ -618,11 +742,16 @@ final class NoteStore {
         // dropping the cache and reloading every window each time.
         if current.content == merged.content,
            current.title == merged.title, current.labels == merged.labels {
-            return false
+            return nil
         }
 
-        write(merged, to: url)
-        return true
+        // Only over the file this merge was computed from. If something wrote
+        // it since, the merge is stale and the next sweep redoes it.
+        guard case .saved = writeIfUnchanged(merged, to: url, expecting: .fingerprint(snapshot.fingerprint)) else {
+            mergeLanded = false
+            return nil
+        }
+        return merged.id
     }
 
     private func loadAll(from dir: URL) -> [Note] {
@@ -646,14 +775,26 @@ final class NoteStore {
     }
 
     private func read(_ url: URL) -> Note? {
+        readSnapshot(url)?.note
+    }
+
+    /// File reads so far. A test reads it to prove an operation touched no disk.
+    private(set) var readCount = 0
+
+    /// One read of the file, so the fingerprint is of the bytes the note was parsed from.
+    private func readSnapshot(_ url: URL) -> NoteSnapshot? {
+        readCount += 1
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let note: Note?
         switch format {
         case .json:
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? decoder.decode(Note.self, from: data)
+            note = try? decoder.decode(Note.self, from: data)
         case .markdown:
-            guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-            return parseMarkdown(raw, fallbackId: idFromFilename(url) ?? stableId(for: url))
+            note = String(data: data, encoding: .utf8).flatMap {
+                parseMarkdown($0, fallbackId: idFromFilename(url) ?? stableId(for: url))
+            }
         }
+        return note.map { NoteSnapshot(note: $0, fingerprint: Fingerprint(of: data)) }
     }
 
     /// Write a note, retrying once. Most failures here are transient — a sync
@@ -662,34 +803,43 @@ final class NoteStore {
     /// lands. A failure that survives the retry is reported, not dropped.
     @discardableResult
     private func write(_ note: Note, to url: URL) -> Bool {
+        if case .success = writeReporting(note, to: url) { return true }
+        return false
+    }
+
+    private func writeReporting(_ note: Note, to url: URL) -> Result<Fingerprint, Error> {
+        let data: Data
         do {
-            try writeOnce(note, to: url)
-            recordSuccess()
-            recordWrite(note, to: url)
-            return true
+            data = try render(note)
+        } catch {
+            recordFailure(url: url, error: error)
+            return .failure(error)
+        }
+        do {
+            try data.write(to: url, options: .atomic)
         } catch {
             try? FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
             do {
-                try writeOnce(note, to: url)
-                recordSuccess()
-                recordWrite(note, to: url)
-                return true
+                try data.write(to: url, options: .atomic)
             } catch {
                 recordFailure(url: url, error: error)
-                return false
+                return .failure(error)
             }
         }
+        recordSuccess()
+        recordWrite(note, to: url)
+        return .success(Fingerprint(of: data))
     }
 
-    private func writeOnce(_ note: Note, to url: URL) throws {
+    private func render(_ note: Note) throws -> Data {
         switch format {
         case .json:
-            try encoder.encode(note).write(to: url, options: .atomic)
+            return try encoder.encode(note)
         case .markdown:
-            try renderMarkdown(note).write(to: url, atomically: true, encoding: .utf8)
+            return Data(renderMarkdown(note).utf8)
         }
     }
 
