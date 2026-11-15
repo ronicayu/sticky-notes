@@ -131,6 +131,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     init(note: Note, store: NoteStore, onClosed: @escaping (UUID) -> Void) {
         self.note = note
+        // Every caller hands over a note as just saved or as last read, so
+        // the file watcher's echo of it is not an outside edit.
+        self.lastPersistedContent = note.content
+        self.lastPersistedTitle = note.title
         self.store = store
         self.onClosed = onClosed
         self.preCollapseHeight = CGFloat(note.height)
@@ -1371,6 +1375,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     private func applyExternalNote(_ updated: Note) {
+        // The window now shows this version, so it is what the buffer is
+        // compared against. A stale record made every later outside edit look
+        // like it landed on unsaved work and get deferred. A merged note that
+        // is not on disk yet is safe here: every caller saves right after.
+        lastPersistedContent = updated.content
+        lastPersistedTitle = updated.title
         if updated.title != note.title {
             note.title = updated.title
             titleField.stringValue = updated.title

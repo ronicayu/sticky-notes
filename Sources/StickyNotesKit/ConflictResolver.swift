@@ -12,30 +12,45 @@ enum ConflictResolver {
 
     /// Merge `versions` (the current file plus its conflict copies) into one
     /// note. Returns nil when there's nothing to merge.
+    ///
+    /// Versions are compared by line, not as one string. An older copy of the
+    /// user's own text stops being a substring of the newer one after a single
+    /// backspace, yet it still adds nothing: a version whose lines the winner
+    /// already has is dropped, and a version that holds every line of the
+    /// winner and more replaces it as the base. Only versions with lines on
+    /// both sides that the other lacks are appended.
     static func merge(_ versions: [Note], now: Date = Date()) -> Note? {
         guard let winner = versions.max(by: { $0.updatedAt < $1.updatedAt }) else { return nil }
         guard versions.count > 1 else { return winner }
 
         let winningBody = normalize(winner.content)
-        var merged = winner
-        var appended: [String] = []
-        var seen: Set<String> = [winningBody]
-
         // Oldest first, so the appended sections read chronologically.
+        var candidates: [(body: String, date: Date)] = []
+        var seen: Set<String> = [winningBody]
         for version in versions.sorted(by: { $0.updatedAt < $1.updatedAt }) {
             let body = normalize(version.content)
             guard !body.isEmpty, !seen.contains(body) else { continue }
-            // A version whose text the winner already contains added nothing.
-            if winningBody.contains(body) { continue }
             seen.insert(body)
-            appended.append("\(divider(for: version.updatedAt, now: now))\n\n\(body)")
+            candidates.append((body, version.updatedAt))
         }
 
-        guard !appended.isEmpty else { return winner }
-        merged.content = ([winner.content] + appended).joined(separator: "\n\n")
-        merged.updatedAt = now
+        var base = winner.content
+        for candidate in candidates
+        where !isCovered(candidate.body, by: base) && isSuperset(candidate.body, of: base) {
+            base = candidate.body
+        }
+
+        let appended = candidates
+            .filter { !isCovered($0.body, by: base) }
+            .map { "\(divider(for: $0.date, now: now))\n\n\($0.body)" }
+
         // Labels are additive: losing a tag in a merge is silent data loss too.
-        merged.labels = mergedLabels(versions)
+        let labels = mergedLabels(versions)
+        guard base != winner.content || !appended.isEmpty || labels != winner.labels else { return winner }
+        var merged = winner
+        merged.content = ([base] + appended).joined(separator: "\n\n")
+        merged.updatedAt = now
+        merged.labels = labels
         return merged
     }
 
@@ -52,10 +67,29 @@ enum ConflictResolver {
         let localBody = normalize(local)
         let externalBody = normalize(external)
         guard !externalBody.isEmpty, externalBody != localBody else { return local }
-        if localBody.contains(externalBody) { return local }
-        if externalBody.contains(localBody) { return external }
+        if localBody.isEmpty { return external }
+        if isCovered(externalBody, by: localBody) { return local }
+        if isSuperset(externalBody, of: localBody) { return external }
         return "\(local)\n\n\(divider(for: externalDate, now: now))\n\n\(external)"
     }
+
+    /// The notes worth merging: the current file plus its conflict versions,
+    /// minus the ones that are an earlier save of this process's own writing.
+    /// A conflict version is dropped only when the current file is this
+    /// process's newest write (`currentIsOurNewest`) and the version is
+    /// something this process wrote (`isOurs`); otherwise it may hold text
+    /// the file lacks.
+    static func versionsToMerge(
+        current: Note,
+        currentIsOurNewest: Bool,
+        conflicts: [Note],
+        isOurs: (Note) -> Bool
+    ) -> [Note] {
+        guard currentIsOurNewest else { return [current] + conflicts }
+        return [current] + conflicts.filter { !isOurs($0) }
+    }
+
+    static func normalizedBody(_ body: String) -> String { normalize(body) }
 
     /// True when these versions actually disagree about anything worth
     /// merging. Identical copies are common — iCloud produces a conflict from
@@ -79,6 +113,51 @@ enum ConflictResolver {
 
     private static func divider(for date: Date, now: Date) -> String {
         "\n---\n\n*Conflicted copy from \(dividerFormatter.string(from: date))*"
+    }
+
+    /// Non-empty lines with trailing whitespace removed.
+    private static func lines(of body: String) -> [String] {
+        body.split(whereSeparator: \.isNewline).compactMap { raw in
+            var line = Substring(raw)
+            while let last = line.last, last.isWhitespace { line.removeLast() }
+            return line.isEmpty ? nil : String(line)
+        }
+    }
+
+    /// True when `body` adds nothing to `base`: each of its lines uses up one
+    /// matching line of `base`, so a repeated line still counts. The last line
+    /// may instead use up a base line it is a prefix of, because an older save
+    /// is often cut mid-word.
+    private static func isCovered(_ body: String, by base: String) -> Bool {
+        var available: [String: Int] = [:]
+        for line in lines(of: base) { available[line, default: 0] += 1 }
+        let bodyLines = lines(of: body)
+        for (index, line) in bodyLines.enumerated() {
+            if let count = available[line], count > 0 {
+                available[line] = count - 1
+                continue
+            }
+            let isLast = index == bodyLines.count - 1
+            guard isLast,
+                  let match = available.first(where: { $0.value > 0 && $0.key.hasPrefix(line) })
+            else { return false }
+            available[match.key] = match.value - 1
+        }
+        return true
+    }
+
+    /// True when `body` can replace `base` without undoing anything the user
+    /// did: `base` has text, and its lines all appear in `body` in the same
+    /// order, repeats counted. An outside append qualifies; a deletion, a
+    /// reorder or a cleared note does not.
+    private static func isSuperset(_ body: String, of base: String) -> Bool {
+        let baseLines = lines(of: base)
+        guard !baseLines.isEmpty else { return false }
+        var next = baseLines.startIndex
+        for line in lines(of: body) where next < baseLines.endIndex && line == baseLines[next] {
+            next += 1
+        }
+        return next == baseLines.endIndex
     }
 
     private static func normalize(_ body: String) -> String {
