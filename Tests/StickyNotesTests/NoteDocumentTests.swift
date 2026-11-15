@@ -17,6 +17,7 @@ final class NoteDocumentTests: XCTestCase {
         clock = ManualClock()
         scheduler = TestScheduler(clock: clock)
         store = NoteStore(rootURL: root, clock: clock)
+        store.offMain = .inline
     }
 
     override func tearDownWithError() throws {

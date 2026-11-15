@@ -510,10 +510,10 @@ final class NoteDocument {
             switch repository.save(buffer, expecting: persistedFingerprint) {
             case let .failed(error):
                 switch error as? SaveError {
-                case .unreadableOnDisk?, .locationUnknown?: fileCannotBeRead = true
-                // A wait that the download ends: closing the window now has no
-                // reason to write a recovery copy, and the text stays unsaved.
-                case .notDownloadedYet?, nil: fileCannotBeRead = false
+                // A file that is not downloaded yet may not be for a long time (offline),
+                // so closing the window must still work: it writes a recovery copy.
+                case .unreadableOnDisk?, .locationUnknown?, .notDownloadedYet?: fileCannotBeRead = true
+                case nil: fileCannotBeRead = false
                 }
                 scheduleRetry()
                 return false

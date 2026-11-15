@@ -51,10 +51,12 @@ dataless through the store's `isDataless` seam, and every read of one that gets
 through costs 5 ms on the main thread, a stand-in: a real read waits for a download, which
 takes anything from tens of milliseconds to minutes. "Before" is the tree before the change
 with only that seam and its stall added, so the reads go ahead and stall; "after" is the
-tree with the change, where the seam makes the store skip the read. The 663 ms is therefore
-mostly the stall times the 40 dataless reads per save (200 ms) and the reads and parses
-that surround them; with a real download in place of 5 ms, each of the 40 reads would be
-a freeze of its own. The save writes through the real file system, so the watcher reports
+tree with the change, where the seam makes the store skip the read. Of the 663 ms, 200 ms is
+the stall (40 dataless reads of 5 ms); the rest is the reads and parses of the other 360
+files and the redraws they set off. With a real download in place of 5 ms, each of the 40
+reads would be a freeze of its own. The "before" figures were taken on `f4caf9e` with a
+temporary seam added (the same `isDataless` and `willReadFile` the benchmark uses, the
+stall in the hook), so they cannot be reproduced from the repository as it now stands. The save writes through the real file system, so the watcher reports
 the write (before) or, flagged as our own, does not (after), and the desk and the 40 windows
 react as in the app: before, every window reads its file and the desk lists and reads all
 200; after, the one read is the compare-and-swap read inside the save. The benchmark

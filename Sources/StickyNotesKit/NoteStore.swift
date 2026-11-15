@@ -1883,11 +1883,25 @@ final class NoteStore {
         let generation = storageGeneration
         // A sweep of everything; the watcher's own, a moment later, would only repeat it.
         if named == nil { lastConflictSweep = clock.now() }
+        // iCloud touches a file after each write, so a file that is already being
+        // asked about is not queued again behind a daemon that may be slow.
+        var named = named
+        var keys: [String] = []
+        if let asked = named {
+            let fresh = asked.filter { conflictChecksPending.insert(fileKey($0)).inserted }
+            keys = fresh.map(fileKey)
+            named = fresh
+            if fresh.isEmpty {
+                completion?(0)
+                return
+            }
+        }
         let folders = [activeURL, archiveURL]
         let provider = UncheckedSendable(conflictVersionsProvider)
         let isDataless = UncheckedSendable(dataless.isDataless)
         let readData = UncheckedSendable(dataless.readData)
         let merge = UncheckedSendable { [weak self] (found: [(url: URL, versions: [PrefetchedVersion])]) in
+            self?.conflictChecksPending.subtract(keys)
             guard let self, self.storageGeneration == generation else { completion?(0); return }
             var prefetched: [URL: [PrefetchedVersion]] = [:]
             for entry in found {
@@ -1919,6 +1933,9 @@ final class NoteStore {
             return UncheckedSendable(found)
         }, then: { merge.value($0.value) })
     }
+
+    /// Files whose conflict versions are being asked for now.
+    private var conflictChecksPending = Set<String>()
 
     /// Where questions for iCloud's daemons are asked; see `OffMain`.
     var offMain: OffMain = .background
@@ -2070,10 +2087,13 @@ final class NoteStore {
             // Mark the rest resolved — leaving them unresolved means being
             // asked about them forever.
             if mergeLanded {
-                for (index, version) in conflicts.enumerated() where !unreadable.contains(index) {
-                    version.markResolved()
-                }
-                if unreadable.isEmpty { otherVersionsRemover(url) }
+                // Both go to iCloud's daemons, which may be slow to answer.
+                let resolved = conflicts.enumerated().filter { !unreadable.contains($0.offset) }.map(\.element)
+                let removeOthers = unreadable.isEmpty ? otherVersionsRemover : nil
+                offMain.ask({
+                    for version in resolved { version.markResolved() }
+                    removeOthers?(url)
+                }, then: {})
             }
         }
 

@@ -248,7 +248,7 @@ private final class OnlyReader: @unchecked Sendable { var value: String? }
 
         XCTAssertTrue(document.hasUnsavedEdits, "text counted as saved that is on no disk")
         XCTAssertEqual(document.buffer.content, "base and typed words")
-        XCTAssertFalse(document.fileCannotBeRead, "a wait for a download is no reason to write a recovery copy")
+        XCTAssertTrue(document.fileCannotBeRead, "a close must still be able to keep the text in a recovery file")
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8).contains("typed words"), false)
 
         markDownloaded(url)
@@ -279,6 +279,63 @@ private final class OnlyReader: @unchecked Sendable { var value: String? }
     }
 
     // MARK: - The window stays open
+
+    private func makeDesk(_ settings: IsolatedSettings) -> DeskController {
+        DeskController(
+            store: store, settings: settings.settings, clock: clock, undo: UndoCenter(clock: clock),
+            recovery: RecoveryFiles(settings: settings.settings, store: store, clock: clock), scheduler: scheduler)
+    }
+
+    /// The person closes a window whose file went dataless while they typed, and may be
+    /// offline: the close must work, with the text kept in a recovery file.
+    func testClosingAWindowWhoseFileIsNotDownloadedKeepsTheTextInARecoveryFile() throws {
+        let note = makeNote("on disk")
+        store.save(note)
+        let settings = IsolatedSettings()
+        defer { settings.tearDown() }
+        let desk = makeDesk(settings)
+        desk.presentWindow(for: note, activate: false)
+        defer { desk.windowControllers.values.forEach { $0.window?.close() } }
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        markDataless(try file(of: note))
+        controller.noteDocument.setBody("on disk plus words typed offline")
+
+        controller.closeNote()
+
+        XCTAssertNil(desk.windowControllers[note.id], "the window could not be closed while the file was not downloaded")
+        let recovery = RecoveryFiles(settings: settings.settings, store: store, clock: clock).folder
+        let kept = try FileManager.default.contentsOfDirectory(at: recovery, includingPropertiesForKeys: nil)
+        XCTAssertTrue(
+            try kept.contains { try String(contentsOf: $0, encoding: .utf8).contains("words typed offline") },
+            "the typed text is in no recovery file")
+    }
+
+    /// The other Mac trashed a note; its file there is dataless until downloaded, and
+    /// the window must close once it has (and not before).
+    func testTheWindowOfANoteTrashedElsewhereClosesOnceTheTrashFileHasDownloaded() throws {
+        let note = makeNote("trashed elsewhere")
+        store.save(note)
+        let settings = IsolatedSettings()
+        defer { settings.tearDown() }
+        let desk = makeDesk(settings)
+        desk.presentWindow(for: note, activate: false)
+        defer { desk.windowControllers.values.forEach { $0.window?.close() } }
+        let url = try file(of: note)
+        let trashed = store.trashURL.appendingPathComponent(url.lastPathComponent)
+        try FileManager.default.moveItem(at: url, to: trashed)
+        markDataless(trashed)
+        store.handleFileSystemEvent(.init(changed: [url.path, trashed.path]))
+
+        desk.reconcileOpenWindows()
+        XCTAssertNotNil(desk.windowControllers[note.id], "closed for a note that may only be waiting to download")
+        XCTAssertEqual(downloads.filter { $0 == trashed.lastPathComponent }.count, 1, "the trash file's download was not asked for")
+
+        markDownloaded(trashed)
+        store.handleFileSystemEvent(.init(metadataOnly: [trashed.path]))
+        desk.reconcileOpenWindows()
+
+        XCTAssertNil(desk.windowControllers[note.id], "the window of a trashed note stayed open after its file arrived")
+    }
 
     func testTheWindowOfADatalessNoteStaysOpenWhenTheDeskReconciles() throws {
         let note = makeNote("open on the desk")

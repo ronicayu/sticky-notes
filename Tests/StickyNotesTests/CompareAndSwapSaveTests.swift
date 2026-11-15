@@ -331,6 +331,7 @@ private final class ChangeLog: @unchecked Sendable {
 
     func testAMergeThatCannotBeWrittenLeavesTheConflictVersionsInPlace() throws {
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         let note = makeNote("current text")
         store.save(note)
         let other = try aConflictVersion(of: note, content: "only the other Mac has this")

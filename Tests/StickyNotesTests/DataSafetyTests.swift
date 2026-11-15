@@ -617,6 +617,7 @@ final class ConflictSweepTests: XCTestCase {
             .appendingPathComponent("ConflictSweep-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         store = NoteStore(rootURL: root)
+        store.offMain = .inline
     }
 
     override func tearDownWithError() throws {

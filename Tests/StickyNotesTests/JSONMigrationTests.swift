@@ -86,6 +86,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         XCTAssertEqual(store.lastMigration.migrated, 49)
         XCTAssertEqual(store.lastMigration.failures.map(\.url.lastPathComponent), [malformed.lastPathComponent])
         XCTAssertEqual(Set(store.loadActive().map(\.id)), Set(notes.map(\.id)))
@@ -115,6 +117,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         let loaded = try XCTUnwrap(store.loadActive().first)
         XCTAssertEqual(loaded.id, note.id)
         XCTAssertEqual(loaded.title, note.title)
@@ -141,6 +145,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         XCTAssertEqual(store.lastMigration.migrated, 1)
         let loaded = try XCTUnwrap(store.loadActive().first)
         XCTAssertEqual(loaded.content, "from long ago")
@@ -156,6 +162,8 @@ final class JSONMigrationTests: XCTestCase {
         try writeLegacy(active, in: "notes")
 
         let store = NoteStore(rootURL: root)
+
+        store.offMain = .inline
 
         XCTAssertEqual(store.loadActive().map(\.id), [active.id])
         XCTAssertEqual(store.loadArchived().map(\.id), [archived.id])
@@ -174,6 +182,8 @@ final class JSONMigrationTests: XCTestCase {
         try fm.setAttributes([.modificationDate: deletion], ofItemAtPath: url.path)
 
         let store = NoteStore(rootURL: root)
+
+        store.offMain = .inline
 
         XCTAssertEqual(store.loadTrashed().map(\.id), [note.id])
         XCTAssertEqual(try files(".trash", ext: "json").count, 0)
@@ -201,6 +211,7 @@ final class JSONMigrationTests: XCTestCase {
 
     func testATrashedNoteDeletedTodayIsNotPurgedEvenIfEditedLongAgo() throws {
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         let note = makeNote("old edit")
         store.save(note)
         store.archive(note)
@@ -238,6 +249,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         XCTAssertEqual(store.lastMigration.migrated, 1)
         XCTAssertFalse(fm.fileExists(atPath: json.path))
         XCTAssertEqual(try files("notes", ext: "md"), [markdown])
@@ -252,6 +265,8 @@ final class JSONMigrationTests: XCTestCase {
         let json = try writeLegacy(makeNote("shared line\nonly in json", id: id), in: "notes")
 
         let store = NoteStore(rootURL: root)
+
+        store.offMain = .inline
 
         XCTAssertTrue(store.lastMigration.failures.isEmpty)
         XCTAssertFalse(fm.fileExists(atPath: json.path))
@@ -271,6 +286,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         let merged = try XCTUnwrap(store.loadActive().first).content
         XCTAssertTrue(merged.contains("old markdown text"))
         XCTAssertTrue(merged.contains("newer json text"))
@@ -283,6 +300,8 @@ final class JSONMigrationTests: XCTestCase {
         try writeLegacy(makeNote("second copy", id: id), in: "notes", as: "\(id.uuidString) 2.json")
 
         let store = NoteStore(rootURL: root)
+
+        store.offMain = .inline
 
         XCTAssertEqual(try files("notes", ext: "md").count, 1)
         XCTAssertEqual(try files("notes", ext: "json").count, 0)
@@ -302,6 +321,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         XCTAssertEqual(try files("notes", ext: "md"), [markdown])
         XCTAssertEqual(try files("notes", ext: "json").count, 0)
         XCTAssertEqual(store.loadActive().map(\.content), ["half done"])
@@ -316,6 +337,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         XCTAssertEqual(store.lastMigration.migrated, 0)
         XCTAssertEqual(store.lastMigration.failures.count, 3)
         for name in ["notes", "archive", ".trash"] {
@@ -328,6 +351,7 @@ final class JSONMigrationTests: XCTestCase {
         let bad = try folder("notes").appendingPathComponent("bad.json")
         try Data("nope".utf8).write(to: bad)
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         XCTAssertEqual(store.lastFailure?.kind, .migration)
 
         store.save(makeNote("a later, ordinary save"))
@@ -347,6 +371,8 @@ final class JSONMigrationTests: XCTestCase {
         let json = try writeLegacy(note, in: "notes")
 
         let store = NoteStore(rootURL: root)
+
+        store.offMain = .inline
 
         XCTAssertEqual(store.lastMigration.migrated, 0)
         XCTAssertEqual(store.lastMigration.failures.count, 1)
@@ -380,6 +406,7 @@ final class JSONMigrationTests: XCTestCase {
         let note = makeNote("converted")
         try writeLegacy(note, in: "notes")
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
 
         let snapshot = try XCTUnwrap(store.snapshot(id: note.id))
         var edited = snapshot.note
@@ -395,6 +422,7 @@ final class JSONMigrationTests: XCTestCase {
         let json = try writeLegacy(note, in: "notes")
         let stale = Fingerprint(of: try Data(contentsOf: json))
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
 
         guard case let .conflict(onDisk, fresh) = store.save(note, expecting: stale) else {
             return XCTFail("a fingerprint of a file that no longer exists must not be taken for a match")
@@ -409,6 +437,7 @@ final class JSONMigrationTests: XCTestCase {
         let note = makeNote("converted here")
         try writeLegacy(note, in: "notes")
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
 
         var other = note
         other.content = "converted here\nwritten on the other Mac"
@@ -428,6 +457,7 @@ final class JSONMigrationTests: XCTestCase {
 
     func testAConflictVersionOfAJSONNoteIsMergedBeforeTheJSONIsDeleted() throws {
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         let note = makeNote("on this Mac")
         let json = try writeLegacy(note, in: "notes")
         var other = note
@@ -452,6 +482,7 @@ final class JSONMigrationTests: XCTestCase {
 
     func testAConflictVersionThatNeverDownloadsDoesNotHideTheNote() throws {
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         let note = makeNote("waiting")
         let json = try writeLegacy(note, in: "notes")
         let missing = root.appendingPathComponent("not-downloaded.json")
@@ -511,6 +542,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         XCTAssertEqual(store.loadActive().count, 1)
         XCTAssertTrue(store.loadArchived().isEmpty)
         XCTAssertTrue(store.loadTrashed().isEmpty)
@@ -529,6 +562,8 @@ final class JSONMigrationTests: XCTestCase {
 
         let store = NoteStore(rootURL: root)
 
+        store.offMain = .inline
+
         XCTAssertEqual(try XCTUnwrap(store.loadActive().first).title, "Renamed on the old Mac")
         XCTAssertEqual(try XCTUnwrap(store.loadActive().first).content, "same")
     }
@@ -541,6 +576,8 @@ final class JSONMigrationTests: XCTestCase {
         try writeLegacy(makeNote("same", title: "Older title", id: id), in: "notes")
 
         let store = NoteStore(rootURL: root)
+
+        store.offMain = .inline
 
         XCTAssertEqual(try XCTUnwrap(store.loadActive().first).title, "Newer title")
     }
@@ -564,6 +601,7 @@ final class JSONMigrationTests: XCTestCase {
     func testTwoFilesWithOneIdBecomeTwoNotesAtLaunchAndOnlyTheIdLineChanges() throws {
         let id = UUID()
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         store.save(makeNote("the original", id: id))
         let original = try XCTUnwrap(files("notes", ext: "md").first)
         let originalBytes = try Data(contentsOf: original)
@@ -617,6 +655,7 @@ final class JSONMigrationTests: XCTestCase {
     func testAReassignedIdIsOurOwnWriteForTheConflictSweep() throws {
         let id = UUID()
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         store.save(makeNote("the original", id: id))
         let original = try XCTUnwrap(files("notes", ext: "md").first)
         let copy = original.deletingLastPathComponent().appendingPathComponent("copy.md")
@@ -639,6 +678,7 @@ final class JSONMigrationTests: XCTestCase {
     func testDuplicatesThatAppearWhileTheAppRunsGetANewIdWhenTheFolderIsRead() throws {
         let id = UUID()
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         store.save(makeNote("one", id: id))
         XCTAssertEqual(store.loadActive().count, 1)
         let original = try XCTUnwrap(files("notes", ext: "md").first)
@@ -660,6 +700,7 @@ final class JSONMigrationTests: XCTestCase {
     func testTheConversionWarningSurvivesAWriteFailureAndTheNextSuccess() throws {
         try Data("nope".utf8).write(to: folder("notes").appendingPathComponent("bad.json"))
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         XCTAssertEqual(store.lastFailure?.kind, .migration)
         let notes = root.appendingPathComponent("notes")
         try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: notes.path)
@@ -677,6 +718,7 @@ final class JSONMigrationTests: XCTestCase {
 
     func testAJSONFileThatArrivesAfterLaunchIsReportedAndLeftAlone() throws {
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         XCTAssertNil(store.lastFailure)
         let posted = PostCount()
         let observer = NotificationCenter.default.addObserver(
@@ -705,6 +747,7 @@ final class JSONMigrationTests: XCTestCase {
 
     func testTheOlderVersionNoticeDoesNotReplaceAWriteFailure() throws {
         let store = NoteStore(rootURL: root)
+        store.offMain = .inline
         let notes = root.appendingPathComponent("notes")
         try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: notes.path)
         defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: notes.path) }

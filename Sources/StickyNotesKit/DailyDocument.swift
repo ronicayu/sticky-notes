@@ -15,6 +15,8 @@ final class DailyFile: NoteRepository {
     /// supplies its own, because real ones only exist inside iCloud.
     var conflictVersionsProvider: (URL) -> [NoteStore.ConflictVersionHandle] = NoteStore.systemConflictVersions(of:)
     var otherVersionsRemover: (URL) -> Void = NoteStore.systemRemoveOtherVersions(of:)
+    /// Where the calls that mark versions resolved are made; see `OffMain`.
+    var offMain: OffMain = .background
     private let clock: AppClock
     private let id = UUID()
     /// Which files are in iCloud and not on this Mac; such a file is never read.
@@ -155,21 +157,10 @@ final class DailyFile: NoteRepository {
 
     // MARK: - Conflict versions
 
-    func unresolvedConflicts() -> [NoteStore.ConflictVersionHandle] {
-        guard let url = url else { return [] }
-        return conflictVersionsProvider(url)
-    }
-
-    /// Merge the file's iCloud conflict versions (`unresolvedConflicts()`) into
-    /// it, as `NoteStore` does for a note: nothing is thrown away, except an
-    /// earlier copy of this Mac's own saves (see `ConflictResolver.versionsToMerge`).
-    /// A version that cannot be read yet is left unresolved for a later sweep.
-    /// Returns whether the file was rewritten.
-    @discardableResult
-    func resolveConflicts(_ conflicts: [NoteStore.ConflictVersionHandle]) -> Bool {
-        resolveConflictsReporting(conflicts) == .merged
-    }
-
+    /// Merge the file's iCloud conflict versions into it, as `NoteStore` does for a
+    /// note: nothing is thrown away, except an earlier copy of this Mac's own saves
+    /// (see `ConflictResolver.versionsToMerge`). A version that cannot be read yet is
+    /// left unresolved for a later sweep.
     enum MergeOutcome {
         /// Nothing to merge, or nothing that a later try would change.
         case unchanged
@@ -204,10 +195,13 @@ final class DailyFile: NoteRepository {
         var mergeLanded = true
         defer {
             if mergeLanded {
-                for (index, version) in conflicts.enumerated() where !unreadable.contains(index) {
-                    version.markResolved()
-                }
-                if unreadable.isEmpty { otherVersionsRemover(url) }
+                // Both go to iCloud's daemons, which may be slow to answer.
+                let resolved = conflicts.enumerated().filter { !unreadable.contains($0.offset) }.map(\.element)
+                let removeOthers = unreadable.isEmpty ? otherVersionsRemover : nil
+                offMain.ask({
+                    for version in resolved { version.markResolved() }
+                    removeOthers?(url)
+                }, then: {})
             }
         }
 
@@ -291,7 +285,10 @@ final class DailyDocument {
     static let conflictCheckInterval: TimeInterval = 30
 
     /// Where the questions for iCloud's daemons are asked; see `OffMain`.
-    var offMain: OffMain = .background
+    var offMain: OffMain {
+        get { file.offMain }
+        set { file.offMain = newValue }
+    }
 
     private let settings: Settings
     private let clock: AppClock

@@ -375,6 +375,26 @@ final class FileWatcherEventTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("only in the version"))
     }
 
+    func testAFileThatIsAlreadyBeingAskedAboutIsNotQueuedAgainBehindASlowDaemon() async throws {
+        let note = seed("a note")
+        let url = try file(of: note)
+        let asked = Tally()
+        store.conflictVersionsProvider = { _ in
+            asked.record()
+            Thread.sleep(forTimeInterval: 0.4)
+            return []
+        }
+        store.dataless.readData = { try Data(contentsOf: $0) }
+
+        for _ in 0..<5 { store.handleFileSystemEvent(.init(changed: [url.path])) }
+        try await Task.sleep(nanoseconds: 800_000_000)
+        XCTAssertEqual(asked.count, 1, "the same file was queued again while its question was pending")
+
+        store.handleFileSystemEvent(.init(changed: [url.path]))
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(asked.count, 2, "a later change was never asked about")
+    }
+
     func testTheWholeFolderIsSweptAtMostOnceInTheIntervalForEventsThatNameNoFile() async throws {
         _ = seed("a note")
         let asked = Tally()
