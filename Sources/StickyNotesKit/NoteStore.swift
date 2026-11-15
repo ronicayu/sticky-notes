@@ -940,8 +940,7 @@ final class NoteStore {
     private static func couldBeUnreadableFile(of entry: SwitchEntry, among names: Set<String>) -> Bool {
         guard !names.isEmpty else { return false }
         if names.contains(entry.url.lastPathComponent) { return true }
-        let suffix = String(entry.note.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
-        return names.contains { $0.hasSuffix("-\(suffix).\(fileExtension)") }
+        return names.contains { nameCarriesId($0, entry.note.id) }
     }
 
     private func placedDate(of url: URL) -> Date {
@@ -1212,11 +1211,34 @@ final class NoteStore {
         return scanForId(id, in: dir).url
     }
 
-    /// Builds a fresh URL for a new save into the given directory.
+    /// The two names a note's file is given: the creation time and the first six
+    /// hex digits of its id, and, when another note's file already has that
+    /// name, the creation time and the whole id.
+    private static func fileNames(for note: Note) -> (short: String, long: String) {
+        let stamp = filenameFormatter.string(from: note.createdAt)
+        let hex = note.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        return ("\(stamp)-\(hex.prefix(6)).\(fileExtension)", "\(stamp)-\(hex).\(fileExtension)")
+    }
+
+    /// Whether `name` is one a note with `id` could have been given.
+    private static func nameCarriesId(_ name: String, _ id: UUID) -> Bool {
+        let hex = id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        return name.hasSuffix("-\(hex.prefix(6)).\(fileExtension)") || name.hasSuffix("-\(hex).\(fileExtension)")
+    }
+
+    /// Builds a fresh URL for a new save into the given directory. A name that
+    /// another note's file already has is never reused: two notes made in the
+    /// same second can share the first six digits of their ids, and the second
+    /// would then meet the first one's file as if it were its own.
     private func generateURL(for note: Note, in dir: URL) -> URL {
-        let stamp = NoteStore.filenameFormatter.string(from: note.createdAt)
-        let suffix = String(note.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
-        return dir.appendingPathComponent("\(stamp)-\(suffix).md")
+        let names = NoteStore.fileNames(for: note)
+        for name in [names.short, names.long] {
+            let url = dir.appendingPathComponent(name)
+            if !FileManager.default.fileExists(atPath: url.path) || readSnapshot(url)?.note.id == note.id {
+                return url
+            }
+        }
+        return NoteStore.unusedURL(dir.appendingPathComponent(names.long))
     }
 
     /// What a look through one folder for a note found.
@@ -1276,8 +1298,7 @@ final class NoteStore {
     /// note was last seen, or carries the id in its name as `generateURL` writes it.
     private func couldBeFile(of id: UUID, named name: String) -> Bool {
         if pathIndex[id]?.lastPathComponent == name { return true }
-        let suffix = String(id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
-        return name.hasSuffix("-\(suffix).\(NoteStore.fileExtension)")
+        return NoteStore.nameCarriesId(name, id)
     }
 
     /// Sweeping asks the filesystem for conflict versions of every file, and
@@ -1817,7 +1838,10 @@ final class NoteStore {
             func created(_ url: URL) -> Date {
                 (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantFuture
             }
-            let original = group.first { $0.url.lastPathComponent == generateURL(for: $0.snapshot.note, in: dir).lastPathComponent }
+            let original = group.first {
+                let names = NoteStore.fileNames(for: $0.snapshot.note)
+                return [names.short, names.long].contains($0.url.lastPathComponent)
+            }
                 ?? group.min { (created($0.url), $0.url.lastPathComponent) < (created($1.url), $1.url.lastPathComponent) }!
             for copy in group where copy.url != original.url {
                 if reassignId(of: copy.url, expecting: copy.snapshot) { touched.formUnion([id]) }

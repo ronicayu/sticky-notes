@@ -385,4 +385,78 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertTrue(content.contains("teh cat"), "the older version was dropped: \(content)")
         XCTAssertTrue(content.contains("from Obsidian"), content)
     }
+
+    // MARK: - Two notes whose file names would be the same
+
+    /// Two notes made in the same second whose ids start with the same six hex
+    /// digits: the name a note's file is given from its creation time and those
+    /// digits is the same for both.
+    private func collidingNotes() -> (a: Note, b: Note) {
+        var a = makeNote(content: "alpha text")
+        var b = makeNote(content: "beta text")
+        a = Note(
+            id: UUID(uuidString: "ABCDEF01-0000-4000-8000-000000000001")!, title: "", content: a.content,
+            width: 300, height: 220, color: .yellow, createdAt: a.createdAt, updatedAt: a.updatedAt
+        )
+        b = Note(
+            id: UUID(uuidString: "ABCDEF02-0000-4000-8000-000000000002")!, title: "", content: b.content,
+            width: 300, height: 220, color: .yellow, createdAt: a.createdAt, updatedAt: a.updatedAt
+        )
+        XCTAssertEqual(
+            a.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6),
+            b.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6)
+        )
+        return (a, b)
+    }
+
+    func testTwoNotesWithTheSameFileNameGetTwoFilesAndStayTwoNotes() throws {
+        let store = makeStore()
+        let (a, b) = collidingNotes()
+
+        store.save(a)
+        store.save(b)
+
+        let files = try FileManager.default.contentsOfDirectory(at: store.activeURL, includingPropertiesForKeys: nil)
+        XCTAssertEqual(files.count, 2)
+        let loaded = Dictionary(uniqueKeysWithValues: store.loadActive().map { ($0.id, $0.content) })
+        XCTAssertEqual(loaded, [a.id: "alpha text", b.id: "beta text"])
+    }
+
+    func testCreatingANoteWhoseNameIsTakenByAnotherNoteIsNotAConflictAndMergesNothing() throws {
+        let store = makeStore()
+        let (a, b) = collidingNotes()
+        guard case .saved = store.save(a, expecting: nil) else { return XCTFail("first create did not land") }
+
+        guard case .saved = store.save(b, expecting: nil) else { return XCTFail("the second note met the first one's file") }
+
+        XCTAssertEqual(try XCTUnwrap(store.loadNote(id: a.id)).content, "alpha text")
+        XCTAssertEqual(try XCTUnwrap(store.loadNote(id: b.id)).content, "beta text")
+    }
+
+    func testANoteWithTheLongerFileNameIsStillFoundSavedArchivedAndRestored() throws {
+        let store = makeStore()
+        let (a, b) = collidingNotes()
+        store.save(a)
+        store.save(b)
+
+        var edited = b
+        edited.content = "beta edited"
+        store.save(edited)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: store.activeURL, includingPropertiesForKeys: nil).count, 2,
+                       "saving the second note again made a third file")
+        XCTAssertEqual(try XCTUnwrap(store.snapshot(id: b.id)).note.content, "beta edited")
+
+        store.archive(a)
+        store.archive(b)
+        XCTAssertEqual(Set(store.loadArchived().map(\.id)), [a.id, b.id])
+        store.restore(a)
+        store.restore(b)
+
+        let loaded = Dictionary(uniqueKeysWithValues: store.loadActive().map { ($0.id, $0.content) })
+        XCTAssertEqual(loaded, [a.id: "alpha text", b.id: "beta edited"])
+        guard case .active = store.whereIs(id: b.id) else { return XCTFail("whereIs lost the note") }
+
+        let relaunched = NoteStore(rootURL: root)
+        XCTAssertEqual(try XCTUnwrap(relaunched.snapshot(id: b.id)).note.content, "beta edited")
+    }
 }
