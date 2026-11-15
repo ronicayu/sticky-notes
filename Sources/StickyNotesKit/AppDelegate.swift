@@ -43,6 +43,7 @@ import AppKit
             store: store, settings: settings, desk: desk, capture: capture, storage: storage, undo: undo
         )
         super.init()
+        desk.menuBarIconFrame = { [weak menuBar] in menuBar?.iconFrame }
     }
 
     /// URL handling has to be registered before launch finishes, or a URL that

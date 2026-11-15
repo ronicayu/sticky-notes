@@ -16,6 +16,11 @@ import AppKit
 
     private(set) var windowControllers: [UUID: NoteWindowController] = [:]
     private(set) var notesHidden = false
+    /// Where the menu-bar icon is on screen, when it has one. An archived note
+    /// fades toward it.
+    var menuBarIconFrame: (() -> NSRect?)?
+    /// How long a motion of the given length lasts; Reduce Motion makes it 0.
+    var motionDuration: (TimeInterval) -> TimeInterval = { Appearance.animationDuration($0) }
     private var dailyNoteController: DailyNoteWindowController?
     private var notesPanelController: NotesPanelController?
     var notesPanel: NotesPanelController? { notesPanelController }
@@ -156,7 +161,9 @@ import AppKit
         cycleTarget(by: step, from: current)?.makeKeyAndOrderFront(nil)
     }
 
-    func presentWindow(for note: Note, activate: Bool = true) {
+    /// `animateIn` is for a note the person has just made: it fades in. Every
+    /// other note appears without ceremony.
+    func presentWindow(for note: Note, activate: Bool = true, animateIn: Bool = false) {
         if let existing = windowControllers[note.id] {
             existing.showWindow(nil)
             if activate {
@@ -181,6 +188,8 @@ import AppKit
         controller.onArchived = { [weak self] archived in
             self?.offerUndoForArchive(of: archived)
         }
+        controller.motionDuration = { [weak self] length in self?.motionDuration(length) ?? 0 }
+        controller.archiveDestination = { [weak self] in self?.menuBarIconFrame?() }
         controller.onTextKept = { [weak self] place in
             switch place {
             case .recoveredCopy: self?.undo.tellRecoveredCopy(in: "Trash")
@@ -211,6 +220,7 @@ import AppKit
             controller.window?.orderFront(nil)
             controller.refreshAlpha()
         }
+        if animateIn { controller.animateIn() }
     }
 
     private func offerUndoForArchive(of archived: Note) {
@@ -292,7 +302,7 @@ import AppKit
         if !isBlank {
             if case .failed = store.save(note) { written = false }
         }
-        presentWindow(for: note)
+        presentWindow(for: note, animateIn: true)
         // A capture that could not be written is held by the window alone. Arm a
         // save, so a quit flush tries again and, failing that, makes a recovery file.
         if !written { windowControllers[note.id]?.requestSave() }

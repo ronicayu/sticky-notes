@@ -11,6 +11,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     private let layoutStore: DeviceLayoutStore
     private var geometry: NoteLayout
     private let clock: AppClock
+    private let scheduler: Scheduler
     private let onClosed: (UUID) -> Void
     /// Called when the user archives this note, with everything needed to put
     /// it back exactly where it was.
@@ -21,6 +22,26 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Called when the note left the active folder under typed text, and the text
     /// was written where the note went.
     var onTextKept: ((NoteDocument.KeptIn) -> Void)?
+
+    /// How long a motion of the given nominal length lasts. Reduce Motion makes
+    /// every one of them instant; a test replaces it to choose either case.
+    var motionDuration: (TimeInterval) -> TimeInterval = { Appearance.animationDuration($0) }
+
+    /// Where the menu-bar icon is, in screen coordinates, when it can be found.
+    /// An archived note fades toward it.
+    var archiveDestination: (() -> NSRect?)?
+
+    /// The two motions of a note's life: it fades in when it is made, and fades
+    /// out when it is archived.
+    static let appearDuration: TimeInterval = 0.12
+    static let archiveFadeDuration: TimeInterval = 0.12
+    static let appearScale: CGFloat = 0.98
+    static let appearAnimationKey = "noteAppear"
+
+    /// True from the moment an archived note starts fading until its window is
+    /// gone. The fade moves the window, which is not the person putting it
+    /// somewhere, so none of it is recorded as the note's place.
+    private(set) var isFadingOut = false
 
     /// Labels currently on this note. Read by the app delegate to decide
     /// whether the window belongs on screen under the label filter.
@@ -138,6 +159,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         self.store = store
         self.layoutStore = layoutStore
         self.clock = clock
+        self.scheduler = scheduler
         self.onClosed = onClosed
         var layout = NoteWindowController.resolveLayout(
             for: note, in: layoutStore, placing: placing ?? NoteWindowController.placeOnPointerScreen
@@ -467,6 +489,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Record where the window is now, and the size as the hint the next save
     /// of the note writes. The note file is not touched.
     private func recordFrame(_ frame: NSRect, resized: Bool) {
+        guard !isFadingOut else { return }
         geometry.x = Double(frame.origin.x)
         geometry.y = Double(frame.origin.y)
         if resized {
@@ -545,6 +568,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// hovered) — like TickTick. Hidden the rest of the time so the unfocused
     /// note is just paper + content.
     private func updateChromeVisibility(animated: Bool = true) {
+        guard !isFadingOut else { return }
         let isKey = window?.isKeyWindow ?? false
         let shouldShow = !geometry.collapsed && (isKey || isHovering)
         let target: CGFloat = shouldShow ? 1.0 : 0
@@ -601,8 +625,65 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         case let .closed(archived):
             if let archived = archived { onArchived?(archived) }
         }
-        window?.close()
-        onClosed(note.id)
+        // The note is saved and gone from the desk's books by now; only the
+        // picture of it is still on screen for the length of the fade.
+        let id = note.id
+        closeWindow(fading: reason == .archive)
+        onClosed(id)
+    }
+
+    /// Close the window. An archived note that is on screen fades toward the
+    /// menu-bar icon first, unless the person asked for less motion.
+    private func closeWindow(fading: Bool) {
+        guard let window = window else { return }
+        let duration = fading && window.isVisible
+            ? motionDuration(NoteWindowController.archiveFadeDuration) : 0
+        guard duration > 0 else {
+            window.close()
+            return
+        }
+        isFadingOut = true
+        window.ignoresMouseEvents = true
+        var target = window.frame
+        if let icon = archiveDestination?() {
+            target.origin.x += (icon.midX - target.midX) * 0.2
+            target.origin.y += (icon.midY - target.midY) * 0.2
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            window.animator().alphaValue = 0
+            window.animator().setFrame(target, display: true)
+        }
+        _ = scheduler.schedule(after: duration) { [self] in
+            self.window?.close()
+        }
+    }
+
+    /// A new note comes in: it fades up from 98 % of its size, growing from its
+    /// top-left corner, the corner the cascade of new notes is anchored to.
+    func animateIn() {
+        let duration = motionDuration(NoteWindowController.appearDuration)
+        guard duration > 0, let layer = backgroundView.layer else { return }
+        window?.contentView?.layoutSubtreeIfNeeded()
+        let size = layer.bounds.size
+        let scale = NoteWindowController.appearScale
+        let anchor = CGPoint(x: layer.anchorPoint.x * size.width, y: layer.anchorPoint.y * size.height)
+        let corner = CGPoint(x: 0, y: size.height)
+        let shift = CATransform3DMakeTranslation(
+            (corner.x - anchor.x) * (1 - scale), (corner.y - anchor.y) * (1 - scale), 0
+        )
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        let grow = CABasicAnimation(keyPath: "transform")
+        grow.fromValue = NSValue(caTransform3D: CATransform3DScale(shift, scale, scale, 1))
+        grow.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        let group = CAAnimationGroup()
+        group.animations = [fade, grow]
+        group.duration = duration
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(group, forKey: NoteWindowController.appearAnimationKey)
     }
 
     // MARK: - NoteDragZoneDelegate
@@ -813,7 +894,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     }
 
     private func updateAlpha() {
-        guard let window = window else { return }
+        guard let window = window, !isFadingOut else { return }
         let isKey = window.isKeyWindow
         let active = !geometry.collapsed || isKey || isHovering
         let faded = !active && Appearance.allowsFadedNotes

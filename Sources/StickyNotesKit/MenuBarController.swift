@@ -52,6 +52,9 @@ import KeyboardShortcuts
         }
     }
 
+    /// The icon's place on screen, for a note that fades toward it.
+    var iconFrame: NSRect? { statusItem?.button?.window?.frame }
+
     /// The status-bar menu, once `install()` has built it.
     var statusMenu: NSMenu? { statusItem?.menu }
 
