@@ -3,6 +3,7 @@ import AppKit
 final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSLayoutManagerDelegate, NoteDragZoneDelegate, TodoTextViewDelegate {
     private var note: Note
     private let store: NoteStore
+    private let clock: AppClock
     private let onClosed: (UUID) -> Void
     /// Called when the user archives this note, with everything needed to put
     /// it back exactly where it was.
@@ -129,8 +130,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private static let activeAlpha: CGFloat = 1.0
     private static var chromeColor: NSColor { Appearance.chromeInk }
 
-    init(note: Note, store: NoteStore, onClosed: @escaping (UUID) -> Void) {
+    init(note: Note, store: NoteStore, clock: AppClock = SystemClock(), onClosed: @escaping (UUID) -> Void) {
         self.note = note
+        self.clock = clock
         // Every caller hands over a note as just saved or as last read, so
         // the file watcher's echo of it is not an outside edit.
         self.lastPersistedContent = note.content
@@ -1028,7 +1030,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     private func showSlashMenu(at slashLocation: Int) {
-        let now = Date()
+        let now = clock.now()
         let date = NoteWindowController.slashDateFormatter.string(from: now)
         let time = NoteWindowController.slashTimeFormatter.string(from: now)
         let dateTime = "\(date) \(time)"
@@ -1107,7 +1109,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     private func showTitleSlashMenu(at slashLocation: Int) {
-        let now = Date()
+        let now = clock.now()
         let date = NoteWindowController.slashDateFormatter.string(from: now)
         let time = NoteWindowController.slashTimeFormatter.string(from: now)
         let dateTime = "\(date) \(time)"
@@ -1167,7 +1169,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     private func updateDateLabel() {
-        dateLabel.stringValue = relativeDateString(for: Date())
+        dateLabel.stringValue = relativeDateString(for: clock.now())
     }
 
     private func relativeDateString(for date: Date) -> String {
@@ -1355,7 +1357,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         var local = note
         local.content = textView.string
         local.title = titleField.stringValue
-        local.updatedAt = Date()
+        local.updatedAt = clock.now()
 
         // The title is edited in its own field, and `needsMerge` only weighs
         // bodies and labels — so a title-only difference used to fall through
@@ -1363,7 +1365,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         let localTitleWins = local.title != external.title && titleField.currentEditor() != nil
 
         guard ConflictResolver.needsMerge([local, external]),
-              var merged = ConflictResolver.merge([local, external])
+              var merged = ConflictResolver.merge([local, external], now: clock.now())
         else {
             if localTitleWins { return }
             applyExternalNote(external)
@@ -1642,7 +1644,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// record there is no way to tell that echo apart from someone else
     /// editing the file.
     private func persist() {
-        note.updatedAt = Date()
+        note.updatedAt = clock.now()
         lastPersistedContent = note.content
         lastPersistedTitle = note.title
         store.save(note)

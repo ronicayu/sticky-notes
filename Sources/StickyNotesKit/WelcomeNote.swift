@@ -16,7 +16,7 @@ enum WelcomeNote {
     /// store is empty. Returns it, or nil when nothing should be created.
     static func makeIfNeeded(
         store: NoteStore,
-        defaults: UserDefaults = .standard,
+        defaults: UserDefaults,
         now: Date = Date()
     ) -> Note? {
         guard !defaults.bool(forKey: shownKey) else { return nil }

@@ -194,16 +194,15 @@ final class NotesPanelTests: XCTestCase {
 }
 
 final class LabelVisibilityTests: XCTestCase {
-    /// Settings.shared is a singleton over UserDefaults.standard, so put the
-    /// developer's real preference back when we're done with it.
-    private var savedHiddenLabels: Set<String> = []
+    private var isolated: IsolatedSettings!
+    private var settings: Settings { isolated.settings }
 
-    override func setUpWithError() throws {
-        savedHiddenLabels = Settings.shared.hiddenLabels
+    override func setUp() {
+        isolated = IsolatedSettings()
     }
 
-    override func tearDownWithError() throws {
-        Settings.shared.hiddenLabels = savedHiddenLabels
+    override func tearDown() {
+        isolated.tearDown()
     }
 
     private func note(labels: [String]) -> Note {
@@ -216,35 +215,35 @@ final class LabelVisibilityTests: XCTestCase {
     }
 
     func testNoHiddenLabelsMeansEverythingIsVisible() {
-        Settings.shared.hiddenLabels = []
-        XCTAssertFalse(Settings.shared.isHiddenByLabel(note(labels: ["work"])))
-        XCTAssertFalse(Settings.shared.isHiddenByLabel(note(labels: [])))
+        settings.hiddenLabels = []
+        XCTAssertFalse(settings.isHiddenByLabel(note(labels: ["work"])))
+        XCTAssertFalse(settings.isHiddenByLabel(note(labels: [])))
     }
 
     func testHidingALabelHidesNotesCarryingIt() {
-        Settings.shared.hiddenLabels = ["work"]
-        XCTAssertTrue(Settings.shared.isHiddenByLabel(note(labels: ["work"])))
-        XCTAssertFalse(Settings.shared.isHiddenByLabel(note(labels: ["home"])))
+        settings.hiddenLabels = ["work"]
+        XCTAssertTrue(settings.isHiddenByLabel(note(labels: ["work"])))
+        XCTAssertFalse(settings.isHiddenByLabel(note(labels: ["home"])))
     }
 
     func testUnlabeledNotesAreNeverHiddenByALabelFilter() {
-        Settings.shared.hiddenLabels = ["work"]
-        XCTAssertFalse(Settings.shared.isHiddenByLabel(note(labels: [])),
+        settings.hiddenLabels = ["work"]
+        XCTAssertFalse(settings.isHiddenByLabel(note(labels: [])),
                        "hiding #work should not sweep away untagged notes")
     }
 
     /// A note tagged both #work and #home disappears when either is hidden —
     /// the intent to put something away is the narrower one.
     func testANoteWithAnyHiddenLabelIsHidden() {
-        Settings.shared.hiddenLabels = ["work"]
-        XCTAssertTrue(Settings.shared.isHiddenByLabel(note(labels: ["work", "home"])))
+        settings.hiddenLabels = ["work"]
+        XCTAssertTrue(settings.isHiddenByLabel(note(labels: ["work", "home"])))
     }
 
     func testHiddenLabelsPersistAndRoundTrip() {
-        Settings.shared.hiddenLabels = ["work", "someday"]
-        XCTAssertEqual(Settings.shared.hiddenLabels, ["work", "someday"])
+        settings.hiddenLabels = ["work", "someday"]
+        XCTAssertEqual(settings.hiddenLabels, ["work", "someday"])
 
-        Settings.shared.hiddenLabels = []
-        XCTAssertTrue(Settings.shared.hiddenLabels.isEmpty)
+        settings.hiddenLabels = []
+        XCTAssertTrue(settings.hiddenLabels.isEmpty)
     }
 }

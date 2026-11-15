@@ -2,10 +2,31 @@ import AppKit
 import KeyboardShortcuts
 
 public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SettingsCoordinator {
-    public override init() { super.init() }
+    /// The production wiring: the user's real storage, preferences and clock.
+    /// Everything else about the app is built from the three injected pieces,
+    /// so a test constructs it with a temp store, a throwaway `UserDefaults`
+    /// suite and a fixed clock.
+    public convenience override init() {
+        let settings = Settings(defaults: .standard)
+        self.init(
+            store: NoteStore(rootURL: settings.preferredStorageRoot, format: settings.preferredFormat),
+            settings: settings,
+            clock: SystemClock()
+        )
+    }
+
+    init(store: NoteStore, settings: Settings, clock: AppClock) {
+        self.noteStore = store
+        self.settings = settings
+        self.clock = clock
+        super.init()
+        MarkdownStyler.baseFontSize = settings.bodyFontSize
+    }
 
     private var statusItem: NSStatusItem!
-    private let noteStore = NoteStore()
+    private let noteStore: NoteStore
+    private let settings: Settings
+    private let clock: AppClock
     private var windowControllers: [UUID: NoteWindowController] = [:]
     private var notesPanelController: NotesPanelController?
     private var notesHidden = false
@@ -82,18 +103,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         restoreDailyNoteIfNeeded()
 
         // A first launch showing an empty screen looks like a failed one.
-        if let welcome = WelcomeNote.makeIfNeeded(store: noteStore) {
+        if let welcome = WelcomeNote.makeIfNeeded(store: noteStore, defaults: settings.defaults, now: clock.now()) {
             presentWindow(for: welcome)
         }
     }
 
     private func restoreDailyNoteIfNeeded() {
-        guard Settings.shared.obsidianVaultPath != nil,
-              Settings.shared.dailyNotesPattern != nil else { return }
-        let state = DailyNote.loadState()
+        guard settings.obsidianVaultPath != nil,
+              settings.dailyNotesPattern != nil else { return }
+        let state = DailyNote.loadState(settings: settings)
         guard state.visible else { return }
         if dailyNoteController == nil {
-            dailyNoteController = DailyNoteWindowController()
+            dailyNoteController = DailyNoteWindowController(settings: settings, store: noteStore, clock: clock)
         }
         // Reopening what was already on screen isn't a fresh request for
         // today's note, so it doesn't create the file — every Mac does this
@@ -101,8 +122,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         dailyNoteController?.show(userInitiated: false)
     }
 
+    /// The note windows on screen, by note id.
+    var noteWindowControllers: [UUID: NoteWindowController] { windowControllers }
+
     deinit {
         NotificationCenter.default.removeObserver(self)
+        if let statusItem = statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+        }
     }
 
     /// Bring open windows in line with what's on disk. Triggered by
@@ -319,11 +346,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         // Rebuilt on open so newly added labels appear without a relaunch.
         showLabelsItem.submenu = makeLabelVisibilityMenu()
-        let hiddenCount = Settings.shared.hiddenLabels.count
+        let hiddenCount = settings.hiddenLabels.count
         showLabelsItem.title = hiddenCount == 0 ? "Show Labels" : "Show Labels  (\(hiddenCount) hidden)"
 
-        let canShowDaily = Settings.shared.obsidianVaultPath != nil
-            && Settings.shared.dailyNotesPattern != nil
+        let canShowDaily = settings.obsidianVaultPath != nil
+            && settings.dailyNotesPattern != nil
         dailyNoteItem.isHidden = !canShowDaily
         if canShowDaily {
             let visible = dailyNoteController?.window?.isVisible ?? false
@@ -409,7 +436,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// ordering already-visible windows to the front would make notes jump
     /// above other apps while you type.
     private func applyVisibility() {
-        let hiddenLabels = Settings.shared.hiddenLabels
+        let hiddenLabels = settings.hiddenLabels
         for controller in windowControllers.values {
             let shouldHide = notesHidden || hiddenLabels.contains(where: controller.labels.contains)
             setVisible(controller.window, !shouldHide)
@@ -417,7 +444,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         // The daily note has no labels; only "hide all" applies to it, and
         // its own state.visible flag decides whether it should come back.
-        setVisible(dailyNoteController?.window, !notesHidden && DailyNote.loadState().visible)
+        setVisible(dailyNoteController?.window, !notesHidden && DailyNote.loadState(settings: settings).visible)
     }
 
     private func setVisible(_ window: NSWindow?, _ visible: Bool) {
@@ -462,7 +489,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             return menu
         }
 
-        let hidden = Settings.shared.hiddenLabels
+        let hidden = settings.hiddenLabels
         for label in labels {
             let item = NSMenuItem(title: "#\(label)",
                                   action: #selector(toggleLabelVisibility(_:)),
@@ -486,7 +513,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     @objc private func toggleLabelVisibility(_ sender: NSMenuItem) {
         guard let label = sender.representedObject as? String else { return }
-        var hidden = Settings.shared.hiddenLabels
+        var hidden = settings.hiddenLabels
         let hiding = !hidden.contains(label)
 
         let affected = windowControllers.values.filter {
@@ -494,21 +521,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }.count
 
         if hiding { hidden.insert(label) } else { hidden.remove(label) }
-        Settings.shared.hiddenLabels = hidden
+        settings.hiddenLabels = hidden
         applyVisibility()
 
         guard hiding else { toasts.dismiss(); return }
         offerUndoForHiding(count: affected, label: label) { [weak self] in
             guard let self = self else { return }
-            var current = Settings.shared.hiddenLabels
+            var current = settings.hiddenLabels
             current.remove(label)
-            Settings.shared.hiddenLabels = current
+            settings.hiddenLabels = current
             self.applyVisibility()
         }
     }
 
     @objc private func showAllLabels() {
-        Settings.shared.hiddenLabels = []
+        settings.hiddenLabels = []
         applyVisibility()
     }
 
@@ -554,7 +581,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             toasts.dismiss()
         }
 
-        var note = Note.makeNew(frame: nextNoteFrame())
+        var note = Note.makeNew(frame: nextNoteFrame(), color: settings.defaultNoteColor, now: clock.now())
         if let title = title { note.title = title }
         if let color = color { note.color = color }
         note.content = text
@@ -677,20 +704,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     @objc func openSettings() {
         if settingsController == nil {
-            settingsController = SettingsWindowController(coordinator: self)
+            settingsController = SettingsWindowController(coordinator: self, settings: settings)
         }
         settingsController?.show()
     }
 
     @objc func toggleDailyNote() {
-        guard Settings.shared.obsidianVaultPath != nil,
-              Settings.shared.dailyNotesPattern != nil else { return }
+        guard settings.obsidianVaultPath != nil,
+              settings.dailyNotesPattern != nil else { return }
         if let controller = dailyNoteController, controller.window?.isVisible == true {
             controller.hide()
             return
         }
         if dailyNoteController == nil {
-            dailyNoteController = DailyNoteWindowController()
+            dailyNoteController = DailyNoteWindowController(settings: settings, store: noteStore, clock: clock)
         }
         dailyNoteController?.show()
     }
@@ -714,7 +741,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             focusNote(id: archived.id)
             return
         }
-        if let vault = Settings.shared.obsidianVaultPath,
+        if let vault = settings.obsidianVaultPath,
            let url = WikiLink.obsidianURL(vaultPath: vault, target: target) {
             NSWorkspace.shared.open(url)
         }
@@ -727,15 +754,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     @objc func resetTextSize() { applyTextSize(Settings.defaultBodyFontSize) }
 
     private func adjustTextSize(by delta: CGFloat) {
-        applyTextSize(Settings.shared.bodyFontSize + delta)
+        applyTextSize(settings.bodyFontSize + delta)
     }
 
     /// One size for every note — a per-note size would be a setting nobody
     /// asked for and a lot of state to keep straight.
     private func applyTextSize(_ size: CGFloat) {
         let clamped = Settings.clampFontSize(size)
-        guard clamped != Settings.shared.bodyFontSize else { return }
-        Settings.shared.bodyFontSize = clamped
+        guard clamped != settings.bodyFontSize else { return }
+        settings.bodyFontSize = clamped
+        MarkdownStyler.baseFontSize = clamped
         for controller in windowControllers.values {
             controller.applyAppearanceColors()
         }
@@ -831,30 +859,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     // MARK: - SettingsCoordinator
 
     func applyStorageMode(_ mode: SettingsWindowController.StorageMode) {
-        let previousVault = Settings.shared.obsidianVaultPath
+        let previousVault = settings.obsidianVaultPath
 
         let newRoot: URL
         let format: StorageFormat
         switch mode {
         case .local:
-            Settings.shared.obsidianVaultPath = nil
-            Settings.shared.useICloud = false
-            newRoot = Settings.localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
+            settings.obsidianVaultPath = nil
+            settings.useICloud = false
+            newRoot = settings.localStorageRoot
             format = .json
         case .iCloud:
-            Settings.shared.obsidianVaultPath = nil
-            guard Settings.iCloudAvailable, let icloud = Settings.iCloudRootURL else {
+            settings.obsidianVaultPath = nil
+            guard settings.iCloudAvailable, let icloud = settings.iCloudRootURL else {
                 // Caller's UI should disable this, but stay safe.
-                Settings.shared.useICloud = false
-                newRoot = Settings.localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
+                settings.useICloud = false
+                newRoot = settings.localStorageRoot
                 format = .json
                 break
             }
-            Settings.shared.useICloud = true
+            settings.useICloud = true
             newRoot = icloud.appendingPathComponent("StickyNotes", isDirectory: true)
             format = .json
         case .vault(let path):
-            Settings.shared.obsidianVaultPath = path
+            settings.obsidianVaultPath = path
             newRoot = URL(fileURLWithPath: path, isDirectory: true)
                 .appendingPathComponent("StickyNotes", isDirectory: true)
             format = .markdown
@@ -865,7 +893,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         // Daily note feature requires a vault — tear down its window when
         // we leave vault mode.
-        let nowVault = Settings.shared.obsidianVaultPath != nil
+        let nowVault = settings.obsidianVaultPath != nil
         if previousVault != nil && !nowVault {
             dailyNoteController?.window?.orderOut(nil)
             dailyNoteController = nil
@@ -882,7 +910,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     func applyDailyPattern(_ pattern: String?) {
-        Settings.shared.dailyNotesPattern = pattern
+        settings.dailyNotesPattern = pattern
         if pattern == nil {
             dailyNoteController?.window?.orderOut(nil)
             dailyNoteController = nil
@@ -892,7 +920,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     func applyDailyTemplate(_ path: String?) {
-        Settings.shared.dailyTemplatePath = path
+        settings.dailyTemplatePath = path
         dailyNoteController?.templateDidChange()
     }
 
@@ -906,7 +934,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // Make sure it ends up visible regardless.
         if dailyNoteController?.window?.isVisible != true {
             if dailyNoteController == nil {
-                dailyNoteController = DailyNoteWindowController()
+                dailyNoteController = DailyNoteWindowController(settings: settings, store: noteStore, clock: clock)
             }
             dailyNoteController?.show()
         }
@@ -922,7 +950,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             }
             return
         }
-        let controller = NoteWindowController(note: note, store: noteStore) { [weak self] id in
+        let controller = NoteWindowController(note: note, store: noteStore, clock: clock) { [weak self] id in
             guard let self = self else { return }
             self.windowControllers.removeValue(forKey: id)
             // An emptied desk should start the cascade from the top again.

@@ -11,9 +11,7 @@ import XCTest
 /// lived: text that never reached disk, and text that reached disk twice.
 ///
 /// Not covered here, and worth knowing: anything that needs a key window or a
-/// live field editor (the in-progress-title rule), and `AppDelegate` itself,
-/// which builds a `NoteStore()` against the user's real storage and so must
-/// never be instantiated by a test.
+/// live field editor (the in-progress-title rule).
 final class NoteWindowEndToEndTests: XCTestCase {
     private var root: URL!
     private var store: NoteStore!

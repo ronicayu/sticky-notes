@@ -166,8 +166,11 @@ struct Note: Codable, Identifiable {
     /// to invent a 1440x900 screen and pick a random spot inside it, which put
     /// notes off screen on other displays and made each new note a scavenger
     /// hunt. See `NotePlacement`.
-    static func makeNew(frame: CGRect) -> Note {
-        let now = Date()
+    static func makeNew(
+        frame: CGRect,
+        color: NoteColor = .yellow,
+        now: Date = Date()
+    ) -> Note {
         return Note(
             id: UUID(),
             title: "",
@@ -177,7 +180,7 @@ struct Note: Codable, Identifiable {
             width: Double(frame.size.width),
             height: Double(frame.size.height),
             collapsed: false,
-            color: Settings.shared.defaultNoteColor,
+            color: color,
             labels: [],
             floatLevel: .floating,
             createdAt: now,

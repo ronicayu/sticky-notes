@@ -131,9 +131,14 @@ final class NoteStore {
         return f
     }()
 
-    init(rootURL: URL = Settings.preferredStorageRoot, format: StorageFormat = Settings.preferredFormat) {
+    private let clock: AppClock
+
+    /// No default root: a store that quietly opens the user's real storage is
+    /// how a test ends up writing to it. Production gets its root from `Settings`.
+    init(rootURL: URL, format: StorageFormat, clock: AppClock = SystemClock()) {
         self.rootURL = rootURL
         self.format = format
+        self.clock = clock
         encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -279,7 +284,7 @@ final class NoteStore {
     /// run from the deletion, so record that as the file's modification date.
     private func stampDeletionDate(on url: URL) {
         try? FileManager.default.setAttributes(
-            [.modificationDate: Date()],
+            [.modificationDate: clock.now()],
             ofItemAtPath: url.path
         )
     }
@@ -287,7 +292,8 @@ final class NoteStore {
     /// Delete trashed files older than `trashRetention`. Called at launch;
     /// deliberately conservative, since the whole point is not losing things.
     @discardableResult
-    func purgeExpiredTrash(now: Date = Date()) -> Int {
+    func purgeExpiredTrash(now explicitNow: Date? = nil) -> Int {
+        let now = explicitNow ?? clock.now()
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.addedToDirectoryDateKey, .contentModificationDateKey]
         guard let files = try? fm.contentsOfDirectory(
@@ -485,7 +491,8 @@ final class NoteStore {
     private static let conflictSweepInterval: TimeInterval = 5
     private var lastConflictSweep = Date.distantPast
 
-    private func resolveConflictsIfDue(now: Date = Date()) {
+    private func resolveConflictsIfDue() {
+        let now = clock.now()
         guard now.timeIntervalSince(lastConflictSweep) > NoteStore.conflictSweepInterval else { return }
         lastConflictSweep = now
         resolveConflicts()
@@ -603,7 +610,7 @@ final class NoteStore {
         )
 
         guard ConflictResolver.needsMerge(versions),
-              let merged = ConflictResolver.merge(versions) else { return false }
+              let merged = ConflictResolver.merge(versions, now: clock.now()) else { return false }
 
         // A merge that changed nothing must not be written: the write comes
         // back through the watcher, which sweeps again — and a conflict that
@@ -703,7 +710,7 @@ final class NoteStore {
     // MARK: - Health
 
     private func recordFailure(url: URL, error: Error) {
-        lastFailure = StorageFailure(url: url, error: error, date: Date())
+        lastFailure = StorageFailure(url: url, error: error, date: clock.now())
         NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
     }
 
@@ -747,7 +754,7 @@ final class NoteStore {
         let height = Double(doc.value(for: "height") ?? "") ?? 200
         let collapsed = (doc.value(for: "collapsed") ?? "false") == "true"
         let floatLevel = doc.value(for: "float").flatMap(NoteFloatLevel.init(rawValue:)) ?? .floating
-        let createdAt = doc.value(for: "created").flatMap(iso8601.date(from:)) ?? Date()
+        let createdAt = doc.value(for: "created").flatMap(iso8601.date(from:)) ?? clock.now()
         let updatedAt = doc.value(for: "updated").flatMap(iso8601.date(from:)) ?? createdAt
         return Note(
             id: id,

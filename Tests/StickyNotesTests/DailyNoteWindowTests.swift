@@ -12,48 +12,49 @@ import XCTest
 /// fires at the same wall-clock second on every machine, so both wrote the
 /// same new path and iCloud kept both, renaming one `<name> 2.md`.
 ///
-/// Two things to know before adding tests here. `Settings.shared` is
-/// `UserDefaults.standard`, so the keys these touch are saved and put back in
-/// `tearDown`. And the window is never shown, moved, or resized: those are
-/// what write `_daily.json`, which lives in the *real* Application Support
-/// folder rather than the temp vault.
+/// Settings, the note store and the clock are injected, so nothing here
+/// touches the real preferences, Application Support or the wall clock; the
+/// window-state file (`_daily.json`) lands in a temp folder too.
 final class DailyNoteWindowTests: XCTestCase {
     private var vault: URL!
-    private var savedVault: String?
-    private var savedPattern: String?
-    private var savedTemplate: String?
+    private var isolated: IsolatedSettings!
+    private var store: NoteStore!
+    private var clock: ManualClock!
+    private var settings: Settings { isolated.settings }
 
     private let pattern = "Daily/{YYYY}-{MM}-{DD}.md"
 
     override func setUpWithError() throws {
-        savedVault = Settings.shared.obsidianVaultPath
-        savedPattern = Settings.shared.dailyNotesPattern
-        savedTemplate = Settings.shared.dailyTemplatePath
+        isolated = IsolatedSettings()
+        clock = ManualClock()
 
         vault = FileManager.default.temporaryDirectory
             .appendingPathComponent("DailyNoteWindow-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        store = NoteStore(rootURL: vault.appendingPathComponent("StickyNotes"), format: .markdown)
 
-        Settings.shared.obsidianVaultPath = vault.path
-        Settings.shared.dailyNotesPattern = pattern
-        Settings.shared.dailyTemplatePath = nil
+        settings.obsidianVaultPath = vault.path
+        settings.dailyNotesPattern = pattern
+        settings.dailyTemplatePath = nil
     }
 
     override func tearDownWithError() throws {
-        Settings.shared.obsidianVaultPath = savedVault
-        Settings.shared.dailyNotesPattern = savedPattern
-        Settings.shared.dailyTemplatePath = savedTemplate
+        isolated.tearDown()
         try? FileManager.default.removeItem(at: vault)
     }
 
     // MARK: - Harness
 
+    private func makeController() -> DailyNoteWindowController {
+        DailyNoteWindowController(settings: settings, store: store, clock: clock)
+    }
+
     private func todaysURL() throws -> URL {
-        try XCTUnwrap(DailyNote.resolvedURL())
+        try XCTUnwrap(DailyNote.resolvedURL(for: clock.now(), settings: settings))
     }
 
     private var todayExists: Bool {
-        guard let url = DailyNote.resolvedURL() else { return false }
+        guard let url = DailyNote.resolvedURL(for: clock.now(), settings: settings) else { return false }
         return FileManager.default.fileExists(atPath: url.path)
     }
 
@@ -61,7 +62,7 @@ final class DailyNoteWindowTests: XCTestCase {
     private func configureTemplate(_ body: String) throws -> URL {
         let url = vault.appendingPathComponent("Template.md")
         try body.write(to: url, atomically: true, encoding: .utf8)
-        Settings.shared.dailyTemplatePath = url.path
+        settings.dailyTemplatePath = url.path
         return url
     }
 
@@ -82,20 +83,20 @@ final class DailyNoteWindowTests: XCTestCase {
     /// nobody is typing at, the file never appears.
     func testResolvingTodaysNoteDoesNotCreateIt() throws {
         try configureTemplate("## Today\n\n- [ ] ")
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
 
         XCTAssertEqual(controller.textView.string, "## Today\n\n- [ ] ", "the template still seeds the buffer")
         XCTAssertFalse(todayExists, "the template must not reach disk before the user types")
     }
 
     func testResolvingTodaysNoteWithNoTemplateCreatesNothingEither() throws {
-        _ = DailyNoteWindowController()
+        _ = makeController()
         XCTAssertFalse(todayExists)
     }
 
     func testTheFirstKeystrokeCreatesTodaysFile() throws {
         try configureTemplate("## Today\n\n")
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
         type("## Today\n\nbought milk", into: controller)
 
         XCTAssertTrue(todayExists)
@@ -112,7 +113,7 @@ final class DailyNoteWindowTests: XCTestCase {
     /// at the same second on both Macs.
     func testFlushingAnUntouchedTemplateWritesNothing() throws {
         try configureTemplate("## Today\n\n- [ ] ")
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
 
         // `patternDidChange` runs the same unconditional `saveNow()` the
         // rollover does, without needing to fake a clock.
@@ -131,7 +132,7 @@ final class DailyNoteWindowTests: XCTestCase {
         )
         try "written on the other Mac".write(to: url, atomically: true, encoding: .utf8)
 
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
 
         XCTAssertEqual(controller.textView.string, "written on the other Mac")
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "written on the other Mac")
@@ -147,7 +148,7 @@ final class DailyNoteWindowTests: XCTestCase {
         )
         try "".write(to: url, atomically: true, encoding: .utf8)
 
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
         try configureTemplate("## Today\n\n")
         controller.templateDidChange()
 
@@ -155,7 +156,7 @@ final class DailyNoteWindowTests: XCTestCase {
     }
 
     func testChangingTheTemplateDoesNotCreateAMissingFile() throws {
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
         try configureTemplate("## Today\n\n")
         controller.templateDidChange()
 
@@ -168,11 +169,10 @@ final class DailyNoteWindowTests: XCTestCase {
     /// The counterpart: asking for today's note *is* a reason to create it,
     /// so it lands in Obsidian whether or not anything gets typed. `show()`
     /// calls this for the menu bar and the hotkey; the test drives the file
-    /// half directly, because showing a real window would also write the
-    /// window-state file in the real Application Support folder.
+    /// half directly, because showing a real window needs a screen.
     func testOpeningTodaysNoteOnPurposeCreatesItFromTheTemplate() throws {
         try configureTemplate("## Today\n\n- [ ] ")
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
         XCTAssertFalse(todayExists, "not until asked")
 
         controller.createTodaysFileIfMissing()
@@ -182,7 +182,7 @@ final class DailyNoteWindowTests: XCTestCase {
     }
 
     func testOpeningTodaysNoteWithNoTemplateCreatesAnEmptyOne() throws {
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
         controller.createTodaysFileIfMissing()
 
         XCTAssertTrue(todayExists)
@@ -197,7 +197,7 @@ final class DailyNoteWindowTests: XCTestCase {
         )
         try "written on the other Mac".write(to: url, atomically: true, encoding: .utf8)
 
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
         controller.createTodaysFileIfMissing()
 
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "written on the other Mac")
@@ -213,7 +213,7 @@ final class DailyNoteWindowTests: XCTestCase {
         let stub = folder.appendingPathComponent(".\(url.lastPathComponent).icloud")
         try Data().write(to: stub)
 
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
         controller.createTodaysFileIfMissing()
 
         XCTAssertFalse(todayExists, "never write over a note that is only undownloaded")
@@ -221,7 +221,7 @@ final class DailyNoteWindowTests: XCTestCase {
 
     /// Opening it a second time must not blank out what was typed in between.
     func testOpeningTodaysNoteTwiceKeepsWhatWasTyped() throws {
-        let controller = DailyNoteWindowController()
+        let controller = makeController()
         controller.createTodaysFileIfMissing()
         type("bought milk", into: controller)
 

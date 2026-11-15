@@ -31,7 +31,8 @@ extension MarkdownStyler {
 enum MarkdownStyler {
     /// Body text size. Follows the user's ⌘+ / ⌘- choice; heading sizes and
     /// the code font are derived from it so the whole note scales together.
-    static var baseFontSize: CGFloat { Settings.shared.bodyFontSize }
+    /// `AppDelegate` sets it from its `Settings` at launch and on every change.
+    static var baseFontSize: CGFloat = Settings.defaultBodyFontSize
 
     /// Spacing that keeps multi-line notes from reading as a wall of text.
     static let lineHeightMultiple: CGFloat = 1.14

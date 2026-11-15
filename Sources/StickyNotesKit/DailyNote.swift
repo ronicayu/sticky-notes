@@ -106,9 +106,9 @@ enum DailyNote {
 
     /// Absolute path of the daily note for `date`. Returns nil if the vault
     /// or pattern isn't configured.
-    static func resolvedURL(for date: Date = Date()) -> URL? {
-        guard let vault = Settings.shared.obsidianVaultPath,
-              let pattern = Settings.shared.dailyNotesPattern,
+    static func resolvedURL(for date: Date, settings: Settings) -> URL? {
+        guard let vault = settings.obsidianVaultPath,
+              let pattern = settings.dailyNotesPattern,
               !pattern.isEmpty else { return nil }
         let rendered = render(pattern, date: date)
         guard !rendered.isEmpty else { return nil }
@@ -120,33 +120,31 @@ enum DailyNote {
     /// Application Support rather than in the vault. Sharing one file over
     /// iCloud meant hiding the note on one Mac hid it on the other, and each
     /// machine's window position kept overwriting the other's.
-    static var stateURL: URL? {
-        Settings.localRootURL
-            .appendingPathComponent("StickyNotes", isDirectory: true)
-            .appendingPathComponent("_daily.json")
+    static func stateURL(settings: Settings) -> URL {
+        settings.localStorageRoot.appendingPathComponent("_daily.json")
     }
 
     /// Where the state used to live. Read once, to carry a user's existing
     /// window position over instead of resetting it.
-    private static var legacyStateURL: URL? {
-        guard let vault = Settings.shared.obsidianVaultPath else { return nil }
+    private static func legacyStateURL(settings: Settings) -> URL? {
+        guard let vault = settings.obsidianVaultPath else { return nil }
         return URL(fileURLWithPath: vault, isDirectory: true)
             .appendingPathComponent("StickyNotes/_daily.json")
     }
 
-    static func loadState() -> DailyNoteState {
-        if let url = stateURL,
-           let data = try? Data(contentsOf: url),
+    static func loadState(settings: Settings) -> DailyNoteState {
+        let url = stateURL(settings: settings)
+        if let data = try? Data(contentsOf: url),
            let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) {
             return state
         }
-        if let legacy = legacyStateURL,
+        if let legacy = legacyStateURL(settings: settings),
            let data = try? Data(contentsOf: legacy),
            let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) {
-            saveState(state)
+            saveState(state, settings: settings)
             // Only drop the old copy once the new one is definitely written,
             // or a failed save would lose the window's position outright.
-            if let new = stateURL, FileManager.default.fileExists(atPath: new.path) {
+            if FileManager.default.fileExists(atPath: url.path) {
                 try? FileManager.default.removeItem(at: legacy)
             }
             return state
@@ -154,8 +152,8 @@ enum DailyNote {
         return DailyNoteState.defaultState
     }
 
-    static func saveState(_ state: DailyNoteState) {
-        guard let url = stateURL else { return }
+    static func saveState(_ state: DailyNoteState, settings: Settings) {
+        let url = stateURL(settings: settings)
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -254,15 +252,15 @@ enum DailyNote {
     /// Resolve the template file. Accepts either an absolute path or a
     /// vault-relative path (with or without a `.md` suffix), matching how
     /// Obsidian itself stores `template` in `daily-notes.json`.
-    static func resolvedTemplateURL() -> URL? {
-        guard let raw = Settings.shared.dailyTemplatePath, !raw.isEmpty else { return nil }
+    static func resolvedTemplateURL(settings: Settings) -> URL? {
+        guard let raw = settings.dailyTemplatePath, !raw.isEmpty else { return nil }
         let fm = FileManager.default
 
         if raw.hasPrefix("/") {
             let direct = URL(fileURLWithPath: raw)
             if fm.fileExists(atPath: direct.path) { return direct }
         }
-        guard let vault = Settings.shared.obsidianVaultPath else { return nil }
+        guard let vault = settings.obsidianVaultPath else { return nil }
         let vaultURL = URL(fileURLWithPath: vault, isDirectory: true)
         let candidates = [raw, raw + ".md"]
         for candidate in candidates {
@@ -275,8 +273,8 @@ enum DailyNote {
     /// Load the template body for `date`, expanding the supported subset of
     /// Obsidian Daily Notes / Templates tokens. Returns nil when no template
     /// is configured or the file can't be read.
-    static func renderedTemplate(for date: Date, fileURL: URL) -> String? {
-        guard let templateURL = resolvedTemplateURL(),
+    static func renderedTemplate(for date: Date, fileURL: URL, settings: Settings) -> String? {
+        guard let templateURL = resolvedTemplateURL(settings: settings),
               let raw = try? String(contentsOf: templateURL, encoding: .utf8) else { return nil }
         return expandTokens(in: raw, for: date, fileURL: fileURL)
     }

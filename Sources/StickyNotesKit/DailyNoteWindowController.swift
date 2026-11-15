@@ -9,8 +9,9 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     /// Only used to locate the attachments folder. The daily note itself is a
     /// vault file rather than a stored note, but its pasted images belong in
     /// the same place as everyone else's.
-    private lazy var attachmentStore = NoteStore()
-
+    private let attachmentStore: NoteStore
+    private let settings: Settings
+    private let clock: AppClock
 
     private var state: DailyNoteState
     private var currentURL: URL?
@@ -51,9 +52,12 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         return f
     }()
 
-    init() {
-        self.state = DailyNote.loadState()
-        self.currentDay = Calendar.current.startOfDay(for: Date())
+    init(settings: Settings, store: NoteStore, clock: AppClock) {
+        self.settings = settings
+        self.attachmentStore = store
+        self.clock = clock
+        self.state = DailyNote.loadState(settings: settings)
+        self.currentDay = Calendar.current.startOfDay(for: clock.now())
         self.preCollapseHeight = CGFloat(state.height)
 
         let displayHeight: CGFloat = state.collapsed
@@ -268,8 +272,8 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     /// disk immediately — so Obsidian sees the same file the user is
     /// editing here, with the same template Obsidian itself would apply.
     private func loadCurrentFile() {
-        currentDay = Calendar.current.startOfDay(for: Date())
-        currentURL = DailyNote.resolvedURL(for: currentDay)
+        currentDay = Calendar.current.startOfDay(for: clock.now())
+        currentURL = DailyNote.resolvedURL(for: currentDay, settings: settings)
         dateLabel.text = "Daily Note · " + DailyNoteWindowController.dateFormatter.string(from: currentDay)
         // Before reading: a duplicate left by an earlier collision holds text
         // that belongs in the file we're about to load.
@@ -309,7 +313,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         // File doesn't exist yet. Seed the buffer from the template, but
         // leave the file itself uncreated — see `seedBuffer`.
         fileUnavailable = false
-        seedBuffer(with: DailyNote.renderedTemplate(for: currentDay, fileURL: url) ?? "", at: url)
+        seedBuffer(with: DailyNote.renderedTemplate(for: currentDay, fileURL: url, settings: settings) ?? "", at: url)
     }
 
     /// Put today's starting text in the buffer, writing it to disk only if
@@ -423,7 +427,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         let merged = ConflictResolver.mergeBodies(
             local: textView.string,
             external: external,
-            externalDate: Date()
+            externalDate: clock.now()
         )
         guard merged != textView.string else { return }
         applyExternalBody(merged)
@@ -468,16 +472,18 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private static let duplicateSweepInterval: TimeInterval = 5
     private var lastDuplicateSweep = Date.distantPast
 
-    private func healDuplicates(now: Date = Date()) {
+    private func healDuplicates() {
         guard let url = currentURL else { return }
+        let now = clock.now()
         lastDuplicateSweep = now
         DailyNote.healDuplicates(in: url.deletingLastPathComponent(), now: now)
     }
 
-    private func healDuplicatesIfDue(now: Date = Date()) {
+    private func healDuplicatesIfDue() {
+        let now = clock.now()
         guard now.timeIntervalSince(lastDuplicateSweep)
             > DailyNoteWindowController.duplicateSweepInterval else { return }
-        healDuplicates(now: now)
+        healDuplicates()
     }
 
     // MARK: - Watching
@@ -499,6 +505,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private func scheduleMidnightRollover() {
         midnightTimer?.invalidate()
         let calendar = Calendar.current
+        // A real timer fires on real time, so this stays on the wall clock.
         guard let next = calendar.nextDate(
             after: Date(),
             matching: DateComponents(hour: 0, minute: 0, second: 1),
@@ -528,7 +535,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     /// old day until something forces a re-resolve. Cheap no-op when the
     /// day is unchanged.
     private func rolloverIfNeeded() {
-        let today = Calendar.current.startOfDay(for: Date())
+        let today = Calendar.current.startOfDay(for: clock.now())
         guard today != currentDay else { return }
         handleMidnight()
     }
@@ -559,18 +566,18 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         state.positionY = Double(frame.origin.y)
         state.width = Double(frame.size.width)
         state.height = Double(frame.size.height)
-        DailyNote.saveState(state)
+        DailyNote.saveState(state, settings: settings)
     }
 
     private func persistVisibility(_ visible: Bool) {
         state.visible = visible
-        DailyNote.saveState(state)
+        DailyNote.saveState(state, settings: settings)
     }
 
     func setColor(_ color: NoteColor) {
         state.color = color
         backgroundView.layer?.backgroundColor = NSColor(hex: color.bodyHex)?.cgColor
-        DailyNote.saveState(state)
+        DailyNote.saveState(state, settings: settings)
     }
 
     /// Re-resolve the URL when the user changes the pattern at runtime.
@@ -591,7 +598,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         let isEmpty = body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard isEmpty else { return }
 
-        if let templated = DailyNote.renderedTemplate(for: currentDay, fileURL: url) {
+        if let templated = DailyNote.renderedTemplate(for: currentDay, fileURL: url, settings: settings) {
             seedBuffer(with: templated, at: url)
         }
     }
@@ -658,7 +665,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         state.collapsed = target
         dragZone.reportsSingleClick = target
         applyCollapse(target, animated: true)
-        DailyNote.saveState(state)
+        DailyNote.saveState(state, settings: settings)
     }
 
     /// Re-apply styling after the shared text size changes.
@@ -669,7 +676,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     func dragZoneDidClick() {
-        guard DailyNote.loadState().collapsed else { return }
+        guard DailyNote.loadState(settings: settings).collapsed else { return }
         dragZoneDidDoubleClick()
     }
 
@@ -737,7 +744,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
             state.positionX = Double(frame.origin.x)
             state.positionY = Double(frame.origin.y)
             state.width = Double(frame.size.width)
-            DailyNote.saveState(state)
+            DailyNote.saveState(state, settings: settings)
         } else {
             persistChrome()
         }
