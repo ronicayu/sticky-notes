@@ -26,7 +26,7 @@ final class AppDelegateLaunchTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        delegate?.noteWindowControllers.values.forEach { $0.window?.close() }
+        delegate?.desk.windowControllers.values.forEach { $0.window?.close() }
         delegate = nil
         isolated.tearDown()
         try? FileManager.default.removeItem(at: root)
@@ -58,15 +58,15 @@ final class AppDelegateLaunchTests: XCTestCase {
         let app = makeDelegate()
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
 
-        XCTAssertEqual(Set(app.noteWindowControllers.keys), [first.id, second.id])
-        XCTAssertNil(app.noteWindowControllers[archived.id], "an archived note has no window")
+        XCTAssertEqual(Set(app.desk.windowControllers.keys), [first.id, second.id])
+        XCTAssertNil(app.desk.windowControllers[archived.id], "an archived note has no window")
     }
 
     func testLaunchOnAnEmptyStoreOpensTheWelcomeNoteOnceAndRemembersItInTheInjectedDefaults() throws {
         let app = makeDelegate()
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
 
-        XCTAssertEqual(app.noteWindowControllers.count, 1)
+        XCTAssertEqual(app.desk.windowControllers.count, 1)
         XCTAssertEqual(store.loadActive().map(\.title), ["Welcome"])
         XCTAssertTrue(isolated.settings.defaults.bool(forKey: "didShowWelcomeNote"))
     }
@@ -78,13 +78,13 @@ final class AppDelegateLaunchTests: XCTestCase {
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
 
         clock.advance(by: 3_600)
-        app.newNote()
+        app.desk.newNote()
 
         let created = try XCTUnwrap(store.loadActive().first { $0.title != "Existing" })
         XCTAssertEqual(created.color, .blue)
         XCTAssertEqual(created.createdAt.timeIntervalSince1970,
                        clock.now().timeIntervalSince1970, accuracy: 1)
-        XCTAssertEqual(app.noteWindowControllers.count, 2)
+        XCTAssertEqual(app.desk.windowControllers.count, 2)
     }
 
     // MARK: - Quitting while writes fail
@@ -101,7 +101,7 @@ final class AppDelegateLaunchTests: XCTestCase {
         let note = seed("Draft")
         let app = makeDelegate()
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
-        let controller = try XCTUnwrap(app.noteWindowControllers[note.id])
+        let controller = try XCTUnwrap(app.desk.windowControllers[note.id])
         controller.textView.string = "typed just before quitting"
         controller.editor.textDidChange(
             Notification(name: NSText.didChangeNotification, object: controller.textView)
@@ -120,7 +120,7 @@ final class AppDelegateLaunchTests: XCTestCase {
 
         XCTAssertEqual(reply, .terminateNow)
         XCTAssertFalse(asked, "asked the person although the text was safely copied")
-        let files = try FileManager.default.contentsOfDirectory(at: app.recoveryFolder, includingPropertiesForKeys: nil)
+        let files = try FileManager.default.contentsOfDirectory(at: app.recovery.folder, includingPropertiesForKeys: nil)
         let recovered = try XCTUnwrap(files.first { $0.lastPathComponent.hasPrefix(note.id.uuidString) })
         XCTAssertTrue(try String(contentsOf: recovered, encoding: .utf8).contains("typed just before quitting"))
         XCTAssertFalse(recovered.path.hasPrefix(root.path), "the recovery copy is inside the failing storage")
@@ -128,9 +128,9 @@ final class AppDelegateLaunchTests: XCTestCase {
 
     func testQuittingWhenTheRecoveryCopyFailsToo_KeepTryingCancelsTheQuit() throws {
         let (app, _) = try launchWithUnsavedTypingAndFailingWrites()
-        try FileManager.default.createDirectory(at: app.recoveryFolder, withIntermediateDirectories: true)
-        try setWritable(false, app.recoveryFolder)
-        addTeardownBlock { try? self.setWritable(true, app.recoveryFolder) }
+        try FileManager.default.createDirectory(at: app.recovery.folder, withIntermediateDirectories: true)
+        try setWritable(false, app.recovery.folder)
+        addTeardownBlock { try? self.setWritable(true, app.recovery.folder) }
         var counts: [Int] = []
         app.unsavedNotesChoice = { counts.append($0); return .keepTrying }
 
@@ -148,6 +148,20 @@ final class AppDelegateLaunchTests: XCTestCase {
         app.unsavedNotesChoice = { _ in XCTFail("asked about nothing"); return .keepTrying }
 
         XCTAssertEqual(app.applicationShouldTerminate(NSApplication.shared), .terminateNow)
+    }
+
+    /// `NoteWindow` sends ⌘Z to the responder chain as `undoLastAction:`, which
+    /// ends at the application delegate.
+    func testTheUndoActionNoteWindowsSendReachesAPendingUndoOffer() throws {
+        let app = makeDelegate()
+        var undone = 0
+        app.undo.offerUndoForHiding(count: 1, label: nil) { undone += 1 }
+        defer { app.undo.dismiss() }
+
+        XCTAssertTrue(app.responds(to: NSSelectorFromString("undoLastAction:")))
+        app.undoLastAction(nil)
+
+        XCTAssertEqual(undone, 1)
     }
 
     func testASavedEditIsStampedWithTheInjectedClock() throws {
@@ -177,8 +191,8 @@ final class AppDelegateLaunchTests: XCTestCase {
         try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
         isolated.settings.obsidianVaultPath = vault.path
         isolated.settings.dailyNotesPattern = "Daily/{YYYY}-{MM}-{DD}.md"
-        app.openTodaysDailyNote()
-        let daily = try XCTUnwrap(app.dailyNote)
+        app.desk.openTodaysDailyNote()
+        let daily = try XCTUnwrap(app.desk.dailyNote)
         daily.window?.orderOut(nil)
         daily.textView.string = "daily text typed just before the disk failed"
         daily.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: daily.textView))
@@ -189,7 +203,7 @@ final class AppDelegateLaunchTests: XCTestCase {
     }
 
     private func dailyRecoveryFiles(_ app: AppDelegate) throws -> [URL] {
-        let files = (try? FileManager.default.contentsOfDirectory(at: app.recoveryFolder, includingPropertiesForKeys: nil)) ?? []
+        let files = (try? FileManager.default.contentsOfDirectory(at: app.recovery.folder, includingPropertiesForKeys: nil)) ?? []
         return files.filter { $0.lastPathComponent.hasPrefix("Daily ") }
     }
 
@@ -212,7 +226,7 @@ final class AppDelegateLaunchTests: XCTestCase {
         let note = seed("Draft")
         let app = makeDelegate()
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
-        let controller = try XCTUnwrap(app.noteWindowControllers[note.id])
+        let controller = try XCTUnwrap(app.desk.windowControllers[note.id])
         controller.textView.string = "note text typed just before quitting"
         controller.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
         try setWritable(false, store.activeURL)
@@ -220,9 +234,9 @@ final class AppDelegateLaunchTests: XCTestCase {
         _ = try openDailyNoteWithUnsavedTypingAndFailingWrites(app)
         // A file where the recovery folder should be: nothing can be copied there.
         try FileManager.default.createDirectory(
-            at: app.recoveryFolder.deletingLastPathComponent(), withIntermediateDirectories: true
+            at: app.recovery.folder.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        try Data().write(to: app.recoveryFolder)
+        try Data().write(to: app.recovery.folder)
         var counts: [Int] = []
         app.unsavedNotesChoice = { counts.append($0); return .keepTrying }
 
@@ -238,9 +252,9 @@ final class AppDelegateLaunchTests: XCTestCase {
         let app = makeDelegate()
         _ = try openDailyNoteWithUnsavedTypingAndFailingWrites(app)
 
-        app.applyDailyPattern(nil)
+        app.storage.applyDailyPattern(nil)
 
-        XCTAssertNil(app.dailyNote)
+        XCTAssertNil(app.desk.dailyNote)
         let recovered = try XCTUnwrap(dailyRecoveryFiles(app).first)
         XCTAssertEqual(try String(contentsOf: recovered, encoding: .utf8), "daily text typed just before the disk failed")
     }
@@ -249,9 +263,9 @@ final class AppDelegateLaunchTests: XCTestCase {
         let app = makeDelegate()
         _ = try openDailyNoteWithUnsavedTypingAndFailingWrites(app)
 
-        app.applyStorageMode(.local)
+        app.storage.applyStorageMode(.local)
 
-        XCTAssertNil(app.dailyNote)
+        XCTAssertNil(app.desk.dailyNote)
         XCTAssertFalse(try dailyRecoveryFiles(app).isEmpty)
     }
 }

@@ -1,0 +1,539 @@
+import AppKit
+
+/// What is on the desk: the note windows and the daily note window, which of
+/// them are showing, where new ones go, and what happens to them when the store
+/// changes underneath them. Capture, menus and storage settings all act on the
+/// desk through this one object.
+final class DeskController: NSObject {
+    private let store: NoteStore
+    private let settings: Settings
+    private let clock: AppClock
+    private let undo: UndoCenter
+    private let recovery: RecoveryFiles
+
+    private(set) var windowControllers: [UUID: NoteWindowController] = [:]
+    private(set) var notesHidden = false
+    private var dailyNoteController: DailyNoteWindowController?
+    private var notesPanelController: NotesPanelController?
+    private var quickSwitcher: QuickSwitcherController?
+    /// Anchor for the new-note cascade. Reset when the last note is closed so
+    /// a fresh desk starts from the top again.
+    private var lastNewNoteFrame: NSRect?
+
+    init(store: NoteStore, settings: Settings, clock: AppClock, undo: UndoCenter, recovery: RecoveryFiles) {
+        self.store = store
+        self.settings = settings
+        self.clock = clock
+        self.undo = undo
+        self.recovery = recovery
+        super.init()
+        MarkdownStyler.baseFontSize = settings.bodyFontSize
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    /// Listen for the Mac waking, store changes and wiki-link clicks. Kept apart
+    /// from `init` so a test can build a desk that hears nothing.
+    func startObserving() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(handleWake), name: NSWorkspace.didWakeNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(storeDidChange(_:)),
+            name: NoteStore.didChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWikiLinkClick(_:)),
+            name: TodoTextView.didClickWikiLink,
+            object: nil
+        )
+    }
+
+    /// Open a window for every active note. Labels hidden in a previous session
+    /// stay hidden across a relaunch.
+    func restoreActiveNotes() {
+        for note in store.loadActive() {
+            presentWindow(for: note)
+        }
+        applyVisibility()
+    }
+
+    /// The Mac woke: the midnight timer does not fire in sleep, so a daily note
+    /// left open across midnight is brought to today now.
+    @objc func handleWake() {
+        dailyNoteController?.dailyDocument.wakeDidHappen()
+    }
+
+    // MARK: - Windows
+
+    var hasWindows: Bool { !windowControllers.isEmpty }
+
+    func focusedController() -> NoteWindowController? {
+        windowControllers.values.first { $0.window?.isKeyWindow == true }
+    }
+
+    func presentWindow(for note: Note, activate: Bool = true) {
+        if let existing = windowControllers[note.id] {
+            existing.showWindow(nil)
+            if activate {
+                existing.window?.makeKeyAndOrderFront(nil)
+            } else {
+                existing.window?.orderFront(nil)
+            }
+            return
+        }
+        let controller = NoteWindowController(note: note, store: store, clock: clock) { [weak self] id in
+            guard let self = self else { return }
+            self.windowControllers.removeValue(forKey: id)
+            // An emptied desk should start the cascade from the top again.
+            if self.windowControllers.isEmpty { self.lastNewNoteFrame = nil }
+        }
+        controller.onArchived = { [weak self] archived in
+            guard let self = self else { return }
+            self.undo.offerUndoForArchive(of: archived) { [weak self] in
+                guard let self = self else { return }
+                self.store.restore(archived)
+                self.focusNote(id: archived.id)
+            }
+        }
+        controller.onCloseRefused = { [weak self] retry in
+            self?.undo.offerRetryAfterRefusedClose(retry)
+        }
+        windowControllers[note.id] = controller
+        controller.showWindow(nil)
+        if activate {
+            controller.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            // Sync-induced presentation: float the window in without yanking
+            // focus from whatever the user is doing. It never becomes key, so
+            // nothing else would lift it out of the faded-away state.
+            controller.window?.orderFront(nil)
+            controller.refreshAlpha()
+        }
+    }
+
+    func focusNote(id: UUID) {
+        if let controller = windowControllers[id] {
+            controller.showWindow(nil)
+            controller.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        // Fallback: load from disk and present (e.g. file appeared via iCloud sync).
+        if let note = store.loadActive().first(where: { $0.id == id }) {
+            presentWindow(for: note)
+        }
+    }
+
+    /// Pressing the chord again while an untouched new note is focused means
+    /// "never mind" — the same toggle the quick switcher has.
+    @objc func newNote() {
+        if let focused = focusedController(), focused.isAbandonedCapture {
+            focused.discardAbandonedCapture()
+            return
+        }
+        makeNote()
+    }
+
+    /// Create, save, and present a note. Everything that captures a note —
+    /// the hotkey, the clipboard, a Service, a URL — comes through here.
+    @discardableResult
+    func makeNote(
+        title: String? = nil,
+        text: String = "",
+        color: NoteColor? = nil,
+        labels: [String] = []
+    ) -> UUID {
+        // Creating a new note while everything is hidden should bring all
+        // notes back so the new one isn't the only thing visible. Clear the
+        // flag directly — `toggleHideAll` refuses when there are no windows
+        // to unhide, which would leave the note we're about to make hidden.
+        if notesHidden {
+            notesHidden = false
+            applyVisibility()
+            // The "Hidden N notes — Undo" toast has nothing left to undo.
+            undo.dismiss()
+        }
+
+        var note = Note.makeNew(frame: nextNoteFrame(), color: settings.defaultNoteColor, now: clock.now())
+        if let title = title { note.title = title }
+        if let color = color { note.color = color }
+        note.content = text
+        note.labels = labels
+        store.save(note)
+        presentWindow(for: note)
+
+        // An empty note starts in the title — that's where the user should be
+        // naming the thing. One that arrived with text starts in the body,
+        // after what's already there.
+        if text.isEmpty {
+            windowControllers[note.id]?.focusTitle()
+        } else {
+            windowControllers[note.id]?.focusBodyEnd()
+        }
+        return note.id
+    }
+
+    /// Frame for the next new note: cascading from the last one created this
+    /// session, on whichever screen the pointer is on.
+    private func nextNoteFrame() -> NSRect {
+        let screen = NotePlacement.screenUnderPointer(
+            mouse: NSEvent.mouseLocation,
+            screens: NSScreen.screens.map(\.visibleFrame),
+            main: NSScreen.main?.visibleFrame
+        ) ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+
+        let frame = NotePlacement.next(previous: lastNewNoteFrame, screen: screen)
+        lastNewNoteFrame = frame
+        return frame
+    }
+
+    // MARK: - Visibility
+
+    @objc func toggleHideAll() {
+        let dailyVisible = dailyNoteController?.window?.isVisible ?? false
+        guard !windowControllers.isEmpty || dailyVisible else { return }
+
+        let wasVisible = windowControllers.values.filter { $0.window?.isVisible == true }.count
+        notesHidden.toggle()
+        applyVisibility()
+
+        if notesHidden {
+            undo.offerUndoForHiding(count: wasVisible, label: nil) { [weak self] in
+                guard let self = self, self.notesHidden else { return }
+                self.notesHidden = false
+                self.applyVisibility()
+            }
+        } else {
+            undo.dismiss()
+        }
+    }
+
+    /// Single place that decides which note windows are on screen. "Hide all"
+    /// wins over everything; otherwise a note is off screen when one of its
+    /// labels is hidden.
+    /// Only acts on windows whose state actually needs to change. This runs on
+    /// every store change, including the debounced save behind each keystroke —
+    /// ordering already-visible windows to the front would make notes jump
+    /// above other apps while you type.
+    func applyVisibility() {
+        let hiddenLabels = settings.hiddenLabels
+        for controller in windowControllers.values {
+            let shouldHide = notesHidden || hiddenLabels.contains(where: controller.labels.contains)
+            setVisible(controller.window, !shouldHide)
+        }
+
+        // The daily note has no labels; only "hide all" applies to it, and
+        // its own state.visible flag decides whether it should come back.
+        setVisible(dailyNoteController?.window, !notesHidden && DailyNote.loadState(settings: settings).visible)
+    }
+
+    private func setVisible(_ window: NSWindow?, _ visible: Bool) {
+        guard let window = window, window.isVisible != visible else { return }
+        if visible { window.orderFront(nil) } else { window.orderOut(nil) }
+    }
+
+    /// Hide or show every note carrying `label`, offering to undo a hide.
+    func toggleLabelVisibility(_ label: String) {
+        var hidden = settings.hiddenLabels
+        let hiding = !hidden.contains(label)
+
+        let affected = windowControllers.values.filter {
+            $0.labels.contains(label) && $0.window?.isVisible == true
+        }.count
+
+        if hiding { hidden.insert(label) } else { hidden.remove(label) }
+        settings.hiddenLabels = hidden
+        applyVisibility()
+
+        guard hiding else { undo.dismiss(); return }
+        undo.offerUndoForHiding(count: affected, label: label) { [weak self] in
+            guard let self = self else { return }
+            var current = self.settings.hiddenLabels
+            current.remove(label)
+            self.settings.hiddenLabels = current
+            self.applyVisibility()
+        }
+    }
+
+    func showAllLabels() {
+        settings.hiddenLabels = []
+        applyVisibility()
+    }
+
+    // MARK: - Arrange
+
+    @objc func arrangeGrid() { arrange(using: WindowArrangement.grid(sizes:in:gap:)) }
+    @objc func arrangeCascade() { arrange(using: WindowArrangement.cascade(sizes:in:step:)) }
+
+    /// Lay every visible note out on the screen the pointer is on. Notes keep
+    /// their own sizes; only positions move.
+    private func arrange(using layout: ([CGSize], CGRect, CGFloat) -> [CGRect]) {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else { return }
+
+        let controllers = windowControllers.values
+            .filter { $0.window?.isVisible == true }
+            // Left-to-right, top-to-bottom, so an arrange broadly preserves
+            // where things already were rather than shuffling them.
+            .sorted { a, b in
+                let fa = a.window?.frame ?? .zero, fb = b.window?.frame ?? .zero
+                if fa.minY != fb.minY { return fa.minY > fb.minY }
+                return fa.minX < fb.minX
+            }
+        guard !controllers.isEmpty else { return }
+
+        let frames = layout(controllers.map(\.arrangementSize), visible, 12)
+        for (controller, frame) in zip(controllers, frames) {
+            controller.setArrangedFrame(frame)
+        }
+    }
+
+    // MARK: - Store changes
+
+    /// Bring open windows in line with what's on disk. Triggered by
+    /// `NoteStore.didChange`, which fires both for our own writes and for
+    /// external file changes — Obsidian edits, files arriving via iCloud
+    /// Drive, archives created on another Mac, etc.
+    @objc func storeDidChange(_ notification: Notification) {
+        // A save by this store of a note that already has a window changes
+        // nothing on disk the app does not know. All that can differ is
+        // whether its labels now hide it.
+        if case let .saved(id) = NoteStore.change(in: notification),
+           notification.object as AnyObject === store, windowControllers[id] != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyVisibility()
+            }
+            return
+        }
+        handleStoreChange()
+    }
+
+    func handleStoreChange() {
+        DispatchQueue.main.async { [weak self] in
+            self?.reconcileOpenWindows()
+        }
+    }
+
+    func reconcileOpenWindows() {
+        let active = store.loadActive()
+        let activeIds = Set(active.map { $0.id })
+
+        // Close windows whose underlying note is no longer active (archived
+        // or deleted on another machine). Cancel pending debounced saves so
+        // an in-flight save can't resurrect a file that was just deleted.
+        for id in Array(windowControllers.keys) where !activeIds.contains(id) {
+            if let controller = windowControllers.removeValue(forKey: id) {
+                controller.closeAfterExternalDeletion()
+            }
+        }
+
+        // Open windows for active notes that aren't visible yet (created on
+        // another machine and synced in).
+        for note in active where windowControllers[note.id] == nil {
+            presentWindow(for: note, activate: false)
+        }
+
+        // Also catches label edits, which change whether a note belongs on
+        // screen without changing whether its window exists.
+        applyVisibility()
+    }
+
+    // MARK: - Panel and switcher
+
+    @objc func showNotesPanel() {
+        if notesPanelController == nil {
+            notesPanelController = NotesPanelController(store: store, onActivate: { [weak self] id in
+                self?.focusNote(id: id)
+            })
+        } else {
+            notesPanelController?.reload()
+        }
+        notesPanelController?.showWindow(nil)
+        notesPanelController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Pressing the hotkey again while the palette is up closes it, so the
+    /// same chord opens and dismisses.
+    @objc func toggleQuickSwitcher() {
+        if quickSwitcher?.isVisible == true {
+            quickSwitcher?.dismiss()
+            return
+        }
+        showQuickSwitcher()
+    }
+
+    /// Open the palette, optionally with a query already typed.
+    func showQuickSwitcher(query: String = "") {
+        if quickSwitcher == nil {
+            quickSwitcher = QuickSwitcherController(store: store) { [weak self] outcome in
+                self?.handle(outcome)
+            }
+        }
+        quickSwitcher?.show()
+        if !query.isEmpty { quickSwitcher?.search(query) }
+    }
+
+    /// Act on a quick-switcher result. Picking one should always end with a
+    /// note on screen — un-hiding, un-archiving, or creating as needed.
+    private func handle(_ outcome: QuickSwitcherController.Outcome) {
+        switch outcome {
+        case let .open(id, wasArchived):
+            if wasArchived, let note = store.loadNote(id: id, archived: true) {
+                store.restore(note)
+            }
+            if notesHidden { toggleHideAll() }
+            focusNote(id: id)
+
+        case let .create(title):
+            // Searching for a note that isn't there is a capture intent —
+            // keep the typed words as the title and start in the body.
+            makeNote(title: title)
+        }
+    }
+
+    /// A `[[wiki link]]` points at one of our notes when a title matches;
+    /// otherwise it's probably a note elsewhere in the vault, so hand it to
+    /// Obsidian rather than doing nothing.
+    @objc private func handleWikiLinkClick(_ notification: Notification) {
+        guard let target = notification.userInfo?["target"] as? String else { return }
+
+        if let match = WikiLink.resolve(target, in: store.loadActive()) {
+            focusNote(id: match.id)
+            return
+        }
+        if let archived = WikiLink.resolve(target, in: store.loadArchived()) {
+            store.restore(archived)
+            focusNote(id: archived.id)
+            return
+        }
+        if let vault = settings.obsidianVaultPath,
+           let url = WikiLink.obsidianURL(vaultPath: vault, target: target) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: - Text size
+
+    @objc func increaseTextSize() { applyTextSize(settings.bodyFontSize + 1) }
+    @objc func decreaseTextSize() { applyTextSize(settings.bodyFontSize - 1) }
+    @objc func resetTextSize() { applyTextSize(Settings.defaultBodyFontSize) }
+
+    /// One size for every note — a per-note size would be a setting nobody
+    /// asked for and a lot of state to keep straight.
+    private func applyTextSize(_ size: CGFloat) {
+        let clamped = Settings.clampFontSize(size)
+        guard clamped != settings.bodyFontSize else { return }
+        settings.bodyFontSize = clamped
+        MarkdownStyler.baseFontSize = clamped
+        for controller in windowControllers.values {
+            controller.restyleForTextSize()
+        }
+        dailyNoteController?.restyleForTextSize()
+    }
+
+    // MARK: - Daily note
+
+    /// The daily note window, if one exists.
+    var dailyNote: DailyNoteWindowController? { dailyNoteController }
+
+    var isDailyNoteVisible: Bool { dailyNoteController?.window?.isVisible ?? false }
+
+    /// Daily notes need a vault and a filename pattern.
+    var canShowDailyNote: Bool {
+        settings.obsidianVaultPath != nil && settings.dailyNotesPattern != nil
+    }
+
+    private func makeDailyNoteController() -> DailyNoteWindowController {
+        let controller = DailyNoteWindowController(settings: settings, store: store, clock: clock)
+        controller.dailyDocument.saveRecovery = { [recovery] body, day in
+            recovery.writeDaily(body: body, day: day)
+        }
+        return controller
+    }
+
+    func restoreDailyNoteIfNeeded() {
+        guard canShowDailyNote else { return }
+        let state = DailyNote.loadState(settings: settings)
+        guard state.visible else { return }
+        if dailyNoteController == nil {
+            dailyNoteController = makeDailyNoteController()
+        }
+        // Reopening what was already on screen isn't a fresh request for
+        // today's note, so it doesn't create the file — every Mac does this
+        // unattended at launch, and only one of them should be creating.
+        dailyNoteController?.show(userInitiated: false)
+    }
+
+    @objc func toggleDailyNote() {
+        guard canShowDailyNote else { return }
+        if let controller = dailyNoteController, controller.window?.isVisible == true {
+            controller.hide()
+            return
+        }
+        if dailyNoteController == nil {
+            dailyNoteController = makeDailyNoteController()
+        }
+        dailyNoteController?.show()
+    }
+
+    func openTodaysDailyNote() {
+        toggleDailyNote()
+        // toggleDailyNote toggles — if it was already visible we just hid it.
+        // Make sure it ends up visible regardless.
+        if dailyNoteController?.window?.isVisible != true {
+            if dailyNoteController == nil {
+                dailyNoteController = makeDailyNoteController()
+            }
+            dailyNoteController?.show()
+        }
+    }
+
+    /// Close the daily note window for good. Unsaved text goes to disk first, or
+    /// to a recovery file: the controller and its pending save go with it.
+    func tearDownDailyNote() {
+        if let controller = dailyNoteController, !controller.flushPendingSave() {
+            _ = recovery.writeDaily(controller.dailyDocument)
+        }
+        dailyNoteController?.window?.orderOut(nil)
+        dailyNoteController = nil
+    }
+
+    func dailyNotePatternDidChange() {
+        dailyNoteController?.patternDidChange()
+    }
+
+    func dailyNoteTemplateDidChange() {
+        dailyNoteController?.templateDidChange()
+    }
+
+    // MARK: - Quitting
+
+    /// Drains every window's debounce. Returns the windows whose text did not reach disk.
+    func flushPendingSaves() -> [NoteWindowController] {
+        windowControllers.values.filter { !$0.flushPendingSave() }
+    }
+
+    /// Saves are debounced, so quitting has to drain them before the process
+    /// goes away — otherwise everything typed since the last pause is lost.
+    ///
+    /// A window whose save fails here (a full disk, a revoked permission) has
+    /// text that is about to exist nowhere. Each such buffer is written to a
+    /// recovery file outside the storage root. Returns how many buffers are
+    /// still nowhere after that.
+    func flushForQuit() -> Int {
+        let unsaved = flushPendingSaves()
+        let dailyLost = dailyNoteController.map { !$0.flushPendingSave() && !recovery.writeDaily($0.dailyDocument) } ?? false
+        let unrecovered = unsaved.filter { !recovery.write($0.bufferedNote) }
+        return unrecovered.count + (dailyLost ? 1 : 0)
+    }
+}

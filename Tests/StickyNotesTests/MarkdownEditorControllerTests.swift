@@ -170,6 +170,7 @@ final class MarkdownEditorControllerTests: XCTestCase {
     /// A note and the daily note are two hosts of one editor, so a tab-indented
     /// task toggles the same way in both.
     func testANoteAndTheDailyNoteToggleATabIndentedTaskIdentically() throws {
+        _ = NSApplication.shared
         let line = "\t- [ ] call back\nnext"
         var note = Note.makeNew(frame: NSRect(x: 0, y: 0, width: 240, height: 200))
         note.content = line
