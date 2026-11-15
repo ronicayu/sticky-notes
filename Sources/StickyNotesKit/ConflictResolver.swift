@@ -154,10 +154,16 @@ enum ConflictResolver {
         return true
     }
 
-    /// True when `body` has every line of `base`.
+    /// True when `body` has every line of `base`, counting repeats: taking
+    /// `body` in place of `base` must not drop a second copy of a line.
     private static func isSuperset(_ body: String, of base: String) -> Bool {
-        let known = Set(lines(of: body))
-        return lines(of: base).allSatisfy(known.contains)
+        var available: [String: Int] = [:]
+        for line in lines(of: body) { available[line, default: 0] += 1 }
+        for line in lines(of: base) {
+            guard let count = available[line], count > 0 else { return false }
+            available[line] = count - 1
+        }
+        return true
     }
 
     private static func normalize(_ body: String) -> String {

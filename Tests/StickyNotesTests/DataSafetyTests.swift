@@ -208,6 +208,14 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertEqual(merged.content, "a\nb\nc")
     }
 
+    func testAVersionMissingARepeatedLineIsNotTakenAsTheBase() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("- [ ]\n- [ ]\nb", updated: 200), note("- [ ]\nb\nc", updated: 100)
+        ], now: now))
+        XCTAssertTrue(merged.content.hasPrefix("- [ ]\n- [ ]\nb"), "got \(merged.content)")
+        XCTAssertTrue(merged.content.hasSuffix("- [ ]\nb\nc"), "got \(merged.content)")
+    }
+
     func testTwoGenuinelyDivergentVersionsStillGetADivider() throws {
         let merged = try XCTUnwrap(ConflictResolver.merge([
             note("a\nmine", updated: 200), note("a\ntheirs", updated: 100)
