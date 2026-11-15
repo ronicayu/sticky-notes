@@ -234,21 +234,11 @@ private final class GeneralPaneView: NSView {
         }
 
         let shortcutsLabel = SectionLabel(text: "Keyboard shortcuts")
-        let newNoteRow = recorderRow(title: "New note",
-                                     name: .newNote,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .newNote))
-        let findRow    = recorderRow(title: "Find note",
-                                     name: .quickSwitcher,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .quickSwitcher))
-        let clipRow    = recorderRow(title: "New note from clipboard",
-                                     name: .newFromClipboard,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .newFromClipboard))
-        let panelRow   = recorderRow(title: "Show notes panel",
-                                     name: .notesPanel,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .notesPanel))
-        let hideRow    = recorderRow(title: "Hide all notes",
-                                     name: .hideAll,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .hideAll))
+        let newNoteRow = recorderRow(title: "New note", name: .newNote)
+        let findRow    = recorderRow(title: "Find note", name: .quickSwitcher)
+        let clipRow    = recorderRow(title: "New note from clipboard", name: .newFromClipboard)
+        let panelRow   = recorderRow(title: "Show notes panel", name: .notesPanel)
+        let hideRow    = recorderRow(title: "Hide all notes", name: .hideAll)
 
         let stack = NSStackView(views: [
             launchToggle,
@@ -276,32 +266,22 @@ private final class GeneralPaneView: NSView {
 
     /// A recorder row, plus a line naming what else commonly uses the chord.
     /// The hint updates as the shortcut is re-recorded.
-    private func recorderRow(title: String,
-                             name: KeyboardShortcuts.Name,
-                             recorder: KeyboardShortcuts.RecorderCocoa) -> NSView {
-        let row = recorderRow(title: title, recorder: recorder)
-
+    private func recorderRow(title: String, name: KeyboardShortcuts.Name) -> NSView {
         let hint = NSTextField(labelWithString: "")
         hint.translatesAutoresizingMaskIntoConstraints = false
         hint.font = NSFont.systemFont(ofSize: 10)
         hint.textColor = .tertiaryLabelColor
 
-        let refreshHint: @MainActor @Sendable () -> Void = {
+        let refreshHint: @MainActor @Sendable () -> Void = { [weak hint] in
             let note = HotkeyAdvice.conflictNote(for: HotkeyAdvice.describe(name))
-            hint.stringValue = note ?? ""
-            hint.isHidden = note == nil
+            hint?.stringValue = note ?? ""
+            hint?.isHidden = note == nil
         }
         refreshHint()
-        // The recorder doesn't expose a change hook, so refresh when the
-        // window comes back to the front — which is when a rebind is done.
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didBecomeKeyNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            // `queue: .main` makes this run on the main thread.
+        let recorder = KeyboardShortcuts.RecorderCocoa(for: name) { _ in
             MainActor.assumeIsolated { refreshHint() }
         }
+        let row = recorderRow(title: title, recorder: recorder)
 
         let stack = NSStackView(views: [row, hint])
         stack.orientation = .vertical

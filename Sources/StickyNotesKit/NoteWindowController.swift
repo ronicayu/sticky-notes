@@ -820,7 +820,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         noteDocument.setTitle(titleField.stringValue)
         refreshCollapsedTitle()
         updateDateLabel()
-        detectTitleSlashTrigger()
     }
 
     /// Title field key handling. Down arrow / Enter → jump to body editor.
@@ -833,70 +832,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             return true
         }
         return false
-    }
-
-    // MARK: - Slash commands (title, date/time only)
-
-    private func detectTitleSlashTrigger() {
-        guard let fieldEditor = titleField.currentEditor() else { return }
-        let str = titleField.stringValue as NSString
-        let selection = fieldEditor.selectedRange
-        guard selection.length == 0, selection.location > 0 else { return }
-        let lastChar = str.substring(with: NSRange(location: selection.location - 1, length: 1))
-        guard lastChar == "/" else { return }
-
-        if selection.location > 1 {
-            let prev = str.substring(with: NSRange(location: selection.location - 2, length: 1))
-            let allowed: Set<String> = [" ", "\t"]
-            if !allowed.contains(prev) { return }
-        }
-
-        let slashLocation = selection.location - 1
-        DispatchQueue.main.async { [weak self] in
-            self?.showTitleSlashMenu(at: slashLocation)
-        }
-    }
-
-    private func showTitleSlashMenu(at slashLocation: Int) {
-        let entries = MarkdownEditorController.dateTimeEntries(now: clock.now())
-
-        let menu = NSMenu()
-        menu.font = NSFont.systemFont(ofSize: 12)
-        for (title, replacement) in entries {
-            let item = NSMenuItem(
-                title: title,
-                action: #selector(insertTitleSlashCommand(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = SlashReplacement(slashLocation: slashLocation, replacement: replacement)
-            menu.addItem(item)
-        }
-
-        let popPoint = NSPoint(x: 0, y: titleField.bounds.maxY + 2)
-        menu.popUp(positioning: nil, at: popPoint, in: titleField)
-    }
-
-    @objc private func insertTitleSlashCommand(_ sender: NSMenuItem) {
-        guard let cmd = sender.representedObject as? SlashReplacement else { return }
-        let str = titleField.stringValue as NSString
-        let loc = cmd.slashLocation
-        guard loc >= 0, loc < str.length else { return }
-        let existing = str.substring(with: NSRange(location: loc, length: 1))
-        guard existing == "/" else { return }
-
-        let newValue = str.replacingCharacters(
-            in: NSRange(location: loc, length: 1),
-            with: cmd.replacement
-        )
-        titleField.stringValue = newValue
-        noteDocument.setTitle(newValue)
-        refreshCollapsedTitle()
-
-        if let fieldEditor = titleField.currentEditor() {
-            let newPos = loc + (cmd.replacement as NSString).length
-            fieldEditor.selectedRange = NSRange(location: newPos, length: 0)
-        }
     }
 
     private func updateDateLabel() {
@@ -1035,7 +970,16 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         rebuildLabelChips()
     }
 
-    @objc private func showLabelMenu() {
+    @objc func showLabelMenu() {
+        guard !geometry.collapsed else { return }
+        let menu = makeLabelMenu()
+        let p = NSPoint(x: labelButton.bounds.minX, y: labelButton.bounds.maxY + 4)
+        menu.popUp(positioning: nil, at: p, in: labelButton)
+    }
+
+    /// The labels to toggle on this note. A new one is made by typing `#name`
+    /// in the body, so the menu offers no way to type one.
+    func makeLabelMenu() -> NSMenu {
         let menu = NSMenu()
         menu.font = NSFont.systemFont(ofSize: 12)
 
@@ -1043,7 +987,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         let union = Array(Set(known).union(note.labels)).sorted()
 
         if union.isEmpty {
-            let empty = NSMenuItem(title: "No labels yet", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: "No labels yet. Type #name in the note.", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
@@ -1059,17 +1003,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
                 menu.addItem(item)
             }
         }
-        menu.addItem(.separator())
-        let createItem = NSMenuItem(
-            title: "New Label…",
-            action: #selector(createLabelFromMenu),
-            keyEquivalent: ""
-        )
-        createItem.target = self
-        menu.addItem(createItem)
-
-        let p = NSPoint(x: labelButton.bounds.minX, y: labelButton.bounds.maxY + 4)
-        menu.popUp(positioning: nil, at: p, in: labelButton)
+        return menu
     }
 
     @objc private func toggleLabelFromMenu(_ sender: NSMenuItem) {
@@ -1078,23 +1012,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             removeLabel(name)
         } else {
             addLabel(name)
-        }
-    }
-
-    @objc private func createLabelFromMenu() {
-        let alert = NSAlert()
-        alert.messageText = "New Label"
-        alert.informativeText = "Lowercase, no spaces. Other characters are stripped."
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
-        field.placeholderString = "label-name"
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            addLabel(field.stringValue)
         }
     }
 

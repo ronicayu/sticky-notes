@@ -22,12 +22,6 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
         case create(title: String)
     }
 
-    /// Kept for the archived-restore path; `Outcome` is what callers act on.
-    struct Selection {
-        let id: UUID
-        let wasArchived: Bool
-    }
-
     private let store: NoteStore
     /// Today's daily note as a candidate, or nil when no daily note is set up.
     private let dailyNote: () -> Note?

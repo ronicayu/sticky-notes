@@ -67,9 +67,3 @@ enum Appearance {
 
     private static var observer: NSKeyValueObservation?
 }
-
-extension NSColor {
-    /// Resolve a hex string against the current appearance. Kept here so the
-    /// call sites read as "the color for this note" rather than as a branch.
-    static func note(_ hex: String) -> NSColor? { NSColor(hex: hex) }
-}

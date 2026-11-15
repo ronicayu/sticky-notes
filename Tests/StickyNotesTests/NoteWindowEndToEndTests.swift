@@ -323,4 +323,31 @@ import XCTest
         XCTAssertEqual(store.loadActive().filter { $0.id == controller.noteId }.count, 1,
                        "the note was duplicated")
     }
+
+    // MARK: - Labels
+
+    func testTheLabelMenuTogglesKnownLabelsAndOffersNoWayToTypeANewOne() throws {
+        let controller = try openNote()
+        var other = Note.makeNew(frame: NSRect(x: 0, y: 0, width: 240, height: 200))
+        other.labels = ["home", "work"]
+        store.save(other)
+        controller.noteDocument.edit { $0.labels = ["work"] }
+
+        let items = controller.makeLabelMenu().items
+
+        XCTAssertEqual(items.map(\.title), ["#home", "#work"])
+        XCTAssertEqual(items.map(\.state), [.off, .on])
+        XCTAssertTrue(items.allSatisfy { $0.action != nil && $0.target === controller })
+        XCTAssertFalse(items.contains { $0.title.contains("New Label") })
+    }
+
+    func testTheLabelMenuForAStoreWithNoLabelsOnlyPointsAtTyping() throws {
+        let controller = try openNote()
+
+        let items = controller.makeLabelMenu().items
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertFalse(items[0].isEnabled)
+        XCTAssertTrue(items[0].title.contains("#"), items[0].title)
+    }
 }
