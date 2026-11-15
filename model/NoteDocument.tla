@@ -42,12 +42,12 @@ CONSTANTS
   ALLOW_PANEL,                    \* the notes panel archives the note
   ALLOW_LIFECYCLE,                \* Quit, Relaunch, restore, delete, 30 days pass
   PROMPT_WATCHER,                 \* regress configs: an outside write is reported before the app writes
-  \* --- open defects found by this model (TRUE = the code as it is; FALSE = the proposed fix) ---
-  ALLOW_OWN_COPY_BLOCK,           \* N1: an outside rewrite back to an older copy of our text is appended as a conflict
-  ALLOW_BLANK_WINNER_BLOCK,       \* N2: a blank file is not replaced by a conflict version that has text
-  ALLOW_LINEAGE_RESET,            \* N4: the write lineage ends at a foreign read or a relaunch, so an older own save merges as a conflict
-  ALLOW_LINEAGE_NEEDS_NEWEST,     \* N5: an older own save is dropped only while the file is exactly our newest write
-  ALLOW_CLOSE_REFUSED_UNREADABLE, \* N3: the person's close is refused for good while the note's file cannot be read
+  \* --- findings N1-N6 of the re-run model, fixed after c16cef1 (TRUE = bring the c16cef1 behaviour back) ---
+  ALLOW_OLD_OWN_COPY_BLOCK,       \* N1 (c16cef1): an outside rewrite back to an older copy of our text is appended as a conflict
+  ALLOW_OLD_BLANK_WINNER_BLOCK,   \* N2: a blank file is not replaced by a conflict version that has text
+  ALLOW_OLD_LINEAGE_RESET,        \* N4: the write lineage ends at a foreign read or a relaunch, so an older own save merges as a conflict
+  ALLOW_OLD_LINEAGE_NEEDS_NEWEST, \* N5: an older own save is dropped only while the file is exactly our newest write
+  ALLOW_OLD_CLOSE_REFUSED_UNREADABLE, \* N3: the person's close is refused for good while the note's file cannot be read
   \* --- bugs fixed before ea21f7a (TRUE = bring the old behaviour back) ---
   ALLOW_OLD_NO_QUIT_FLUSH,        \* 0.1  quit dropped pending edits
   ALLOW_OLD_PURGE_BY_MTIME,       \* 0.2  purge used the modification date
@@ -99,7 +99,7 @@ Init0 ==
     lin |-> {}, linNew |-> <<>>, prev |-> <<>>, hasPrev |-> FALSE,
     conflict |-> <<>>, hasConf |-> FALSE, confKind |-> "none",
     typed |-> {}, used |-> {}, extRemoved |-> {}, rec |-> <<>>, recDir |-> {},
-    spurious |-> FALSE, falseClose |-> FALSE, blankUntouched |-> FALSE,
+    spurious |-> FALSE, brk |-> FALSE, falseClose |-> FALSE, blankUntouched |-> FALSE,
     purgedEarly |-> FALSE, legitGone |-> FALSE, trashAge |-> "fresh",
     trashWriteAge |-> "none", mtimeOld |-> FALSE ]
 
@@ -127,10 +127,33 @@ HoldsText(t) == t.unsaved \/ t.buf # t.base      \* holdsTextNoFileHas
 Readable(t) == "active" \in t.loc /\ t.listed     \* the store can read the active file
 Out(t, ok) == [st |-> t, ok |-> ok]
 
-\* A read of the file ends the write lineage unless the file holds our newest write
-\* (NoteStore.readMainSnapshot, DailyFile.read).
-Rd(t) == IF ALLOW_LINEAGE_RESET /\ t.lin # {} /\ t.disk # t.linNew THEN [t EXCEPT !.lin = {}] ELSE t
+\* A read of the file. Old (c16cef1, NoteStore.readMainSnapshot, DailyFile.read): it ended the
+\* write lineage unless the file held our newest write. Now a read changes nothing; the
+\* lineage ends only when a document takes over text that lacks lines it showed (`Adopted`).
+Rd(t) == IF ALLOW_OLD_LINEAGE_RESET /\ t.lin # {} /\ t.disk # t.linNew THEN [t EXCEPT !.lin = {}] ELSE t
 NewestOwn(t) == t.lin # {} /\ t.disk = t.linNew
+
+\* WriteLineage.adopted: the document took `new` as the note's text in place of `old`
+\* (or started from it). If that left out lines of `old`, the person did not take
+\* them out, and the lineage ends, even when `new` is one of our older writes.
+\* `brk` remembers that it ended: a block that then shows two versions of our own text is the
+\* safe outcome (an earlier write may hold the only copy of what the outside took out), not a
+\* spurious one.
+Adopted(t, old, new) ==
+  IF ~ALLOW_OLD_LINEAGE_RESET /\ t.lin # {} /\ ~Covered(old, new) THEN [t EXCEPT !.lin = {}, !.brk = TRUE] ELSE t
+
+\* The file is an earlier write of ours that was put back (Obsidian, a sync), not our newest:
+\* the sweep judges our newest text in its place (NoteStore.resolveConflict, `judged`).
+StaleFile(t) == ~ALLOW_OLD_LINEAGE_NEEDS_NEWEST /\ t.lin # {} /\ t.disk \in t.lin /\ t.disk # t.linNew
+
+\* ConflictResolver.versionsToMerge: an own conflict version `c` is dropped when it is
+\* an earlier write than the newest and the newest write's text is in the file.
+\* Old: only while the file is exactly the newest write.
+DropsOwn(t, c) ==
+  /\ ~ALLOW_OLD_NO_LINEAGE /\ t.lin # {} /\ c \in t.lin
+  /\ IF ALLOW_OLD_LINEAGE_NEEDS_NEWEST THEN NewestOwn(t)
+     ELSE c # t.linNew /\ (StaleFile(t) \/ Covered(t.linNew, t.disk))
+
 
 \* This app writes body b to the active file (create or replace): fingerprint
 \* taken, lineage recorded, the watcher will report it.
@@ -146,13 +169,13 @@ MarkPersisted(t) == [t EXCEPT !.base = t.buf, !.unsaved = FALSE, !.stranded = FA
 \* NoteDocument.mergePendingExternal after the outside version `ext` was chosen.
 \* `known`: its fingerprint is known, so the document adopts it.
 MergeIn(t, ext, known) ==
-  LET r == IF ALLOW_OLD_UNBASED_MERGE THEN MergeVersions(t.buf, ext, ALLOW_OLD_SUBSTRING_MERGE, ~ALLOW_BLANK_WINNER_BLOCK)
-           ELSE IF ~ALLOW_OWN_COPY_BLOCK /\ t.hasPrev /\ ext = t.prev
-             THEN [c |-> t.buf, blk |-> FALSE, sp |-> FALSE]      \* proposed fix for N1
+  LET r == IF ALLOW_OLD_UNBASED_MERGE THEN MergeVersions(t.buf, ext, ALLOW_OLD_SUBSTRING_MERGE, ~ALLOW_OLD_BLANK_WINNER_BLOCK)
+           ELSE IF ~ALLOW_OLD_OWN_COPY_BLOCK /\ t.buf # t.base /\ ext \in t.lin /\ ext # t.linNew
+             THEN [c |-> t.buf, blk |-> FALSE, sp |-> FALSE]      \* N1: an earlier write of ours put back adds nothing (not the newest: a merge may have put another writer's text in it)
            ELSE ThreeWay(t.base, t.buf, ext)
-  IN [t EXCEPT !.buf = r.c, !.base = ext, !.hasPend = FALSE, !.pend = <<>>,
+  IN [Adopted(t, t.buf, r.c) EXCEPT !.buf = r.c, !.base = ext, !.hasPend = FALSE, !.pend = <<>>,
                !.fp = IF known THEN "ok" ELSE t.fp,
-               !.spurious = t.spurious \/ r.sp]
+               !.spurious = t.spurious \/ (r.sp /\ ~t.brk)]
 
 \* mergePendingExternal(): a held-back version is replaced by a fresh read when the
 \* file can be read.
@@ -168,7 +191,7 @@ Closed(t) == [t EXCEPT !.win = "closed", !.buf = <<>>, !.base = <<>>, !.armed = 
                        !.hasPend = FALSE, !.pend = <<>>, !.focus = "away", !.touched = FALSE,
                        !.unsaved = FALSE, !.stranded = FALSE, !.actGone = FALSE]
 
-Opened(t) == [t EXCEPT !.win = "open", !.buf = t.disk, !.base = t.disk, !.fp = "ok",
+Opened(t) == [Adopted(t, t.linNew, t.disk) EXCEPT !.win = "open", !.buf = t.disk, !.base = t.disk, !.fp = "ok",
                        !.hasFile = TRUE, !.hasPend = FALSE, !.pend = <<>>, !.armed = FALSE,
                        !.unsaved = FALSE, !.touched = FALSE, !.focus = "away",
                        !.stranded = FALSE, !.actGone = FALSE]
@@ -262,7 +285,7 @@ CloseGone(t0) ==
 PersonClose(t0) ==
   LET r == CloseArchive(t0)
       way == \/ (r.st.stranded /\ ~ALLOW_OLD_STRANDED_CLOSE_REFUSED)
-             \/ (~ALLOW_CLOSE_REFUSED_UNREADABLE /\ ~r.st.listed)
+             \/ (~ALLOW_OLD_CLOSE_REFUSED_UNREADABLE /\ ~r.st.listed)
   IN IF r.closed \/ ~way THEN r
      ELSE IF r.st.diskFull THEN r
      ELSE [st |-> Closed([r.st EXCEPT !.recDir = r.st.recDir \cup Toks(r.st.buf)]), closed |-> TRUE]
@@ -270,7 +293,7 @@ PersonClose(t0) ==
 \* --- the window hears a file change (NoteDocument.storeDidChange / externalChange) --------
 \* The window shows an outside version.
 Apply(t) ==
-  [t EXCEPT !.buf = t.disk, !.fp = "ok",
+  [Adopted(t, t.buf, t.disk) EXCEPT !.buf = t.disk, !.fp = "ok",
             !.base = IF ALLOW_OLD_STALE_PERSISTED_MARK THEN t.base ELSE t.disk]
 
 ExternalChange(t0) ==
@@ -360,7 +383,7 @@ Quit ==
      IN /\ p.ok \/ recOk
         /\ s' = [Closed([p.st EXCEPT !.recDir = IF p.ok THEN p.st.recDir ELSE p.st.recDir \cup Toks(p.st.buf)])
                    EXCEPT !.app = "quit", !.unseen = FALSE, !.reconDue = FALSE,
-                   !.lin = IF ALLOW_LINEAGE_RESET THEN {} ELSE p.st.lin]
+                   !.lin = IF ALLOW_OLD_LINEAGE_RESET THEN {} ELSE p.st.lin]
 
 \* Launch: purge expired trash, then restoreActiveNotes.
 Relaunch ==
@@ -432,13 +455,14 @@ ConflictSweep ==
           \E conflictWins \in BOOLEAN :
             /\ (conflictWins => s.confKind = "ext")  \* an older own save is never the newest
             /\ LET t == Rd(flushed.st)
-                   dropOwn == ~ALLOW_OLD_NO_LINEAGE /\ (NewestOwn(t) \/ (~ALLOW_LINEAGE_NEEDS_NEWEST /\ t.lin # {}))
-                              /\ t.conflict \in t.lin
-                   w == IF conflictWins THEN t.conflict ELSE t.disk
-                   l == IF conflictWins THEN t.disk ELSE t.conflict
-                   r == MergeVersions(w, l, ALLOW_OLD_SUBSTRING_MERGE, ~ALLOW_BLANK_WINNER_BLOCK)
+                   dropOwn == DropsOwn(t, t.conflict)
+                   cur == IF StaleFile(t) THEN t.linNew ELSE t.disk
+                   w == IF conflictWins THEN t.conflict ELSE cur
+                   l == IF conflictWins THEN cur ELSE t.conflict
+                   r == IF dropOwn \/ t.conflict = cur THEN [c |-> cur, blk |-> FALSE, sp |-> FALSE]
+                        ELSE MergeVersions(w, l, ALLOW_OLD_SUBSTRING_MERGE, ~ALLOW_OLD_BLANK_WINNER_BLOCK)
                    cleared == [t EXCEPT !.hasConf = FALSE, !.conflict = <<>>, !.confKind = "none"]
-               IN IF dropOwn \/ t.conflict = t.disk \/ r.c = t.disk THEN s' = cleared
+               IN IF r.c = t.disk THEN s' = cleared
                   ELSE IF t.diskFull THEN s' = t        \* the merge cannot land: versions stay
                   ELSE s' = Hear([cleared EXCEPT
                          !.disk = r.c, !.fp = IF cleared.fp = "ok" THEN "stale" ELSE cleared.fp,
@@ -446,7 +470,7 @@ ConflictSweep ==
                          !.prev = IF cleared.diskOwn THEN cleared.disk ELSE cleared.prev,
                          !.lin = cleared.lin \cup {r.c}, !.linNew = r.c,
                          !.unseen = TRUE, !.reconDue = TRUE, !.mtimeOld = FALSE,
-                         !.spurious = cleared.spurious \/ r.sp])
+                         !.spurious = cleared.spurious \/ (r.sp /\ ~cleared.brk)])
 
 \* Other writers and the file system -----------------------------------------------------
 

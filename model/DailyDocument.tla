@@ -27,9 +27,9 @@ CONSTANTS
   ALLOW_B_CREATES_OFFLINE,         \* the other Mac creates the day's file before it sees this Mac's
   ALLOW_SELF_CONFLICT,             \* iCloud keeps an older save of this Mac as a conflict version
   ALLOW_WRITE_FAILURE,             \* writes on this Mac fail for a while
-  \* --- open defects found by this model (TRUE = the code as it is; FALSE = the proposed fix) ---
-  ALLOW_BLANK_WINNER_BLOCK,        \* N2: a blank file is not replaced by a conflict version that has text
-  ALLOW_NO_MERGE_RETRY,            \* N6: a merge that could not be written is retried only by the next file event
+  \* --- findings N2 and N6 of the re-run model, fixed after c16cef1 (TRUE = bring the c16cef1 behaviour back) ---
+  ALLOW_OLD_BLANK_WINNER_BLOCK,    \* N2: a blank file is not replaced by a conflict version that has text
+  ALLOW_OLD_NO_MERGE_RETRY,        \* N6: a merge that could not be written is retried only by the next file event
   \* --- bugs fixed since the first model run (TRUE = bring the old behaviour back) ---
   ALLOW_OLD_CLOCK_CREATES,         \* cbbec66: the rollover wrote the template, creating the file
   ALLOW_OLD_STUB_AS_MISSING,       \* 0.5: an unreadable file was treated as missing
@@ -66,13 +66,31 @@ Init == s = [
   conf |-> <<>>, hasConf |-> FALSE, confKind |-> "none",
   bPend |-> <<>>, hasBPend |-> FALSE,
   typed |-> {}, used |-> {}, clockCreated |-> FALSE, aCreated |-> FALSE, bCreated |-> FALSE,
-  spurious |-> FALSE ]
+  spurious |-> FALSE, brk |-> FALSE ]
 
 -----------------------------------------------------------------------------
 \* Helpers
 
-Rd(t, d) == IF t.lin[d] # {} /\ t.lf[d].c # t.linNew[d] THEN [t EXCEPT !.lin[d] = {}] ELSE t
-NewestOwn(t, d) == t.lin[d] # {} /\ t.lf[d].c = t.linNew[d]
+\* A read of the file changes nothing now (c16cef1: it ended the write lineage unless the file
+\* held our newest write). The lineage ends only when the document takes over text that
+\* lacks lines it showed (`Adopted`).
+Rd(t, d) == t
+
+\* WriteLineage.adopted: the document took `new` as the text in place of `old`; if lines
+\* of `old` are missing from it, the person did not take them out and the lineage ends.
+Adopted(t, d, old, new) ==
+  IF t.lin[d] # {} /\ ~Covered(old, new) THEN [t EXCEPT !.lin[d] = {}, !.brk = TRUE] ELSE t
+
+\* The file is an earlier write of ours that was put back, not our newest: the sweep
+\* judges our newest text in its place (DailyFile.resolveConflicts, `judged`).
+StaleFile(t, d) == t.lin[d] # {} /\ t.lf[d].c \in t.lin[d] /\ t.lf[d].c # t.linNew[d]
+
+\* ConflictResolver.versionsToMerge: an own conflict version is dropped when it is an
+\* earlier write than the newest and the newest write's text is in the file.
+DropsOwn(t, d, c) ==
+  /\ ~ALLOW_OLD_NO_LINEAGE /\ t.lin[d] # {} /\ c \in t.lin[d]
+  /\ c # t.linNew[d] /\ (StaleFile(t, d) \/ Covered(t.linNew[d], t.lf[d].c))
+
 Out(t, ok) == [st |-> t, ok |-> ok]
 
 \* This Mac writes body b to its local file for day d (DailyFile.write / replaceFile).
@@ -88,9 +106,11 @@ WriteLocal(t, d, b) ==
 \* The document merges an outside version `ext` into the buffer (three-way against base).
 MergeIn(t, ext, known) ==
   LET r == IF ALLOW_OLD_UNBASED_MERGE THEN MergeVersions(t.buf, ext, FALSE, FALSE)
+           ELSE IF t.buf # t.base /\ ext \in t.lin[t.shown] /\ ext # t.linNew[t.shown]
+             THEN [c |-> t.buf, blk |-> FALSE, sp |-> FALSE]   \* N1: an older copy of our own text adds nothing
            ELSE ThreeWay(t.base, t.buf, ext)
-  IN [t EXCEPT !.buf = r.c, !.base = ext, !.hasPend = FALSE, !.pend = <<>>,
-               !.fp = IF known THEN "ok" ELSE t.fp, !.spurious = t.spurious \/ r.sp]
+  IN [Adopted(t, t.shown, t.buf, r.c) EXCEPT !.buf = r.c, !.base = ext, !.hasPend = FALSE, !.pend = <<>>,
+               !.fp = IF known THEN "ok" ELSE t.fp, !.spurious = t.spurious \/ (r.sp /\ ~t.brk)]
 
 ReadableFile(t) == t.lf[t.shown].st = "file"
 
@@ -132,10 +152,10 @@ ExternalChange(t0) ==
   IN IF disk = t.base THEN [t EXCEPT !.fp = "ok"]
      ELSE IF disk = t.buf THEN [t EXCEPT !.base = disk, !.fp = "ok"]
      ELSE IF defer THEN [t EXCEPT !.hasPend = TRUE, !.pend = disk]
-     ELSE [t EXCEPT !.buf = disk, !.base = disk, !.fp = "ok"]
+     ELSE [Adopted(t, t.shown, t.buf, disk) EXCEPT !.buf = disk, !.base = disk, !.fp = "ok"]
 
 Adopt(t, body, fp, unavail) ==
-  [t EXCEPT !.buf = body, !.base = body, !.fp = fp, !.unavail = unavail, !.hasPend = FALSE,
+  [Adopted(t, t.shown, t.linNew[t.shown], body) EXCEPT !.buf = body, !.base = body, !.fp = fp, !.unavail = unavail, !.hasPend = FALSE,
             !.pend = <<>>, !.armed = FALSE, !.unsaved = FALSE]
 
 \* snapshot(); if the file cannot be read nothing changes; waiting for a download ends.
@@ -149,16 +169,18 @@ ResolveConfWith(t, w) ==
   IF ALLOW_OLD_CONFLICT_UNRESOLVED \/ ~t.hasConf \/ t.shown # 2 \/ t.lf[2].st # "file"
     THEN t
   ELSE IF t.diskFull          \* the merge cannot be written: the versions stay
-    THEN IF ALLOW_NO_MERGE_RETRY THEN t ELSE [t EXCEPT !.unseen = TRUE]
+    THEN IF ALLOW_OLD_NO_MERGE_RETRY THEN t ELSE [t EXCEPT !.unseen = TRUE]
   ELSE LET u == Rd(t, 2)
-           cur == u.lf[2].c
-           dropOwn == ~ALLOW_OLD_NO_LINEAGE /\ NewestOwn(u, 2) /\ u.conf \in u.lin[2]
+           disk == u.lf[2].c
+           cur == IF StaleFile(u, 2) THEN u.linNew[2] ELSE disk
+           dropOwn == DropsOwn(u, 2, u.conf)
            cleared == [u EXCEPT !.hasConf = FALSE, !.conf = <<>>, !.confKind = "none"]
            win == IF w /\ u.confKind = "other" THEN u.conf ELSE cur
            lose == IF w /\ u.confKind = "other" THEN cur ELSE u.conf
-           r == MergeVersions(win, lose, FALSE, ~ALLOW_BLANK_WINNER_BLOCK)
-       IN IF dropOwn \/ u.conf = cur \/ r.c = cur THEN cleared
-          ELSE [WriteLocal(cleared, 2, r.c) EXCEPT !.spurious = cleared.spurious \/ r.sp]
+           r == IF dropOwn \/ u.conf = cur THEN [c |-> cur, blk |-> FALSE, sp |-> FALSE]
+                ELSE MergeVersions(win, lose, FALSE, ~ALLOW_OLD_BLANK_WINNER_BLOCK)
+       IN IF r.c = disk THEN cleared
+          ELSE [WriteLocal(cleared, 2, r.c) EXCEPT !.spurious = cleared.spurious \/ (r.sp /\ ~cleared.brk)]
 
 
 \* DailyDocument.load for the day now: heal, merge conflict versions, read, else seed.

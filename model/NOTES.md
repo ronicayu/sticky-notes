@@ -1,14 +1,16 @@
-# Model notes (v2)
+# Model notes (v3)
 
-Code modelled: commit `c16cef1` (branch `masterpiece`, Phase 0 and 1 complete). Every file:line below is
-`git show c16cef1:<path>`. HEAD was `6838780` when the work began; later commits (to `83e94dc`) change
+Code modelled: commit `c16cef1` (branch `masterpiece`, Phase 0 and 1 complete) with the fixes of N1-N6 (`414f4d9`,
+`5d21840`). Every file:line below is `git show c16cef1:<path>`; the fixes moved the lines of `ConflictResolver`,
+`NoteStore`, `NoteDocument`, `DailyDocument`, `DeskController` and `WriteLineage` (now in `NoteStore.swift`). HEAD was `6838780` when the work began; later commits (to `83e94dc`) change
 geometry and comments in `NoteDocument.swift` and `DailyDocument.swift` and add layout pruning to
 `DeskController.reconcileOpenWindows`, which do not change a modelled transition. Re-checked at `9f58340`:
 `ConflictResolver.swift` unchanged; the changes to `NoteStore` (layout, storage switch, legacy placement),
 `NoteWindowController` and the new Note menu (⌘W calls `closeNote`) touch no modelled transition; the anchors of
 N1-N6 are all still there.
 
-The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of the first run.
+The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of the first run, the `c16cef1` run
+in `out-v3/`.
 
 ## Files
 
@@ -17,18 +19,20 @@ The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of t
 | `LineMerge.tla` | Text operators shared by both models: `Covered`, `Superset`, `MergeVersions`, `MergeBodies`, `ThreeWay`, `NoRepeat` |
 | `NoteDocument.tla` | Model (a): one note in Obsidian vault mode, vault in iCloud Drive |
 | `DailyDocument.tla` | Model (b): today's daily note across midnight, this Mac plus the other Mac through iCloud |
-| `n-*.cfg`, `d-*.cfg`, `regress-*.cfg` | Configs; `regress-note-*` and `regress-daily-*` are the faithfulness configs; `-r2`, `-r3` are peel rounds |
+| `n-*.cfg`, `d-*.cfg`, `regress-*.cfg` | Configs; `regress-note-*` and `regress-daily-*` are the faithfulness configs (one per fixed bug, N1-N6 included) |
 | `note-doc-view.mjs`, `daily-doc-view.mjs` | Chart views |
-| `out-v3/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config |
+| `out-v4/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config on the fixed code (`out-v3/` is the run of `c16cef1`) |
 | `run-all.sh` | Reruns every config and the base check |
 
 ## Switch convention
 
 - `ALLOW_OLD_*` = FALSE is the code as it is. TRUE brings back one behaviour that a commit since the first
   run fixed. (In v1 the sign was the other way round.)
-- `ALLOW_OWN_COPY_BLOCK`, `ALLOW_BLANK_WINNER_BLOCK`, `ALLOW_LINEAGE_RESET`, `ALLOW_LINEAGE_NEEDS_NEWEST`,
-  `ALLOW_CLOSE_REFUSED_UNREADABLE`, `ALLOW_NO_MERGE_RETRY` are the new findings N1-N6: TRUE is the code as it
-  is, FALSE is the proposed fix. Round 1 configs set them TRUE; later rounds set one more FALSE.
+- `ALLOW_OLD_OWN_COPY_BLOCK`, `ALLOW_OLD_BLANK_WINNER_BLOCK`, `ALLOW_OLD_LINEAGE_RESET`, `ALLOW_OLD_LINEAGE_NEEDS_NEWEST`,
+  `ALLOW_OLD_CLOSE_REFUSED_UNREADABLE`, `ALLOW_OLD_NO_MERGE_RETRY` are the findings N1-N6 of the `c16cef1` run. They
+  were `ALLOW_*` = TRUE for the code as it was; after the fixes they follow the same convention as the older
+  switches: FALSE is the fixed code, TRUE brings the `c16cef1` behaviour back. The configs that showed each finding
+  are now `regress-*` configs with the switch TRUE, and the plain config of the same chain has it FALSE.
 - Environment constants (`ALLOW_EXTERNAL_EDIT`, ...) only switch an actor on.
 
 ## Abstractions
@@ -42,12 +46,19 @@ The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of t
   or "none" (the document expects no file). Own writes and adopting a read make it "ok"; any outside write,
   a frontmatter-only rewrite or an iCloud download makes it "stale". A save with "ok" writes, with "stale" or
   "none" finds a conflict, merges and writes.
-- `base` is `persistedContent`. `lin`/`linNew` are `WriteLineage` (set of own written bodies, newest). A read
-  that finds a file that is not the newest own write clears it (`readMainSnapshot`, `DailyFile.read`); a
-  relaunch clears it.
+- `base` is `persistedContent`. `lin`/`linNew` are `WriteLineage` (set of own written bodies, newest); the lineage
+  is saved in a file and survives a relaunch. It ends only in `Adopted`: a document took over text (`apply`,
+  `MergeIn`, `Opened`, daily `Adopt`) that lacks lines of what it showed (or of the newest write when it started
+  from the file), and `brk` remembers that. Reads change nothing. `DropsOwn`: an own conflict version that is not
+  the newest write is dropped while the file covers the newest write's text (`Covered`) or is an earlier write of
+  ours (`StaleFile`: the sweep judges the newest text in its place and writes it back). `MergeIn` keeps the
+  buffer, with no block, for a held-back outside body that is an earlier own write other than the newest, when the
+  buffer has unsaved edits. `ALLOW_OLD_LINEAGE_RESET` brings back the c16cef1 rules: a read ends the lineage unless
+  the file holds the newest write, a quit ends it, nothing else does.
 - Provenance for `NoSpuriousConflictBlock`: a block under a divider is warranted when each side holds text the
   other lacks and one side's extra text is outside-authored (`Outside` = `x`, `y` / `b2`). Two versions of this
-  person's own text are not a conflict.
+  person's own text are not a conflict, except after `brk`: when the lineage ended because outside text took lines
+  out, an earlier own save may hold the only copy of them, and the block is the safe outcome.
 - `persist()`'s three attempts and `resolveConflict` are one atomic step: they run on the main thread. The
   check-then-write gap in `NoteStore.save` (comment at NoteStore.swift:260) is left out.
 - One conflict version at a time. Title, labels, colour, geometry and `preserved` are not modelled; the body
@@ -68,15 +79,15 @@ The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of t
 | --- | --- |
 | `Init` | `DeskController.makeNote` 189-235 (a blank note has no file; a captured one is written at once, 217-220); `NoteDocument.init` 141-154 |
 | `Type` | `NoteDocument.edit` 194-199 -> `scheduleSave` 445-463 (`createsFileOnFirstEdit` guard 447) |
-| `SaveFires` | `scheduleSave` work item 451-462 -> `mergePendingExternal` 329-375 -> `persist` 486-525 |
+| `SaveFires` | `scheduleSave` work item 451-462 -> `mergePendingExternal` 329-375 (N1: `isEarlierOwnBody`) -> `persist` 486-525 |
 | `SwitchAway` | `NoteWindowController.windowDidResignKey` 704-718; abandoned capture -> `close(.discard)` NoteDocument.swift 606-644; else `blur` 306-310 |
-| `CloseNote`, `PanelArchive` | `NoteWindowController.closeNote` 503-513 -> `closeThroughDocument` 515-528 -> `NoteDocument.close(.archive)` 624-643; `DeskController.archiveNote` 154-161; `onCloseRefused` 118-128 (stranded -> recovery) |
+| `CloseNote`, `PanelArchive` | `NoteWindowController.closeNote` 503-513 -> `closeThroughDocument` 515-528 -> `NoteDocument.close(.archive)` 624-643; `DeskController.archiveNote` 154-161; `onCloseRefused` (stranded or `fileCannotBeRead` -> recovery, N3) |
 | `Quit` | `AppDelegate.applicationShouldTerminate` 76-83 -> `DeskController.flushForQuit` 612-617 -> `NoteDocument.flush` 596-602, `RecoveryFiles.write` |
-| `Relaunch` | `NoteStore.init` -> `purgeExpiredTrash` 612-633, `restoreActiveNotes`; `WriteLineage` is in memory (NoteStore.swift:95) |
+| `Relaunch` | `NoteStore.init` -> `purgeExpiredTrash` 612-633, `restoreActiveNotes`; `AppDelegate.init` loads the lineage file (`WriteLineage.useFile`), `applicationWillTerminate` saves it; the restored window calls `WriteLineage.adopted` (`Opened`) |
 | `Restore`, `DeleteForever`, `RestoreFromTrash`, `MonthPasses` | NoteStore.swift 518-530, 545-574, 580-590 |
-| `WindowHears` | `NoteStore.handleFileSystemEvent` 979-983 -> `NoteDocument.storeDidChange` 245-253 -> `externalChange` 257-297 |
+| `WindowHears` | `NoteStore.handleFileSystemEvent` 979-983 -> `NoteDocument.storeDidChange` 245-253 -> `externalChange` 257-297 -> `apply` (`WriteLineage.adopted`, the `Apply` of the model) |
 | `Reconcile` | `DeskController.reconcileOpenWindows` 379-403, `isGone` 409-415, `closeKeepingText` 420-425 -> `NoteDocument.close(.externalDeletion)` 614-623 |
-| `ConflictSweep` | `NoteStore.resolveConflict` 1269-1335 with `beforeResolvingConflicts` (DeskController 39-41 -> `flushPendingSave`) and `ConflictResolver.versionsToMerge` 95-103, `merge` 25-68 |
+| `ConflictSweep` | `NoteStore.resolveConflict` with `beforeResolvingConflicts` (DeskController 39-41 -> `flushPendingSave`), `ConflictResolver.standingInForStaleFile` (`StaleFile`), `versionsToMerge` (`DropsOwn`) and `merge` (blank winner, N2); a failed write or flush arms `settleConflictRetry` (N6) |
 | persist cases | `save` 272-326 (`.gone` 305, `.failed(locationUnknown)` 295), `writeIfUnchanged` 330-349; `NoteDocument.persist` 486-525; `keepTextElsewhere` 544-564 via `whereIs` 372-394, `save(in:)` 414-425, `saveRecoveredCopy` 430-448 |
 | `ExternalEdit`, `ExternalMetaWrite`, `ObsidianStaleRewrite` | Obsidian or the other Mac writes the file |
 | `ExternalConflict`, `ICloudSelfConflict` | iCloud keeps a conflict version (`NSFileVersion`); self-conflict is hypothesis H1 of the first report |
@@ -93,9 +104,9 @@ The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of t
 | `Type`, `RewriteTypo`, `SaveFires` | `setBody` 361-364 (refused while unavailable), `NoteDocument.edit` / `persist` through `DailyFile.save` 62-87 |
 | `PersonOpensToday` | `createTodaysFileIfMissing` 536-544 |
 | `SwitchAway` | `blur` 367-369 |
-| `WatcherDelivers` | `storeDidChange` 381-401: flush + heal when due (387-388), `resolveConflictVersions` 409-413 (flush must succeed), read, adopt or `externalChange` |
+| `WatcherDelivers` | `storeDidChange` 381-401: flush + heal when due (387-388), `resolveConflictVersions` (flush must succeed, else or on a failed merge write `armConflictRetry`, N6), read, adopt or `externalChange` |
 | heal | `DailyNote.healDuplicates` (DailyDocument.swift 415-428) |
-| conflict merge | `DailyFile.resolveConflicts` 139-188 with `WriteLineage` (read 47-59, write 93-98) |
+| conflict merge | `DailyFile.resolveConflictsReporting` with `WriteLineage` (write recorded in `writeRecording`; `standingInForStaleFile`, `versionsToMerge`) |
 | `Upload`, `Download`, `Evict`, `SelfConflict`, `BEditsOnline`, `BEditsOffline`, `BCreatesOffline`, `BUploads` | iCloud Drive and the other Mac |
 
 ## Predictions and outcome
@@ -115,7 +126,7 @@ Written from reading the code before the first run, compared after.
    separate `used` set.
 2. `Genuine` asked for outside text on the loser side only, so "this Mac's text against the other Mac's text"
    with the other Mac winning looked spurious. Fixed: symmetric, outside text on either side.
-3. `ALLOW_BLANK_WINNER_BLOCK` was passed to `MergeVersions` with the wrong sign. Fixed.
+3. `ALLOW_OLD_BLANK_WINNER_BLOCK` was passed to `MergeVersions` with the wrong sign. Fixed.
 4. `Download`/`Upload` did not mark the stored fingerprint stale or the file as foreign, so a daily save
    after a download overwrote it and `prev` held the other Mac's text. Fixed (`StaleFp`, `diskOwn`).
 5. `Quit` cleared the lineage from the pre-flush state. Fixed.
@@ -128,6 +139,12 @@ Written from reading the code before the first run, compared after.
 8. The liveness check as `ENABLED` of a close step made TLC 100 times slower; it is now a state predicate
    (`CloseAlwaysWorks`). A temporal property over the daily conflict versions did not finish; it is now the
    invariant `ConflictVersionsMerged`.
+
+9. (v3) The first model of the N4/N5 fix let a held-back outside body that equalled the newest write be taken for
+   "an older copy of our own text": the newest write can be a merge that holds the other Mac's text, and the model found
+   `TypedTextKept` broken. Fixed in the model and in the code (`5d21840`): only writes other than the newest count.
+10. (v3) `NoSpuriousConflictBlock` counts a block of two own versions after the lineage ended (`brk`) as warranted; the
+   token model cannot tell "own text" from "own text that an outside writer removed".
 
 ## Left out
 
