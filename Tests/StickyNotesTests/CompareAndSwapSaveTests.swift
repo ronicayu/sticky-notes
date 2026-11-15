@@ -288,8 +288,8 @@ private final class ChangeLog: @unchecked Sendable {
     // MARK: - Duplicate ids
 
     /// Two files carrying one id would let a save write one of them and a
-    /// reload read the other, so they are merged into one file when found.
-    func testAFileCarryingAnIdAnotherFileHasIsMergedIntoIt() throws {
+    /// reload read the other, so the extra file is given an id of its own when found.
+    func testAFileCarryingAnIdAnotherFileHasGetsANewId() throws {
         let note = makeNote("first")
         NoteStore(rootURL: root).save(note)
         let active = root.appendingPathComponent("notes")
@@ -301,14 +301,15 @@ private final class ChangeLog: @unchecked Sendable {
             .replacingOccurrences(of: "first", with: "stale copy")
             .write(to: copy, atomically: true, encoding: .utf8)
         let store = NoteStore(rootURL: root)
-        XCTAssertEqual(store.loadActive().count, 1)
+        XCTAssertEqual(store.loadActive().count, 2)
 
         var edited = try XCTUnwrap(store.loadNote(id: note.id))
+        XCTAssertEqual(edited.content, "first")
         edited.content = "edited"
         store.save(edited)
 
         XCTAssertEqual(store.loadNote(id: note.id)?.content, "edited")
-        XCTAssertEqual(store.loadActive().count, 1)
+        XCTAssertEqual(Set(store.loadActive().map(\.content)), ["edited", "stale copy"])
     }
 
     // MARK: - The sweep

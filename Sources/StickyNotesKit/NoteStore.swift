@@ -61,8 +61,8 @@ enum MigrationError: LocalizedError {
 struct MigrationReport {
     var migrated = 0
     var failures: [StorageFailure] = []
-    /// Notes that shared an id with another file in the same folder, merged into one.
-    var mergedDuplicates = 0
+    /// Ids that two or more files in one folder shared; the extra files got new ids.
+    var reassignedDuplicateIds = 0
 }
 
 /// The body hashes this process wrote to each file, oldest first, shared by
@@ -853,10 +853,10 @@ final class NoteStore {
             knownIds.insert(note.id)
             notes.append(note)
         }
-        // Two files with one id, as two Macs converting the same note leave: only
-        // one of them would take edits, archiving or deleting.
+        // Two files with one id, as Obsidian's "Make a copy" leaves: only one of
+        // them would take edits, archiving or deleting.
         if sawDuplicate {
-            let healed = mergeDuplicates(in: dir)
+            let healed = reassignDuplicateIds(in: dir)
             if !healed.isEmpty {
                 let fresh = loadAll(from: dir)
                 notifyObservers(.external(healed))
@@ -962,7 +962,7 @@ final class NoteStore {
     }
 
     private func migrateJSONNotes(in dir: URL, into report: inout MigrationReport) {
-        report.mergedDuplicates += mergeDuplicates(in: dir).count
+        report.reassignedDuplicateIds += reassignDuplicateIds(in: dir).count
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return
         }
@@ -1111,15 +1111,18 @@ final class NoteStore {
         }
     }
 
-    /// Merge `.md` files that share an id in `dir` into one. Returns the ids it
-    /// merged. Two Macs that convert the same note before they sync each write
-    /// their own file, and iCloud can keep both. The first file by the name a
-    /// fresh save would give it, else the first by name, keeps the note; the
-    /// merged text is written to it, read back, and only then are the others
-    /// moved to `.converted-json/duplicates/`.
+    /// Give every file but one a new id when several files in `dir` share one.
+    /// Obsidian's "Make a copy" and two Macs converting the same note both do
+    /// this, and while it stands only one of the files takes edits, archiving or
+    /// deleting. The file whose name a fresh save would give it keeps the id,
+    /// else the oldest by creation date, else the first by name. Each other file
+    /// has only its `id:` line rewritten, in place, and is read back; nothing is
+    /// merged or moved, so every file keeps its own text. Returns the ids that
+    /// were involved, old and new.
     @discardableResult
-    private func mergeDuplicates(in dir: URL) -> Set<UUID> {
-        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+    private func reassignDuplicateIds(in dir: URL) -> Set<UUID> {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.creationDateKey]) else {
             return []
         }
         var groups: [UUID: [(url: URL, snapshot: NoteSnapshot)]] = [:]
@@ -1128,33 +1131,55 @@ final class NoteStore {
             if let snapshot = readSnapshot(url) { groups[snapshot.note.id, default: []].append((url, snapshot)) }
         }
 
-        var healed = Set<UUID>()
+        var touched = Set<UUID>()
         for (id, group) in groups where group.count > 1 {
-            let primaryIndex = group.firstIndex { $0.url.lastPathComponent == generateURL(for: $0.snapshot.note, in: dir).lastPathComponent } ?? 0
-            let primary = group[primaryIndex]
-            let others = group.enumerated().filter { $0.offset != primaryIndex }.map(\.element)
-            let versions = [primary.snapshot.note] + others.map(\.snapshot.note)
-            var merged = ConflictResolver.merge(versions, now: clock.now()) ?? primary.snapshot.note
-            if merged.title.isEmpty, let title = versions.first(where: { !$0.title.isEmpty })?.title {
-                merged.title = title
+            func created(_ url: URL) -> Date {
+                (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantFuture
             }
-
-            if renderMarkdown(merged) != renderMarkdown(primary.snapshot.note) {
-                guard case let .saved(fingerprint) = writeIfUnchanged(
-                    merged, to: primary.url, expecting: .fingerprint(primary.snapshot.fingerprint)),
-                      let back = readSnapshot(primary.url), back.fingerprint == fingerprint,
-                      NoteStore.readsBackAs(merged, back.note)
-                else { continue }
+            let original = group.first { $0.url.lastPathComponent == generateURL(for: $0.snapshot.note, in: dir).lastPathComponent }
+                ?? group.min { (created($0.url), $0.url.lastPathComponent) < (created($1.url), $1.url.lastPathComponent) }!
+            for copy in group where copy.url != original.url {
+                if reassignId(of: copy.url, expecting: copy.snapshot) { touched.formUnion([id]) }
             }
-            var allMoved = true
-            for other in others where setAside(other.url, under: "duplicates") == nil { allMoved = false }
-            if allMoved { healed.insert(id) }
         }
-        if !healed.isEmpty {
+        if !touched.isEmpty {
             pathIndex.removeAll()
             indexedDirs.remove(dirKey(dir))
         }
-        return healed
+        return touched
+    }
+
+    /// Replace the value of the `id:` frontmatter line with a new id and nothing
+    /// else, if the file is still what was read.
+    private func reassignId(of url: URL, expecting snapshot: NoteSnapshot) -> Bool {
+        guard let data = try? Data(contentsOf: url), Fingerprint(of: data) == snapshot.fingerprint,
+              let text = String(data: data, encoding: .utf8) else { return false }
+        var lines = text.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "---" else { return false }
+        let newId = UUID()
+        var replaced = false
+        for index in 1..<lines.count {
+            let line = lines[index]
+            if line.trimmingCharacters(in: .whitespacesAndNewlines) == "---" { break }
+            guard let colon = line.firstIndex(of: ":"),
+                  line[..<colon].trimmingCharacters(in: .whitespacesAndNewlines) == "id" else { continue }
+            lines[index] = "id: \(newId.uuidString)" + (line.hasSuffix("\r") ? "\r" : "")
+            replaced = true
+            break
+        }
+        guard replaced else { return false }
+        let updated = Data(lines.joined(separator: "\n").utf8)
+        do {
+            try updated.write(to: url, options: .atomic)
+        } catch {
+            recordFailure(url: url, error: error)
+            return false
+        }
+        guard let back = readSnapshot(url), back.fingerprint == Fingerprint(of: updated), back.note.id == newId else {
+            return false
+        }
+        recordWrite(back.note, to: url)
+        return true
     }
 
     /// Whether `back`, read from the Markdown file written for `note`, is the

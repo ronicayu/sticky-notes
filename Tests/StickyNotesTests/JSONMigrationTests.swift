@@ -563,33 +563,82 @@ final class JSONMigrationTests: XCTestCase {
 
     // MARK: - Two files with one id
 
-    func testTwoMarkdownFilesWithOneIdAreMergedIntoOneAtLaunch() throws {
+    func testTwoFilesWithOneIdBecomeTwoNotesAtLaunchAndOnlyTheIdLineChanges() throws {
         let id = UUID()
         let store = NoteStore(rootURL: root)
-        var first = makeNote("shared\nonly in the first", id: id)
-        first.updatedAt = Date(timeIntervalSince1970: 1_700_000_100)
-        store.save(first)
+        store.save(makeNote("the original", id: id))
         let original = try XCTUnwrap(files("notes", ext: "md").first)
-        var second = makeNote("shared\nonly in the second", id: id)
-        second.updatedAt = Date(timeIntervalSince1970: 1_700_000_900)
-        let twin = original.deletingLastPathComponent()
-            .appendingPathComponent(original.deletingPathExtension().lastPathComponent + " 2.md")
-        try store.recoveryText(for: second).write(to: twin, atomically: true, encoding: .utf8)
+        let originalBytes = try Data(contentsOf: original)
+        // Obsidian's "Make a copy": the same file, edited, with the same frontmatter id.
+        let copy = original.deletingLastPathComponent().appendingPathComponent("Copy of note.md")
+        let copyText = try String(contentsOf: original, encoding: .utf8)
+            .replacingOccurrences(of: "the original", with: "the copy, edited")
+        try copyText.write(to: copy, atomically: true, encoding: .utf8)
 
         let relaunched = NoteStore(rootURL: root)
 
-        XCTAssertEqual(relaunched.lastMigration.mergedDuplicates, 1)
-        XCTAssertEqual(try files("notes", ext: "md"), [original], "the name a save would give it keeps the note")
-        let content = try XCTUnwrap(relaunched.loadActive().first).content
-        XCTAssertTrue(content.contains("only in the first"), content)
-        XCTAssertTrue(content.contains("only in the second"), content)
-        let aside = root.appendingPathComponent(".converted-json/duplicates", isDirectory: true)
-        XCTAssertEqual(try fm.contentsOfDirectory(atPath: aside.path), [twin.lastPathComponent],
-                       "the extra file is set aside, not deleted")
-        XCTAssertEqual(NoteStore(rootURL: root).lastMigration.mergedDuplicates, 0, "and a relaunch finds nothing")
+        XCTAssertEqual(relaunched.lastMigration.reassignedDuplicateIds, 1)
+        XCTAssertEqual(try Data(contentsOf: original), originalBytes, "the file with a fresh save's name is untouched")
+        XCTAssertEqual(try files("notes", ext: "md").count, 2, "nothing is merged or moved")
+        let notes = relaunched.loadActive()
+        XCTAssertEqual(notes.count, 2)
+        XCTAssertEqual(Set(notes.map(\.id)).count, 2)
+        XCTAssertEqual(Set(notes.map(\.content)), ["the original", "the copy, edited"])
+        XCTAssertEqual(notes.first { $0.content == "the original" }?.id, id)
+
+        let newId = try XCTUnwrap(notes.first { $0.content != "the original" }?.id)
+        let expected = copyText.replacingOccurrences(of: id.uuidString, with: newId.uuidString)
+        XCTAssertEqual(try String(contentsOf: copy, encoding: .utf8), expected, "only the id line changed")
+        XCTAssertFalse(fm.fileExists(atPath: root.appendingPathComponent(".converted-json").path))
+
+        let again = NoteStore(rootURL: root)
+        XCTAssertEqual(again.lastMigration.reassignedDuplicateIds, 0, "a relaunch changes nothing")
+        XCTAssertEqual(try String(contentsOf: copy, encoding: .utf8), expected)
+        XCTAssertEqual(again.loadActive().count, 2)
     }
 
-    func testDuplicatesThatAppearWhileTheAppRunsAreMergedWhenTheFolderIsRead() throws {
+    func testThePreservedIdGoesToTheOldestFileWhenNoNameMatches() throws {
+        let id = UUID()
+        let notes = try folder("notes")
+        let note = makeNote("same", id: id)
+        let store = NoteStore(rootURL: root.appendingPathComponent("scratch"))
+        let older = notes.appendingPathComponent("z older.md")
+        let newer = notes.appendingPathComponent("a newer.md")
+        try store.recoveryText(for: note).write(to: older, atomically: true, encoding: .utf8)
+        try store.recoveryText(for: note).write(to: newer, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.creationDate: Date(timeIntervalSince1970: 1_600_000_000)], ofItemAtPath: older.path)
+        try fm.setAttributes([.creationDate: Date(timeIntervalSince1970: 1_700_000_000)], ofItemAtPath: newer.path)
+
+        let loaded = NoteStore(rootURL: root).loadActive()
+
+        XCTAssertEqual(Set(loaded.map(\.id)).count, 2)
+        XCTAssertTrue(try String(contentsOf: older, encoding: .utf8).contains(id.uuidString))
+        XCTAssertFalse(try String(contentsOf: newer, encoding: .utf8).contains(id.uuidString))
+    }
+
+    func testAReassignedIdIsOurOwnWriteForTheConflictSweep() throws {
+        let id = UUID()
+        let store = NoteStore(rootURL: root)
+        store.save(makeNote("the original", id: id))
+        let original = try XCTUnwrap(files("notes", ext: "md").first)
+        let copy = original.deletingLastPathComponent().appendingPathComponent("copy.md")
+        try String(contentsOf: original, encoding: .utf8).write(to: copy, atomically: true, encoding: .utf8)
+        let relaunched = NoteStore(rootURL: root)
+        let copied = try XCTUnwrap(relaunched.loadActive().first { $0.id != id })
+
+        // An earlier save of this very file, kept by iCloud as a conflict version.
+        let version = root.appendingPathComponent("earlier.md")
+        try relaunched.recoveryText(for: copied).write(to: version, atomically: true, encoding: .utf8)
+        relaunched.conflictVersionsProvider = { url in
+            url.resolvingSymlinksInPath() == copy.resolvingSymlinksInPath()
+                ? [NoteStore.ConflictVersionHandle(url: version, markResolved: {})] : []
+        }
+
+        XCTAssertEqual(relaunched.resolveConflicts(), 0, "our own write is not a conflict")
+        XCTAssertEqual(relaunched.loadNote(id: copied.id)?.content, "the original")
+    }
+
+    func testDuplicatesThatAppearWhileTheAppRunsGetANewIdWhenTheFolderIsRead() throws {
         let id = UUID()
         let store = NoteStore(rootURL: root)
         store.save(makeNote("one", id: id))
@@ -601,9 +650,11 @@ final class JSONMigrationTests: XCTestCase {
 
         let loaded = store.loadActive()
 
-        XCTAssertEqual(loaded.count, 1)
-        XCTAssertTrue(try XCTUnwrap(loaded.first).content.contains("two"))
-        XCTAssertEqual(try files("notes", ext: "md").count, 1)
+        XCTAssertEqual(loaded.count, 2)
+        XCTAssertEqual(Set(loaded.map(\.id)).count, 2)
+        XCTAssertEqual(Set(loaded.map(\.content)), ["one", "two"])
+        XCTAssertEqual(loaded.first { $0.content == "one" }?.id, id)
+        XCTAssertEqual(try files("notes", ext: "md").count, 2)
     }
 
     // MARK: - Reporting
