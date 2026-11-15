@@ -105,6 +105,62 @@ final class NoteWindowEndToEndTests: XCTestCase {
         XCTAssertEqual(try onDisk(controller).updatedAt, after, "flush rewrote an already-saved note")
     }
 
+    // MARK: - A write that does not land
+
+    /// Makes every write into the notes folder fail, as a full disk or a
+    /// revoked permission would; the folder is made writable again on teardown.
+    private func failWrites() throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: store.activeURL.path)
+        addTeardownBlock { [store = store!] in
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: store.activeURL.path)
+        }
+    }
+
+    private func allowWrites() throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: store.activeURL.path)
+    }
+
+    /// The window used to record the text as saved before writing it, so a
+    /// failed write left it looking clean and nothing tried again.
+    func testAFailedSaveKeepsTheNoteDirty() throws {
+        let controller = try openNote(content: "on disk")
+        type("on disk plus a new thought", into: controller)
+        try failWrites()
+
+        controller.flushPendingSave()
+        XCTAssertEqual(try onDisk(controller).content, "on disk")
+
+        try allowWrites()
+        controller.flushPendingSave()
+        XCTAssertEqual(try onDisk(controller).content, "on disk plus a new thought",
+                       "the failed save was not retried: the window treated its text as saved")
+    }
+
+    /// Archiving moves a file, and closing drops the buffer: after a failed
+    /// write either one loses the text.
+    func testAFailedSaveDoesNotArchiveOrCloseTheNote() throws {
+        var closed = false
+        var note = Note.makeNew(frame: NSRect(x: 0, y: 0, width: 240, height: 200))
+        note.content = "on disk"
+        store.save(note)
+        let controller = NoteWindowController(note: note, store: store, onClosed: { _ in closed = true })
+        type("on disk plus a new thought", into: controller)
+        try failWrites()
+
+        controller.closeNote()
+
+        XCTAssertFalse(closed, "the window closed with text that reached no file")
+        XCTAssertTrue(store.loadArchived().isEmpty, "the note was archived without its text")
+        XCTAssertEqual(controller.textView.string, "on disk plus a new thought")
+
+        try allowWrites()
+        controller.closeNote()
+
+        XCTAssertTrue(closed)
+        let archived = try XCTUnwrap(store.loadArchived().first)
+        XCTAssertEqual(archived.content, "on disk plus a new thought")
+    }
+
     // MARK: - Archiving
 
     /// Archiving moves the file; it doesn't write one. Anything typed since

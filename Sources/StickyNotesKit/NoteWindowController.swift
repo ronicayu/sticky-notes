@@ -560,7 +560,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             // the last debounced save has to land first — including any
             // external edit we deferred while the user was typing.
             mergePendingExternalNote()
-            persist()
+            // The text is on no disk: archiving would move a file that lacks
+            // it, and closing would throw it away. Stay open; the retry is armed.
+            guard persist() else { return }
             savingDisabled = true
             store.archive(note)
             onArchived?(note)
@@ -1631,7 +1633,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     // MARK: - Persistence
 
-    private func scheduleSave() {
+    private func scheduleSave(after delay: TimeInterval = 0.5) {
         guard !savingDisabled else { return }
         saveWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
@@ -1646,18 +1648,37 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             self.persist()
         }
         saveWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
+
+    /// How long to wait before trying again after a write that did not land.
+    private static let saveRetryDelay: TimeInterval = 5
 
     /// Write the note and remember exactly what went to disk. Our own writes
     /// come back through the file watcher as `didChange`, and without this
     /// record there is no way to tell that echo apart from someone else
     /// editing the file.
-    private func persist() {
+    ///
+    /// A write that did not land does not mark the buffer as persisted, so it
+    /// still counts as unsaved, and another attempt is armed. Returns false for
+    /// that case, so a caller about to archive or close can stop. A note whose
+    /// file is gone returns true: there is nothing to retry, and the window is
+    /// closed by the reconcile that found it gone.
+    ///
+    /// Still a blind write: the file is not checked against what this window
+    /// last read. An owner that tracks a fingerprint saves with `save(_:expecting:)`.
+    @discardableResult
+    private func persist() -> Bool {
         note.updatedAt = clock.now()
-        lastPersistedContent = note.content
-        lastPersistedTitle = note.title
-        store.save(note)
+        switch store.save(note) {
+        case .failed, .conflict:
+            scheduleSave(after: NoteWindowController.saveRetryDelay)
+            return false
+        case .saved, .gone:
+            lastPersistedContent = note.content
+            lastPersistedTitle = note.title
+            return true
+        }
     }
 
     /// Write any debounced edit immediately. Saves are debounced by half a
