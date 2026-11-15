@@ -84,7 +84,7 @@ final class OwnWriteLineageTests: XCTestCase {
         document.edit { $0.content = "first line\nsecond line" }
         scheduler.advance(by: 1)
         document.edit { $0.content = "better first line\nsecond line" }
-        try writeOutside(document.id, "first line\nsecond line")
+        try writeOutside(document.id, "first line")
         document.storeDidChange()
 
         scheduler.advance(by: 1)
@@ -93,6 +93,27 @@ final class OwnWriteLineageTests: XCTestCase {
         XCTAssertEqual(saved, "better first line\nsecond line")
         XCTAssertEqual(count(of: "Conflicted copy", in: saved), 0)
         XCTAssertEqual(body(of: document.buffer), "better first line\nsecond line")
+    }
+
+    /// A merge the store wrote holds the other Mac's text and is recorded as a
+    /// write of ours. When the window then hears that file while the person has
+    /// typed on, it is the file's current text, not an older copy of the person's
+    /// own, so the other Mac's line must survive.
+    func testTheOtherMacsTextInAMergeWeWroteIsNotTakenForAnOlderCopyOfOurOwnText() throws {
+        let document = open(makeNote("shared line"))
+        let other = try version(document.id, "shared line\nfrom the other Mac")
+        store.conflictVersionsProvider = { _ in [other] }
+        store.otherVersionsRemover = { _ in }
+        document.isEditing = { true }
+        XCTAssertEqual(store.resolveConflicts(), 1)
+        document.storeDidChange()
+        XCTAssertNotNil(document.pendingExternal, "the window was meant to hold the merged file back")
+        document.edit { $0.content = "shared line\ntyped here" }
+
+        document.blur()
+
+        let saved = try onDisk(document.id)
+        XCTAssertTrue(saved.contains("from the other Mac") && saved.contains("typed here"), saved)
     }
 
     func testAnOutsideRewriteWithALineNoWriteOfOursHadIsStillMerged() throws {
@@ -147,6 +168,55 @@ final class OwnWriteLineageTests: XCTestCase {
 
         let content = try onDisk(note.id)
         XCTAssertTrue(content.contains("teh cat") && content.contains("something else entirely"), content)
+    }
+
+    /// Obsidian put back an older copy of our own text, and iCloud kept another
+    /// earlier save of ours as a conflict version. Our newest text is what the
+    /// note stands for: the older save is dropped, and the newest text is written
+    /// back over the stale copy, with no divider.
+    func testAnOlderOwnSaveIsDroppedWhenAnEarlierOwnCopyWasPutBack() throws {
+        var note = makeNote("a line")
+        store.save(note)
+        note.content = "a line\nsecond line"
+        store.save(note)
+        let older = try version(note.id, "a line\nsecond line")
+        note.content = "better line\nsecond line"
+        store.save(note)
+        try writeOutside(note.id, "a line")
+        var resolved = 0
+        store.conflictVersionsProvider = { _ in [.init(url: older.url, markResolved: { resolved += 1 })] }
+        store.otherVersionsRemover = { _ in }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+
+        XCTAssertEqual(resolved, 1)
+        XCTAssertEqual(try onDisk(note.id), "better line\nsecond line")
+    }
+
+    /// The same with the window open on the note: it holds back Obsidian's older
+    /// copy while the caret is in the text, and its newest text is not on disk.
+    func testTheSweepKeepsTheWindowsNewestTextWhenAnEarlierOwnCopyWasPutBack() throws {
+        let document = open(makeNote("a line"))
+        document.edit { $0.content = "a line\nsecond line" }
+        scheduler.advance(by: 1)
+        let older = try version(document.id, "a line\nsecond line")
+        document.edit { $0.content = "better line\nsecond line" }
+        scheduler.advance(by: 1)
+        document.isEditing = { true }
+        try writeOutside(document.id, "a line")
+        document.storeDidChange()
+        XCTAssertNotNil(document.pendingExternal)
+        store.beforeResolvingConflicts = { _ in document.flush() }
+        store.conflictVersionsProvider = { _ in [older] }
+        store.otherVersionsRemover = { _ in }
+
+        _ = store.resolveConflicts()
+        document.storeDidChange()
+        scheduler.advance(by: 1)
+
+        let saved = try onDisk(document.id)
+        XCTAssertEqual(saved, "better line\nsecond line")
+        XCTAssertEqual(body(of: document.buffer), "better line\nsecond line")
     }
 
     func testAnOlderOwnSaveIsStillDroppedAfterAnOutsideWriteAndAfterARelaunch() throws {

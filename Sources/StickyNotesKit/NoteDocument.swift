@@ -502,6 +502,7 @@ final class NoteDocument {
     @discardableResult
     private func persist() -> Bool {
         guard !isClosed else { return true }
+        fileCannotBeRead = false
         for _ in 0..<Self.maxSaveAttempts {
             buffer.updatedAt = clock.now()
             switch repository.save(buffer, expecting: persistedFingerprint) {

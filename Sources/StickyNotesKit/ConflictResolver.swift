@@ -97,6 +97,22 @@ enum ConflictResolver {
         var newestBody: String?
     }
 
+    /// When the file is an earlier write of ours that was put back (an older copy
+    /// that Obsidian or a sync wrote over our newest save), our newest text is
+    /// what the merge treats as the current file, so that our other earlier saves
+    /// are dropped against it and it, not the stale copy, is written back. Every
+    /// line of the stale copy is in the newest write or was taken out by the
+    /// person, so nothing is lost. Otherwise `current` as it is.
+    static func standingInForStaleFile(
+        _ current: Note, newestBody: String?,
+        isEarlierBody: (String) -> Bool, isNewestBody: (String) -> Bool
+    ) -> Note {
+        guard let newestBody, !isNewestBody(current.content), isEarlierBody(current.content) else { return current }
+        var judged = current
+        judged.content = newestBody
+        return judged
+    }
+
     /// The notes worth merging: the current file plus its conflict versions,
     /// minus the ones that are an earlier save of this Mac's own writing.
     ///

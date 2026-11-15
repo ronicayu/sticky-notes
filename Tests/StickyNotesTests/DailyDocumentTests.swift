@@ -887,6 +887,33 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertEqual(resolved, 1, "the dropped version must still be marked resolved")
     }
 
+    /// Obsidian put back an older copy of this Mac's own text while iCloud kept
+    /// another earlier save as a conflict version: the newest text stands, with no
+    /// divider and no older copy of our own text.
+    func testAnOlderOwnDailySaveIsDroppedWhenAnEarlierOwnCopyWasPutBack() throws {
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        var resolved = 0
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("a line")
+        scheduler.advance(by: 1)
+        document.setBody("a line\nsecond line")
+        scheduler.advance(by: 1)
+        let older = try conflictVersion("a line\nsecond line") { resolved += 1 }
+        document.setBody("better line\nsecond line")
+        scheduler.advance(by: 1)
+        try write("a line")
+
+        versions = [older]
+        document.storeDidChange()
+
+        XCTAssertEqual(try text(), "better line\nsecond line")
+        XCTAssertEqual(document.body, "better line\nsecond line")
+        XCTAssertEqual(resolved, 1)
+    }
+
     func testAnotherWritersVersionIsMergedEvenAfterThisMacSavedTheNote() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
         var versions: [NoteStore.ConflictVersionHandle] = []

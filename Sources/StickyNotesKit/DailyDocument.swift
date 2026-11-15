@@ -50,7 +50,6 @@ final class DailyFile: NoteRepository {
             return present ? .unreadable : .missing
         }
         guard let body = String(data: data, encoding: .utf8) else { return .unreadable }
-        WriteLineage.observed(body: body, for: NoteStore.lineageKey(url))
         return .file(data, body)
     }
 
@@ -104,7 +103,7 @@ final class DailyFile: NoteRepository {
 
     func isEarlierOwnBody(_ body: String, ofNote id: UUID) -> Bool {
         guard let url = url else { return false }
-        return WriteLineage.containsBody(body, for: NoteStore.lineageKey(url))
+        return WriteLineage.containsEarlierBody(body, for: NoteStore.lineageKey(url))
     }
 
     func textAdopted(_ body: String, over previous: String?, ofNote id: UUID) {
@@ -185,8 +184,13 @@ final class DailyFile: NoteRepository {
         }
 
         let history = WriteLineage.history(for: NoteStore.lineageKey(url))
+        let judged = ConflictResolver.standingInForStaleFile(
+            current, newestBody: history.newestBody,
+            isEarlierBody: { history.contains(body: NoteStore.contentHash(body: $0)) },
+            isNewestBody: { history.newest?.body == NoteStore.contentHash(body: $0) }
+        )
         let versions = ConflictResolver.versionsToMerge(
-            current: current,
+            current: judged,
             conflicts: conflictNotes,
             ours: ConflictResolver.OwnWrites(
                 isOurs: { history.contains(full: NoteStore.contentHash($0)) },
@@ -194,7 +198,7 @@ final class DailyFile: NoteRepository {
                 newestBody: history.newestBody
             )
         )
-        guard ConflictResolver.needsMerge(versions),
+        guard ConflictResolver.needsMerge(versions) || judged.content != current.content,
               let merged = ConflictResolver.merge(versions, now: clock.now()),
               merged.content != current.content else { return .unchanged }
 

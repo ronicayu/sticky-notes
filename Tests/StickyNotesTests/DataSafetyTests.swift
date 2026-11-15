@@ -779,14 +779,17 @@ final class ConflictSweepTests: XCTestCase {
     /// window adopts it, then any save writes the adopted text back. The
     /// older own save now holds text the file lacks and must be merged.
     func testAnOwnVersionIsMergedAfterAdoptingAnotherMacsFile() throws {
-        var note = savedNote("A\nmine")
+        let note = savedNote("A\nmine")
         let own = try version(of: note, content: "A\nmine")
+        let clock = ManualClock()
+        let scheduler = TestScheduler(clock: clock)
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
         try rawNote(id: note.id, content: "A\ntheirs", updated: "2026-01-01T00:00:00Z")
             .write(to: fileURL(), atomically: true, encoding: .utf8)
-        XCTAssertEqual(try XCTUnwrap(store.loadNote(id: note.id)).content.trimmingCharacters(in: .whitespacesAndNewlines), "A\ntheirs")
-        note.content = "A\ntheirs\nmoved the window"
-        note.updatedAt = Date()
-        store.save(note)
+        document.storeDidChange()
+        XCTAssertEqual(document.buffer.content.trimmingCharacters(in: .whitespacesAndNewlines), "A\ntheirs")
+        document.edit { $0.content = "A\ntheirs\nmoved the window" }
+        scheduler.advance(by: 1)
         store.conflictVersionsProvider = { _ in [own] }
         store.otherVersionsRemover = { _ in }
 

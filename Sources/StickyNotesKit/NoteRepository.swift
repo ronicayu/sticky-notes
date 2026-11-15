@@ -22,8 +22,8 @@ protocol NoteRepository: AnyObject {
     func save(_ note: Note, in folder: NoteStore.Folder, expecting fingerprint: Fingerprint) -> SaveResult
     /// A copy of a note that exists nowhere, written to the trash.
     func saveRecoveredCopy(of note: Note) -> Bool
-    /// Whether `body` is exactly the text of a write this Mac made to the note's
-    /// file earlier. An outside writer that puts such text back is returning an
+    /// Whether `body` is exactly the text of an earlier write this Mac made to the
+    /// note's file, not the newest. An outside writer that puts such text back is returning an
     /// older copy of the person's own text, not adding new text.
     func isEarlierOwnBody(_ body: String, ofNote id: UUID) -> Bool
     /// A document took `body` as the note's text: it started from the file, or an

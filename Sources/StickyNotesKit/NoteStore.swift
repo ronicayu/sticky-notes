@@ -103,20 +103,22 @@ struct MigrationReport {
 /// versions of a note adds nothing when its lines are in N, or when the person
 /// took them out of the note in a write between E and N. The list says which
 /// case holds only while the person was the one who changed the text from E to
-/// N, so it ends (`observed`, `adopted`) as soon as text we did not write took
-/// lines of N out of the note: an outside version that lacks lines of N was read
-/// or became the document's text. After that an earlier write may hold the only
-/// copy of a line, and is merged like any other version. An outside append, a
-/// property rewrite, or an older copy of our own text that the window did not
-/// adopt, leaves the list alone, because they take nothing out.
+/// N, so it ends (`adopted`) as soon as a document takes over text that lacks
+/// lines it showed: an outside version replaced them, or the document started
+/// from a file that does not hold them. After that an earlier write may hold the
+/// only copy of a line, and is merged like any other version. A document that
+/// keeps its buffer against an outside version (an older copy of our own text
+/// put back, an append) takes nothing out and leaves the list alone.
 ///
 /// Within that, `ConflictResolver.versionsToMerge` drops an earlier write only
 /// while N's text is itself still in the merge (the file covers it, or N is one
-/// of the versions), and never N itself. An older own body as the current file
-/// does not let a newer own save be dropped: that save is then N, or the file
-/// does not cover N and nothing is dropped. A foreign version is never in the
-/// list, and a version with a line none of our writes had is not an earlier
-/// write, so text found only in another version is merged as before.
+/// of the versions), and never N itself. When the file is an earlier write of
+/// ours that was put back, N's text stands in for it (`resolveConflict`), so
+/// N itself is what survives. An older own body as the current file never lets
+/// a newer own save be dropped: that save is N, which is not dropped on this
+/// evidence. A foreign version is never in the list, and a version with a line
+/// none of our writes had is not an earlier write, so text found only in the
+/// other version is merged as before.
 ///
 /// The list is saved in a machine-local file (`useFile`), so a relaunch keeps it.
 enum WriteLineage {
@@ -197,23 +199,6 @@ enum WriteLineage {
         fileQueue.asyncAfter(deadline: .now() + saveDelay) { write() }
     }
 
-    /// A read of the file found `body`. When that is text we never wrote and it
-    /// lacks lines of our newest write, something outside took text out of the
-    /// note that the person did not, so an earlier write may now hold the only
-    /// copy of it: the list ends. An outside append, or a body that is one of our
-    /// own writes (an older copy put back), changes nothing.
-    static func observed(body: String, for key: String) {
-        lock.lock()
-        guard let stored = files[key] else { lock.unlock(); return }
-        let hash = NoteStore.contentHash(body: body)
-        if stored.writes.contains(where: { $0.body == hash }) { lock.unlock(); return }
-        if let newest = stored.newestBody, ConflictResolver.isCovered(newest, by: body) { lock.unlock(); return }
-        files[key] = nil
-        let needsSave = markDirtyLocked()
-        lock.unlock()
-        if needsSave { scheduleSave() }
-    }
-
     /// A document took `body` as the text of the note in place of `previous`, or
     /// of the newest write when it had none: it started from the file, or an
     /// outside version replaced what it showed. If that dropped lines, whoever
@@ -247,9 +232,15 @@ enum WriteLineage {
         history(for: key).contains(full: hash)
     }
 
-    /// True when `body` is exactly the body of one of the writes for `key`.
-    static func containsBody(_ body: String, for key: String) -> Bool {
-        history(for: key).contains(body: NoteStore.contentHash(body: body))
+    /// True when `body` is exactly the body of a write for `key` other than the
+    /// newest. The newest write is what the file holds or held last, and may hold
+    /// text from another writer that a merge wrote for us, so it is no evidence
+    /// that the text is the person's own older text.
+    static func containsEarlierBody(_ body: String, for key: String) -> Bool {
+        let history = history(for: key)
+        guard let newest = history.newest else { return false }
+        let hash = NoteStore.contentHash(body: body)
+        return hash != newest.body && history.contains(body: hash)
     }
 
     /// True when `hash` is the most recent write recorded for `key`.
@@ -1626,12 +1617,12 @@ final class NoteStore {
         )
     }
 
-    /// Whether `body` is exactly the text of a write this Mac made to the note's
-    /// active file, which a document uses to tell an outside writer putting back
+    /// Whether `body` is exactly the text of an earlier write this Mac made to the
+    /// note's active file, which a document uses to tell an outside writer putting back
     /// an older copy of the person's own text from new text.
     func isEarlierOwnBody(_ body: String, ofNote id: UUID) -> Bool {
         guard let url = pathIndex[id] ?? existingURL(for: id, in: activeURL) else { return false }
-        return WriteLineage.containsBody(body, for: NoteStore.lineageKey(url))
+        return WriteLineage.containsEarlierBody(body, for: NoteStore.lineageKey(url))
     }
 
     func textAdopted(_ body: String, over previous: String?, ofNote id: UUID) {
@@ -1712,8 +1703,13 @@ final class NoteStore {
         }
 
         let history = WriteLineage.history(for: NoteStore.lineageKey(url))
+        let judged = ConflictResolver.standingInForStaleFile(
+            current, newestBody: history.newestBody,
+            isEarlierBody: { history.contains(body: NoteStore.contentHash(body: $0)) },
+            isNewestBody: { history.newest?.body == NoteStore.contentHash(body: $0) }
+        )
         let versions = ConflictResolver.versionsToMerge(
-            current: current,
+            current: judged,
             conflicts: conflictNotes,
             ours: ConflictResolver.OwnWrites(
                 isOurs: { history.contains(full: NoteStore.contentHash($0)) },
@@ -1722,7 +1718,7 @@ final class NoteStore {
             )
         )
 
-        guard ConflictResolver.needsMerge(versions),
+        guard ConflictResolver.needsMerge(versions) || judged.content != current.content,
               var merged = ConflictResolver.merge(versions, now: clock.now()) else { return nil }
         merged.preserved = current.preserved
 
@@ -1822,7 +1818,6 @@ final class NoteStore {
         let note = String(data: data, encoding: .utf8).flatMap {
             parseMarkdown($0, fallbackId: idFromFilename(url) ?? stableId(for: url))
         }
-        if let note { WriteLineage.observed(body: note.content, for: NoteStore.lineageKey(url)) }
         return note.map { NoteSnapshot(note: $0, fingerprint: Fingerprint(of: data)) }
     }
 
