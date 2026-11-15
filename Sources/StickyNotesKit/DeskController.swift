@@ -269,6 +269,7 @@ import AppKit
             return
         }
         if let controller = windowControllers[id] {
+            if controller.isCollapsed { controller.toggleCollapse() }
             controller.showWindow(nil)
             controller.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)

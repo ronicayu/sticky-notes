@@ -451,7 +451,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             self?.updateChromeVisibility()
         }
 
-        updateDateLabel()
+        updateDateLabel(editedNow: false)
         updateChromeVisibility(animated: false)
         rebuildLabelChips()
 
@@ -633,6 +633,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         let isKey = window?.isKeyWindow ?? false
         let shouldShow = !geometry.collapsed && (isKey || isHovering)
         let target: CGFloat = shouldShow ? 1.0 : 0
+        // A transparent button still takes clicks; on the collapsed bar they
+        // would expand, recolor or archive the note instead of moving it.
+        for button in [trashButton, expandButton, colorButton, labelButton] {
+            button.isHidden = geometry.collapsed
+        }
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = Appearance.animationDuration(0.16)
@@ -1018,8 +1023,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         return false
     }
 
-    private func updateDateLabel() {
-        dateLabel.stringValue = relativeDateString(for: clock.now())
+    /// Shows when the note was last changed: now while it is being edited,
+    /// otherwise its saved date.
+    private func updateDateLabel(editedNow: Bool = true) {
+        dateLabel.stringValue = relativeDateString(for: editedNow ? clock.now() : note.updatedAt)
     }
 
     private func relativeDateString(for date: Date) -> String {
@@ -1131,7 +1138,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             // so a content-only edit has to refresh it too.
             refreshCollapsedTitle()
             editor.replaceText(note.content)
-            updateDateLabel()
+            updateDateLabel(editedNow: false)
         }
     }
 
