@@ -170,6 +170,10 @@ import AppKit
     }
 
     func focusNote(id: UUID) {
+        if id == DailyNote.candidateID {
+            focusDailyNote()
+            return
+        }
         if let controller = windowControllers[id] {
             controller.showWindow(nil)
             controller.window?.makeKeyAndOrderFront(nil)
@@ -205,12 +209,7 @@ import AppKit
         // notes back so the new one isn't the only thing visible. Clear the
         // flag directly — `toggleHideAll` refuses when there are no windows
         // to unhide, which would leave the note we're about to make hidden.
-        if notesHidden {
-            notesHidden = false
-            applyVisibility()
-            // The "Hidden N notes — Undo" toast has nothing left to undo.
-            undo.dismiss()
-        }
+        showAllIfHidden()
 
         let frame = nextNoteFrame()
         var note = Note.makeNew(frame: frame, color: settings.defaultNoteColor, now: clock.now())
@@ -261,11 +260,25 @@ import AppKit
 
     // MARK: - Visibility
 
+    /// Bring everything back after "hide all", so a note opened or made now is
+    /// not the only thing on screen. Clears the flag directly: `toggleHideAll`
+    /// refuses when there are no note windows to unhide.
+    private func showAllIfHidden() {
+        guard notesHidden else { return }
+        notesHidden = false
+        applyVisibility()
+        // The "Hidden N notes — Undo" toast has nothing left to undo.
+        undo.dismiss()
+    }
+
     @objc func toggleHideAll() {
         let dailyVisible = dailyNoteController?.window?.isVisible ?? false
-        guard !windowControllers.isEmpty || dailyVisible else { return }
+        // With only the daily note on the desk, "hide all" hid it, and the same
+        // command has to bring it back.
+        guard !windowControllers.isEmpty || dailyVisible || notesHidden else { return }
 
         let wasVisible = windowControllers.values.filter { $0.window?.isVisible == true }.count
+            + (dailyVisible ? 1 : 0)
         notesHidden.toggle()
         applyVisibility()
 
@@ -337,27 +350,31 @@ import AppKit
     @objc func arrangeGrid() { arrange(using: WindowArrangement.grid(sizes:in:gap:)) }
     @objc func arrangeCascade() { arrange(using: WindowArrangement.cascade(sizes:in:step:)) }
 
-    /// Lay every visible note out on the screen the pointer is on. Notes keep
-    /// their own sizes; only positions move.
-    private func arrange(using layout: ([CGSize], CGRect, CGFloat) -> [CGRect]) {
+    /// Lay every visible note, and the daily note, out on the screen the pointer
+    /// is on. Windows keep their own sizes; only positions move.
+    func arrange(animated: Bool = true, using layout: ([CGSize], CGRect, CGFloat) -> [CGRect]) {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
 
-        let controllers = windowControllers.values
-            .filter { $0.window?.isVisible == true }
-            // Left-to-right, top-to-bottom, so an arrange broadly preserves
-            // where things already were rather than shuffling them.
-            .sorted { a, b in
-                let fa = a.window?.frame ?? .zero, fb = b.window?.frame ?? .zero
-                if fa.minY != fb.minY { return fa.minY > fb.minY }
-                return fa.minX < fb.minX
-            }
-        guard !controllers.isEmpty else { return }
+        var items: [(frame: NSRect, size: CGSize, move: (NSRect) -> Void)] = []
+        for controller in windowControllers.values where controller.window?.isVisible == true {
+            items.append((controller.window?.frame ?? .zero, controller.arrangementSize, { controller.setArrangedFrame($0, animated: animated) }))
+        }
+        if let daily = dailyNoteController, daily.window?.isVisible == true {
+            items.append((daily.window?.frame ?? .zero, daily.arrangementSize, { daily.setArrangedFrame($0, animated: animated) }))
+        }
+        // Left-to-right, top-to-bottom, so an arrange broadly preserves
+        // where things already were rather than shuffling them.
+        items.sort { a, b in
+            if a.frame.minY != b.frame.minY { return a.frame.minY > b.frame.minY }
+            return a.frame.minX < b.frame.minX
+        }
+        guard !items.isEmpty else { return }
 
-        let frames = layout(controllers.map(\.arrangementSize), visible, 12)
-        for (controller, frame) in zip(controllers, frames) {
-            controller.setArrangedFrame(frame)
+        let frames = layout(items.map(\.size), visible, 12)
+        for (item, frame) in zip(items, frames) {
+            item.move(frame)
         }
     }
 
@@ -446,6 +463,7 @@ import AppKit
         if notesPanelController == nil {
             notesPanelController = NotesPanelController(
                 store: store,
+                dailyNote: { [weak self] in self?.dailyCandidate() },
                 onActivate: { [weak self] id in self?.focusNote(id: id) },
                 onArchive: { [weak self] note in self?.archiveNote(note) }
             )
@@ -459,6 +477,8 @@ import AppKit
 
     /// Pressing the hotkey again while the palette is up closes it, so the
     /// same chord opens and dismisses.
+    var switcher: QuickSwitcherController? { quickSwitcher }
+
     @objc func toggleQuickSwitcher() {
         if quickSwitcher?.isVisible == true {
             quickSwitcher?.dismiss()
@@ -470,7 +490,9 @@ import AppKit
     /// Open the palette, optionally with a query already typed.
     func showQuickSwitcher(query: String = "") {
         if quickSwitcher == nil {
-            quickSwitcher = QuickSwitcherController(store: store) { [weak self] outcome in
+            quickSwitcher = QuickSwitcherController(
+                store: store, dailyNote: { [weak self] in self?.dailyCandidate() }
+            ) { [weak self] outcome in
                 self?.handle(outcome)
             }
         }
@@ -489,6 +511,9 @@ import AppKit
             if notesHidden { toggleHideAll() }
             focusNote(id: id)
 
+        case .openDaily:
+            focusDailyNote()
+
         case let .create(title):
             // Searching for a note that isn't there is a capture intent —
             // keep the typed words as the title and start in the body.
@@ -496,14 +521,21 @@ import AppKit
         }
     }
 
-    /// A `[[wiki link]]` points at one of our notes when a title matches;
-    /// otherwise it's probably a note elsewhere in the vault, so hand it to
-    /// Obsidian rather than doing nothing.
+    /// A `[[wiki link]]` points at one of our notes when a title matches, at
+    /// today's daily note when it says "Today" or names that file. Anything else
+    /// is probably a note elsewhere in the vault, so it goes to Obsidian
+    /// rather than doing nothing.
     @objc private func handleWikiLinkClick(_ notification: Notification) {
         guard let target = notification.userInfo?["target"] as? String else { return }
 
         if let match = WikiLink.resolve(target, in: store.loadActive()) {
             focusNote(id: match.id)
+            return
+        }
+        if canShowDailyNote,
+           DailyNote.linkNamesDailyNote(target, fileURL: DailyNote.resolvedURL(for: clock.now(), settings: settings),
+                                        settings: settings) {
+            focusDailyNote()
             return
         }
         if let archived = WikiLink.resolve(target, in: store.loadArchived()) {
@@ -575,6 +607,43 @@ import AppKit
             controller.hide()
             return
         }
+        if dailyNoteController == nil {
+            dailyNoteController = makeDailyNoteController()
+        }
+        dailyNoteController?.show()
+    }
+
+    /// Today's note as the switcher and the panel list it: titled "Today", with
+    /// the text the window holds or, before a window exists, what the file holds
+    /// now. It only reads: listing the note never creates its file. Nil when no
+    /// daily note is set up.
+    func dailyCandidate() -> Note? {
+        guard canShowDailyNote else { return nil }
+        let color = DailyNote.loadState(settings: settings).color
+        if let document = dailyNoteController?.dailyDocument {
+            return DailyNote.candidate(
+                body: document.isUnavailable ? "" : document.body, day: document.day,
+                modified: document.url.flatMap(Self.modificationDate(of:)), color: color
+            )
+        }
+        let now = clock.now()
+        let url = DailyNote.resolvedURL(for: now, settings: settings)
+        let body = url.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+        return DailyNote.candidate(
+            body: body, day: Calendar.current.startOfDay(for: now),
+            modified: url.flatMap(Self.modificationDate(of:)), color: color
+        )
+    }
+
+    private static func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    /// Open today's note and bring it forward, undoing "hide all" first. The
+    /// person chose it, so it may create the file, exactly as the menu does.
+    func focusDailyNote() {
+        guard canShowDailyNote else { return }
+        showAllIfHidden()
         if dailyNoteController == nil {
             dailyNoteController = makeDailyNoteController()
         }

@@ -165,6 +165,51 @@ enum DailyNote {
         }
     }
 
+    // MARK: - Listing today's note beside the stored notes
+
+    /// The id the switcher and the notes panel give today's note. It is not a
+    /// stored note and never reaches the store; the desk recognises it and opens
+    /// the daily window instead.
+    static let candidateID = UUID(uuidString: "DA117000-0000-0000-0000-000000000000")!
+
+    /// "Sun, Nov 15": the day, as the window's title and the list rows show it.
+    static func shortDate(_ day: Date) -> String {
+        shortDateFormatter.string(from: day)
+    }
+
+    private static let shortDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d"
+        f.locale = Locale.autoupdatingCurrent
+        return f
+    }()
+
+    /// Today's note as a value a list can rank and show. Titled "Today"; its
+    /// creation date is the day, for the row to print. Nothing about it is ever
+    /// written to the file.
+    static func candidate(body: String, day: Date, modified: Date?, color: NoteColor) -> Note {
+        Note(
+            id: candidateID, title: "Today", content: body,
+            width: 0, height: 0, color: color,
+            createdAt: day, updatedAt: modified ?? day
+        )
+    }
+
+    /// Whether a `[[wiki link]]` target names the daily file at `url`: "Today",
+    /// the file's name, or its path in the vault, with or without `.md`.
+    static func linkNamesDailyNote(_ target: String, fileURL url: URL?, settings: Settings) -> Bool {
+        var wanted = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if wanted.hasSuffix(".md") { wanted.removeLast(3) }
+        guard !wanted.isEmpty else { return false }
+        if wanted == "today" { return true }
+        guard let url = url else { return false }
+        if url.deletingPathExtension().lastPathComponent.lowercased() == wanted { return true }
+        guard let vault = settings.obsidianVaultPath else { return false }
+        let root = URL(fileURLWithPath: vault, isDirectory: true).standardizedFileURL.path + "/"
+        let full = url.deletingPathExtension().standardizedFileURL.path
+        return full.hasPrefix(root) && String(full.dropFirst(root.count)).lowercased() == wanted
+    }
+
     // MARK: - Duplicate healing
 
     /// iCloud's name for a losing copy: `2026-08-26 2.md` sitting beside

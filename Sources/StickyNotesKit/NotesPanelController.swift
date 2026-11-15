@@ -29,6 +29,8 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     /// Archives an active note. The desk closes the note's window, which writes
     /// what was typed first; the default moves the file and nothing else.
     private let onArchive: (Note) -> Void
+    /// Today's daily note as a read-only row, or nil when none is set up.
+    private let dailyNote: () -> Note?
 
     private var mode: Mode = .active
     private var sortOrder: SortOrder = .updated
@@ -46,8 +48,12 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     private let restoreButton = NSButton(title: "Restore", target: nil, action: nil)
     private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
 
-    init(store: NoteStore, onActivate: @escaping (UUID) -> Void, onArchive: ((Note) -> Void)? = nil) {
+    init(
+        store: NoteStore, dailyNote: @escaping () -> Note? = { nil },
+        onActivate: @escaping (UUID) -> Void, onArchive: ((Note) -> Void)? = nil
+    ) {
         self.store = store
+        self.dailyNote = dailyNote
         self.onActivate = onActivate
         self.onArchive = onArchive ?? { store.archive($0) }
 
@@ -260,7 +266,7 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
         let source: [Note]
         switch mode {
-        case .active:   source = store.loadActive()
+        case .active:   source = store.loadActive() + (labelFilter == nil ? dailyNote().map { [$0] } ?? [] : [])
         case .archived: source = store.loadArchived()
         case .trash:    source = store.loadTrashed()
         }
@@ -271,6 +277,10 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         // Relevance order is the point of a search; only impose the chosen
         // sort when the user isn't searching.
         rows = query.isEmpty ? sorted(ranked) : ranked
+        // Today's note is the one row that is always the same, so it stays on top.
+        if query.isEmpty, let index = rows.firstIndex(where: { $0.note.id == DailyNote.candidateID }) {
+            rows.insert(rows.remove(at: index), at: 0)
+        }
 
         tableView.reloadData()
         restoreSelection(previousSelection)
@@ -388,7 +398,7 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
     /// ⌘⌫ archives an active note, matching the note window's close button.
     private func archiveSelectedRow() {
-        guard mode == .active, let note = selectedNote() else { return }
+        guard mode == .active, let note = selectedNote(), note.id != DailyNote.candidateID else { return }
         onArchive(note)
     }
 
@@ -588,7 +598,8 @@ final class NotesPanelCell: NSView {
         }
 
         // Show why this row matched, unless that just repeats the heading.
-        let reason = match.excerpt == heading ? labelSummary(note) : match.excerpt
+        let own = note.id == DailyNote.candidateID ? DailyNote.shortDate(note.createdAt) : labelSummary(note)
+        let reason = match.excerpt == heading ? own : match.excerpt
         detail.stringValue = [taskProgress(note), reason]
             .filter { !$0.isEmpty }
             .joined(separator: "   ")

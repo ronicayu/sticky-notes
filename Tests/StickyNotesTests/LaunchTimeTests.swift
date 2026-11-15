@@ -5,6 +5,10 @@ import XCTest
 /// Launch to the first note window with a large desk: the store opens, the
 /// notes load, and the first window is presented. A benchmark, not an
 /// assertion: it prints the times so they can be compared before and after a change.
+///
+/// It takes about 8 seconds, so it is skipped unless the environment variable
+/// `STICKY_BENCH=1` is set:
+/// `STICKY_BENCH=1 xctest .build/out/Products/Debug/StickyNotesTests.xctest -XCTest StickyNotesTests.LaunchTimeTests`
 @MainActor final class LaunchTimeTests: XCTestCase {
     private var root: URL!
     private var isolated: IsolatedSettings!
@@ -33,6 +37,7 @@ import XCTest
     }
 
     func testBenchmarkLaunchToFirstWindowWith500Notes() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["STICKY_BENCH"] == "1", "set STICKY_BENCH=1 to run")
         seed(count: 500)
         var samples: [TimeInterval] = []
         for _ in 0..<9 {

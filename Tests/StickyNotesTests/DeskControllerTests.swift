@@ -344,6 +344,234 @@ import XCTest
         XCTAssertNil(desk.dailyNote)
     }
 
+    // MARK: - The daily note among the notes
+
+    private func todaysFile() throws -> URL {
+        try XCTUnwrap(DailyNote.resolvedURL(for: clock.now(), settings: isolated.settings))
+    }
+
+    private func writeTodaysFile(_ body: String) throws {
+        let file = try todaysFile()
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try body.write(to: file, atomically: true, encoding: .utf8)
+    }
+
+    private func clickWikiLink(_ target: String) {
+        NotificationCenter.default.post(
+            name: TodoTextView.didClickWikiLink, object: nil, userInfo: ["target": target]
+        )
+    }
+
+    func testTheSwitcherFindsTodaysNoteByTitleAndOpensIt() throws {
+        try useVault()
+        try writeTodaysFile("buy lemons")
+        seed("Companion")
+
+        desk.showQuickSwitcher(query: "today")
+        let switcher = try XCTUnwrap(desk.switcher)
+        XCTAssertEqual(switcher.resultCount, 1)
+        XCTAssertFalse(desk.isDailyNoteVisible)
+
+        switcher.activateSelection()
+
+        XCTAssertTrue(desk.isDailyNoteVisible)
+    }
+
+    func testTheSwitcherFindsTodaysNoteByAWordInItsBody() throws {
+        try useVault()
+        try writeTodaysFile("buy lemons\ncall the bank")
+
+        desk.showQuickSwitcher(query: "lemons")
+        let switcher = try XCTUnwrap(desk.switcher)
+        XCTAssertEqual(switcher.resultCount, 1)
+        XCTAssertTrue(switcher.previewText.contains("buy lemons"))
+
+        switcher.activateSelection()
+        XCTAssertTrue(desk.isDailyNoteVisible)
+    }
+
+    func testTheSwitcherSearchesTheTextTheOpenWindowHolds() throws {
+        try useVault()
+        desk.openTodaysDailyNote()
+        let controller = try XCTUnwrap(desk.dailyNote)
+        controller.textView.string = "typed but not yet saved: marmalade"
+        controller.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
+
+        desk.showQuickSwitcher(query: "marmalade")
+
+        XCTAssertEqual(desk.switcher?.resultCount, 1)
+    }
+
+    func testTodaysNoteIsNotListedWithoutAVaultAndPattern() {
+        seed("Companion")
+
+        desk.showQuickSwitcher(query: "today")
+
+        XCTAssertEqual(desk.switcher?.resultCount, 0)
+    }
+
+    func testSearchingForTodayNeverCreatesTheFileOrAWindow() throws {
+        try useVault()
+        let file = try todaysFile()
+
+        desk.showQuickSwitcher(query: "today")
+        desk.switcher?.search("anything")
+        desk.showNotesPanel()
+        desk.notesPanel?.search("today")
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertNil(desk.dailyNote)
+    }
+
+    func testChoosingTodayCreatesAnEmptyFileWithNoFrontmatter() throws {
+        try useVault()
+        let file = try todaysFile()
+
+        desk.showQuickSwitcher(query: "today")
+        desk.switcher?.activateSelection()
+
+        let written = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertFalse(written.contains("---"))
+        XCTAssertEqual(written.trimmingCharacters(in: .whitespacesAndNewlines), "")
+    }
+
+    func testChoosingTodayLeavesAnExistingFileByteForByte() throws {
+        try useVault()
+        try writeTodaysFile("- [ ] one\n[[Somewhere]]\n")
+        let before = try Data(contentsOf: todaysFile())
+
+        desk.showQuickSwitcher(query: "today")
+        desk.switcher?.activateSelection()
+        XCTAssertEqual(desk.flushForQuit(), 0)
+
+        XCTAssertEqual(try Data(contentsOf: todaysFile()), before)
+    }
+
+    func testChoosingTodayBringsItBackAfterHideAll() throws {
+        try useVault()
+        desk.openTodaysDailyNote()
+        desk.toggleHideAll()
+        XCTAssertFalse(desk.isDailyNoteVisible)
+
+        desk.showQuickSwitcher(query: "today")
+        desk.switcher?.activateSelection()
+
+        XCTAssertTrue(desk.isDailyNoteVisible)
+        XCTAssertFalse(desk.notesHidden)
+    }
+
+    func testTodayAndTheDailyFileNameWorkAsWikiLinks() throws {
+        try useVault()
+        desk.startObserving()
+        let name = try todaysFile().deletingPathExtension().lastPathComponent
+
+        clickWikiLink("Today")
+        XCTAssertTrue(desk.isDailyNoteVisible)
+
+        desk.toggleDailyNote()
+        XCTAssertFalse(desk.isDailyNoteVisible)
+        clickWikiLink(name)
+        XCTAssertTrue(desk.isDailyNoteVisible)
+
+        desk.toggleDailyNote()
+        clickWikiLink("Daily/\(name)")
+        XCTAssertTrue(desk.isDailyNoteVisible)
+    }
+
+    func testANoteTitledTodayStillWinsTheWikiLink() throws {
+        try useVault()
+        desk.startObserving()
+        let mine = seed("Today")
+        desk.restoreActiveNotes()
+
+        clickWikiLink("Today")
+
+        XCTAssertFalse(desk.isDailyNoteVisible)
+        XCTAssertTrue(isShowing(mine))
+    }
+
+    func testAnotherDaysFileIsNotTodaysNote() throws {
+        try useVault()
+        desk.startObserving()
+
+        clickWikiLink("2001-01-01")
+
+        XCTAssertFalse(desk.isDailyNoteVisible)
+        XCTAssertNil(desk.dailyNote)
+    }
+
+    func testTheNotesPanelListsTodayFirstAndCannotArchiveIt() throws {
+        try useVault()
+        let companion = seed("Companion", labels: ["work"])
+
+        desk.showNotesPanel()
+        let panel = try XCTUnwrap(desk.notesPanel)
+        XCTAssertEqual(panel.visibleTitles, ["Today", "Companion"])
+
+        panel.archiveFirstRow()
+        XCTAssertEqual(store.loadActive().map(\.id), [companion.id])
+        XCTAssertNil(desk.dailyNote)
+
+        panel.filterByLabel("work")
+        XCTAssertEqual(panel.visibleTitles, ["Companion"], "today's note has no labels, so a label filter drops it")
+    }
+
+    func testOpeningTodayFromThePanelShowsTheDailyWindow() throws {
+        try useVault()
+
+        desk.focusNote(id: DailyNote.candidateID)
+
+        XCTAssertTrue(desk.isDailyNoteVisible)
+    }
+
+    func testArrangeLaysOutTheDailyWindowWithTheNotes() throws {
+        try useVault()
+        let note = seed("Companion")
+        desk.restoreActiveNotes()
+        desk.openTodaysDailyNote()
+        let daily = try XCTUnwrap(desk.dailyNote?.window)
+        let noteWindow = try XCTUnwrap(desk.windowControllers[note.id]?.window)
+        let spot = NSRect(x: 300, y: 300, width: 240, height: 200)
+        noteWindow.setFrame(spot, display: false)
+        daily.setFrame(spot, display: false)
+
+        desk.arrange(animated: false, using: WindowArrangement.grid(sizes:in:gap:))
+
+        XCTAssertFalse(daily.frame.intersects(noteWindow.frame), "the grid gives each window its own cell")
+        XCTAssertEqual(daily.frame.size, spot.size)
+        XCTAssertEqual(DailyNote.loadState(settings: isolated.settings).positionX, Double(daily.frame.origin.x))
+
+        noteWindow.setFrame(spot, display: false)
+        daily.setFrame(spot, display: false)
+        desk.arrange(animated: false, using: WindowArrangement.cascade(sizes:in:step:))
+        XCTAssertNotEqual(daily.frame.origin, noteWindow.frame.origin, "the cascade steps each window")
+    }
+
+    func testArrangeLeavesAHiddenDailyWindowWhereItIs() throws {
+        try useVault()
+        seed("Companion")
+        desk.restoreActiveNotes()
+        desk.openTodaysDailyNote()
+        let daily = try XCTUnwrap(desk.dailyNote?.window)
+        let spot = NSRect(x: 300, y: 300, width: 240, height: 200)
+        daily.setFrame(spot, display: false)
+        desk.dailyNote?.hide()
+
+        desk.arrange(animated: false, using: WindowArrangement.grid(sizes:in:gap:))
+
+        XCTAssertEqual(daily.frame, spot)
+    }
+
+    func testHideAllWithOnlyTheDailyNoteOnTheDeskHidesIt() throws {
+        try useVault()
+        desk.openTodaysDailyNote()
+
+        desk.toggleHideAll()
+        XCTAssertFalse(desk.isDailyNoteVisible)
+        desk.toggleHideAll()
+        XCTAssertTrue(desk.isDailyNoteVisible)
+    }
+
     // MARK: - Notes that leave the active folder under typing, and new notes
 
     private func type(_ text: String, into controller: NoteWindowController) {

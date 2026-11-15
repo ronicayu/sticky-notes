@@ -37,13 +37,6 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
 
     private static let chromeHeight: CGFloat = 26
     private static let collapsedTotalHeight: CGFloat = 26
-    private static let dateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "EEE, MMM d"
-        f.locale = Locale.autoupdatingCurrent
-        return f
-    }()
-
     private static let placeholder = "Waiting for today's note to download…"
 
     init(settings: Settings, store: NoteStore, clock: AppClock, scheduler: Scheduler = MainScheduler()) {
@@ -220,7 +213,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
     /// is a placeholder, and the view is read-only so nothing typed into it can
     /// be lost when the file arrives.
     private func showDocument() {
-        dateLabel.text = "Daily Note · " + DailyNoteWindowController.dateFormatter.string(from: dailyDocument.day)
+        dateLabel.text = "Daily Note · " + DailyNote.shortDate(dailyDocument.day)
         textView.isEditable = !dailyDocument.isUnavailable
         let text = dailyDocument.isUnavailable ? DailyNoteWindowController.placeholder : dailyDocument.body
         guard textView.string != text else { return }
@@ -356,6 +349,15 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
     }
 
     func dragZoneDidDoubleClick() { toggleCollapse() }
+
+    /// The size the Arrange command lays this window out with: the window's own.
+    var arrangementSize: NSSize { window?.frame.size ?? .zero }
+
+    /// Move the window to `frame` for the Arrange command. The move is saved
+    /// like a drag.
+    func setArrangedFrame(_ frame: NSRect, animated: Bool = true) {
+        window?.setFrame(frame, display: true, animate: animated)
+    }
 
     private func applyCollapse(_ collapsed: Bool, animated: Bool) {
         guard let window = window else { return }
