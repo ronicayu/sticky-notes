@@ -154,20 +154,6 @@ import XCTest
         XCTAssertEqual(app.applicationShouldTerminate(NSApplication.shared), .terminateNow)
     }
 
-    /// `NoteWindow` sends ⌘Z to the responder chain as `undoLastAction:`, which
-    /// ends at the application delegate.
-    func testTheUndoActionNoteWindowsSendReachesAPendingUndoOffer() throws {
-        let app = makeDelegate()
-        var undone = 0
-        app.undo.offerUndoForHiding(count: 1, label: nil) { undone += 1 }
-        defer { app.undo.dismiss() }
-
-        XCTAssertTrue(app.responds(to: NSSelectorFromString("undoLastAction:")))
-        app.undoLastAction(nil)
-
-        XCTAssertEqual(undone, 1)
-    }
-
     func testASavedEditIsStampedWithTheInjectedClock() throws {
         let note = seed("Stamped")
         let controller = NoteWindowController(note: note, store: store, clock: clock, onClosed: { _ in })

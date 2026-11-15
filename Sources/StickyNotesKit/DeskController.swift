@@ -125,6 +125,37 @@ import AppKit
         windowControllers.values.first { $0.window?.isKeyWindow == true }
     }
 
+    /// The visible note windows in a fixed order (oldest note first, then the
+    /// daily note), which is the order Next Note and Previous Note walk.
+    func cyclableWindows() -> [NSWindow] {
+        let notes = windowControllers.values
+            .sorted { ($0.bufferedNote.createdAt, $0.noteId.uuidString) < ($1.bufferedNote.createdAt, $1.noteId.uuidString) }
+            .compactMap(\.window)
+        let all = notes + [dailyNoteController?.window].compactMap { $0 }
+        return all.filter(\.isVisible)
+    }
+
+    /// There is somewhere to go: one of our windows is key and another is visible.
+    var canCycleNotes: Bool {
+        let windows = cyclableWindows()
+        return windows.count > 1 && windows.contains { $0.isKeyWindow }
+    }
+
+    /// The window `step` places after `current` in the cycle, wrapping around
+    /// at the ends. Nil when `current` is not one of the cycled windows or there
+    /// is nowhere else to go.
+    func cycleTarget(by step: Int, from current: NSWindow?) -> NSWindow? {
+        let windows = cyclableWindows()
+        guard windows.count > 1, let index = windows.firstIndex(where: { $0 === current }) else { return nil }
+        return windows[(index + step % windows.count + windows.count) % windows.count]
+    }
+
+    /// Make the next (`step` 1) or previous (-1) visible note window key.
+    func cycleNotes(by step: Int) {
+        let current = cyclableWindows().first { $0.isKeyWindow }
+        cycleTarget(by: step, from: current)?.makeKeyAndOrderFront(nil)
+    }
+
     func presentWindow(for note: Note, activate: Bool = true) {
         if let existing = windowControllers[note.id] {
             existing.showWindow(nil)
@@ -498,8 +529,6 @@ import AppKit
                 onActivate: { [weak self] id in self?.focusNote(id: id) },
                 onArchive: { [weak self] note in self?.archiveNote(note) }
             )
-        } else {
-            notesPanelController?.reload()
         }
         notesPanelController?.showWindow(nil)
         notesPanelController?.window?.makeKeyAndOrderFront(nil)

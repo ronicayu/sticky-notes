@@ -37,7 +37,11 @@ import KeyboardShortcuts
         self.capture = capture
         self.storage = storage
         self.undo = undo
-        self.noteMenu = NoteMenu(keyNote: { [weak desk] in desk?.focusedController() })
+        self.noteMenu = NoteMenu(
+            keyNote: { [weak desk] in desk?.focusedController() },
+            canCycle: { [weak desk] in desk?.canCycleNotes ?? false },
+            cycle: { [weak desk] step in desk?.cycleNotes(by: step) }
+        )
         super.init()
     }
 

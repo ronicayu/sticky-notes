@@ -653,6 +653,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     var floatLevel: NoteFloatLevel { note.floatLevel }
 
     func setFloatLevel(_ level: NoteFloatLevel) {
+        guard level != note.floatLevel else { return }
         noteDocument.edit { $0.floatLevel = level }
         applyFloatLevel()
     }
@@ -679,6 +680,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     var color: NoteColor { note.color }
 
     func setColor(_ color: NoteColor) {
+        guard color != note.color else { return }
         noteDocument.edit { $0.color = color }
         applyAppearanceColors()
     }
@@ -896,9 +898,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         layoutStore.set(geometry, for: note.id)
         var frame = window.frame
         if geometry.collapsed {
-            // Commit any in-flight title edit before collapsing.
-            if window.firstResponder === titleField || titleField.currentEditor() != nil {
-                window.makeFirstResponder(window)
+            // Commit any in-flight title edit, and take focus out of the hidden
+            // body so typing and paste cannot reach text nobody can see.
+            if let responder = window.firstResponder as? NSView, responder.isDescendant(of: bodyContainer) {
+                window.makeFirstResponder(nil)
             }
             preCollapseHeight = frame.size.height
 
@@ -932,6 +935,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             frame = NoteWindow.clampToVisibleScreen(frame)
             window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
             recordFrame(frame, resized: true)
+            window.makeFirstResponder(textView)
         }
         updateExpandButtonIcon()
         updateChromeVisibility()

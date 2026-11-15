@@ -214,10 +214,11 @@ final class TodoTextView: NSTextView {
 
     /// ⌘B / ⌘I / ⌘E wrap the selection, ⌘↩ turns the current line into a task.
     /// Handled here rather than through the main menu so they only apply while
-    /// a note editor has focus.
+    /// this editor has focus: the key is offered to every view in the window, so
+    /// the title field and the find bar must not have it act on the body.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard mods == .command else { return super.performKeyEquivalent(with: event) }
+        guard mods == .command, window?.firstResponder === self else { return super.performKeyEquivalent(with: event) }
 
         if event.keyCode == 36 || event.keyCode == 76 {     // return, enter
             return apply { MarkdownEditing.toggleCheckbox($0, selection: $1) }

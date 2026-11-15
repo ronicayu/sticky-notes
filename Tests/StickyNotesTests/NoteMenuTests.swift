@@ -16,6 +16,9 @@ import XCTest
     private var savedMainMenu: NSMenu?
     private var controllers: [NoteWindowController] = []
     private var archived: [Note] = []
+    private var canCycle = false
+    private var cycled: [Int] = []
+    private var currentEvent: NSEvent?
 
     override func setUp() async throws {
         _ = NSApplication.shared
@@ -25,7 +28,12 @@ import XCTest
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         store = NoteStore(rootURL: root)
         layout = DeviceLayoutStore(url: root.appendingPathComponent("layout.json"))
-        noteMenu = NoteMenu(keyNote: { [unowned self] in keyNote })
+        noteMenu = NoteMenu(
+            keyNote: { [unowned self] in keyNote },
+            canCycle: { [unowned self] in canCycle },
+            cycle: { [unowned self] in cycled.append($0) },
+            currentEvent: { [unowned self] in currentEvent }
+        )
         menu = noteMenu.makeMenu()
         let top = NSMenu()
         let item = NSMenuItem()
@@ -62,11 +70,13 @@ import XCTest
         menu.performActionForItem(at: try XCTUnwrap(menu.items.firstIndex(of: target)))
     }
 
-    private func keyEvent(_ key: String, _ modifiers: NSEvent.ModifierFlags, in window: NSWindow) throws -> NSEvent {
+    private func keyEvent(
+        _ key: String, _ modifiers: NSEvent.ModifierFlags, in window: NSWindow, repeating: Bool = false
+    ) throws -> NSEvent {
         try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
             windowNumber: window.windowNumber, context: nil,
-            characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: 0
+            characters: key, charactersIgnoringModifiers: key, isARepeat: repeating, keyCode: 0
         ))
     }
 
@@ -81,7 +91,9 @@ import XCTest
             ("Gray", "7", .command),
             ("Float on Top", "f", [.command, .option]),
             ("Collapse", "m", .command),
-            ("Archive", "w", .command)
+            ("Archive", "w", .command),
+            ("Next Note", "`", .command),
+            ("Previous Note", "~", [.command, .shift])
         ]
         for (title, key, modifiers) in expected {
             let found = try item(title)
@@ -112,6 +124,7 @@ import XCTest
     func testItemsAreEnabledForAKeyNoteAndCheckTheCurrentColourFloatLevelAndCollapse() throws {
         let controller = openNote()
         keyNote = controller
+        canCycle = true
         menu.update()
         for item in menu.items where !item.isSeparatorItem {
             XCTAssertTrue(item.isEnabled, "\(item.title) is disabled for a key note")
@@ -263,19 +276,204 @@ import XCTest
         XCTAssertEqual(controller.floatLevel, .desktop)
     }
 
+    /// A matching item that is disabled still takes the key, so the window
+    /// reports it handled; what matters is that nothing happened. A chord no
+    /// item uses is left unhandled.
     func testAShortcutDoesNothingWhenNoNoteIsKey() throws {
         let controller = openNote()
         keyNote = nil
         let window = try XCTUnwrap(controller.window)
 
-        _ = window.performKeyEquivalent(with: try keyEvent("4", .command, in: window))
-        _ = window.performKeyEquivalent(with: try keyEvent("w", .command, in: window))
-        _ = window.performKeyEquivalent(with: try keyEvent("m", .command, in: window))
+        XCTAssertTrue(window.performKeyEquivalent(with: try keyEvent("4", .command, in: window)))
+        XCTAssertTrue(window.performKeyEquivalent(with: try keyEvent("w", .command, in: window)))
+        XCTAssertTrue(window.performKeyEquivalent(with: try keyEvent("m", .command, in: window)))
+        XCTAssertFalse(window.performKeyEquivalent(with: try keyEvent("9", .command, in: window)),
+                       "a chord no item uses was reported handled")
 
         XCTAssertEqual(controller.color, .yellow)
         XCTAssertFalse(controller.isCollapsed)
         XCTAssertTrue(archived.isEmpty)
         XCTAssertNotNil(store.loadNote(id: controller.noteId))
+    }
+
+    // MARK: - Next and Previous Note
+
+    func testNextAndPreviousNoteAreDisabledUntilThereIsSomewhereToGo() throws {
+        keyNote = openNote()
+        canCycle = false
+        menu.update()
+        XCTAssertFalse(try item("Next Note").isEnabled)
+        XCTAssertFalse(try item("Previous Note").isEnabled)
+
+        canCycle = true
+        menu.update()
+        XCTAssertTrue(try item("Next Note").isEnabled)
+        XCTAssertTrue(try item("Previous Note").isEnabled)
+    }
+
+    func testNextAndPreviousNoteStayEnabledWhenOnlyTheDailyNoteIsKey() throws {
+        keyNote = nil
+        canCycle = true
+        menu.update()
+        XCTAssertTrue(try item("Next Note").isEnabled, "the daily note could not be left from the keyboard")
+        XCTAssertFalse(try item("Archive").isEnabled)
+    }
+
+    func testNextAndPreviousNoteAskTheDeskToCycle() throws {
+        canCycle = true
+        try perform("Next Note")
+        try perform("Previous Note")
+        XCTAssertEqual(cycled, [1, -1])
+    }
+
+    func testTheDeskCyclesOldestNoteFirstSkippingHiddenOnesAndWrapping() throws {
+        let isolated = IsolatedSettings()
+        defer { isolated.tearDown() }
+        let clock = ManualClock()
+        let desk = DeskController(
+            store: store, settings: isolated.settings, clock: clock, undo: UndoCenter(clock: clock),
+            recovery: RecoveryFiles(settings: isolated.settings, store: store, clock: clock)
+        )
+        defer { desk.windowControllers.values.forEach { $0.window?.close() } }
+        var ids: [UUID] = []
+        for title in ["One", "Two", "Three"] {
+            clock.advance(by: 60)
+            desk.makeNote(title: title)
+            ids.append(try XCTUnwrap(desk.windowControllers.values.first { $0.bufferedNote.title == title }).noteId)
+        }
+        let windows = ids.map { desk.windowControllers[$0]!.window! }
+
+        XCTAssertEqual(desk.cyclableWindows(), windows, "not oldest first")
+        XCTAssertTrue(desk.cycleTarget(by: 1, from: windows[0]) === windows[1])
+        XCTAssertTrue(desk.cycleTarget(by: 1, from: windows[2]) === windows[0], "did not wrap forward")
+        XCTAssertTrue(desk.cycleTarget(by: -1, from: windows[0]) === windows[2], "did not wrap back")
+
+        windows[1].orderOut(nil)
+        XCTAssertEqual(desk.cyclableWindows(), [windows[0], windows[2]])
+        XCTAssertTrue(desk.cycleTarget(by: 1, from: windows[0]) === windows[2], "went to a hidden note")
+
+        windows[2].orderOut(nil)
+        XCTAssertNil(desk.cycleTarget(by: 1, from: windows[0]), "one visible note has nowhere to go")
+        XCTAssertFalse(desk.canCycleNotes)
+    }
+
+    // MARK: - Key repeat
+
+    func testAHeldKeyDoesNotRepeatArchiveCollapseOrFloat() throws {
+        let controller = openNote()
+        keyNote = controller
+        let window = try XCTUnwrap(controller.window)
+        currentEvent = try keyEvent("m", .command, in: window, repeating: true)
+
+        try perform("Collapse")
+        try perform("Float on Top")
+        try perform("Archive")
+
+        XCTAssertFalse(controller.isCollapsed)
+        XCTAssertEqual(controller.floatLevel, .floating)
+        XCTAssertTrue(archived.isEmpty)
+        XCTAssertNotNil(store.loadNote(id: controller.noteId))
+
+        currentEvent = try keyEvent("m", .command, in: window)
+        try perform("Collapse")
+        XCTAssertTrue(controller.isCollapsed, "the first press was ignored")
+    }
+
+    func testAMouseEventRunningAnActionIsNotMistakenForARepeat() throws {
+        let controller = openNote()
+        keyNote = controller
+        currentEvent = NSEvent.mouseEvent(
+            with: .leftMouseUp, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 0
+        )
+
+        try perform("Collapse")
+
+        XCTAssertTrue(controller.isCollapsed)
+    }
+
+    // MARK: - Unchanged values
+
+    func testPickingTheCurrentColourOrFloatLevelEditsNothing() throws {
+        let controller = openNote()
+        keyNote = controller
+        let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: store.activeURL, includingPropertiesForKeys: nil
+        ).first { $0.pathExtension == "md" })
+        let before = try Data(contentsOf: file)
+
+        try perform("Yellow")
+        try perform("Float on Top")
+        try perform("Float on Top")
+
+        XCTAssertEqual(try Data(contentsOf: file), before)
+        XCTAssertEqual(controller.floatLevel, .floating)
+    }
+
+    func testPickingTheCurrentColourOfANoteWithNoFileMakesNoFile() throws {
+        var note = Note.makeNew(frame: NSRect(x: 0, y: 0, width: 260, height: 200))
+        note.color = .pink
+        let controller = NoteWindowController(note: note, store: store, layout: layout, onClosed: { _ in })
+        controllers.append(controller)
+        keyNote = controller
+
+        controller.setColor(.pink)
+        controller.setFloatLevel(.floating)
+
+        XCTAssertFalse(controller.hasFile, "an unchanged pick made a file")
+        XCTAssertTrue(controller.isAbandonedCapture)
+    }
+
+    // MARK: - Collapse and focus
+
+    func testCollapsingTakesFocusOutOfTheHiddenBodyAndExpandingGivesItBack() throws {
+        let controller = openNote(content: "kept")
+        keyNote = controller
+        let window = try XCTUnwrap(controller.window)
+        window.makeFirstResponder(controller.textView)
+        XCTAssertTrue(window.firstResponder === controller.textView)
+
+        try perform("Collapse")
+
+        XCTAssertFalse(window.firstResponder === controller.textView, "focus stayed in the hidden body")
+        let responder = try XCTUnwrap(window.firstResponder)
+        _ = responder.tryToPerform(NSSelectorFromString("insertText:"), with: "typed")
+        _ = responder.tryToPerform(NSSelectorFromString("paste:"), with: nil)
+        XCTAssertFalse(responder is NSTextView, "first responder is \(responder)")
+        XCTAssertEqual(controller.textView.string, "kept")
+        XCTAssertEqual(controller.bufferedNote.content, "kept")
+
+        try perform("Collapse")
+        XCTAssertTrue(window.firstResponder === controller.textView, "expanding did not refocus the text")
+    }
+
+    func testCollapsingCommitsATitleEditAndLeavesFocusOutOfTheTitle() throws {
+        let controller = openNote()
+        keyNote = controller
+        let window = try XCTUnwrap(controller.window)
+        window.makeFirstResponder(controller.titleField)
+        XCTAssertNotNil(controller.titleField.currentEditor())
+
+        try perform("Collapse")
+
+        XCTAssertNil(controller.titleField.currentEditor())
+    }
+
+    // MARK: - The editor's chords belong to the editor
+
+    func testTheEditorChordsDoNothingToTheBodyWhenAnotherViewHasFocus() throws {
+        let controller = openNote(content: "word")
+        keyNote = controller
+        let window = try XCTUnwrap(controller.window)
+        window.makeFirstResponder(controller.titleField)
+        controller.textView.setSelectedRange(NSRange(location: 0, length: 4))
+
+        for key in ["b", "i", "e"] {
+            _ = controller.textView.performKeyEquivalent(with: try keyEvent(key, .command, in: window))
+        }
+        _ = controller.textView.performKeyEquivalent(with: try keyEvent("\r", .command, in: window))
+
+        XCTAssertEqual(controller.textView.string, "word")
     }
 
     func testTheEditorsOwnChordsStillWrapTheSelection() throws {

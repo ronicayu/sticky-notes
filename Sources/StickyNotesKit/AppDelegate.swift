@@ -85,12 +85,6 @@ import AppKit
         }
     }
 
-    /// ⌘Z in a note window is sent to the responder chain by name, and the
-    /// application delegate is where that chain ends.
-    @objc func undoLastAction(_ sender: Any?) {
-        undo.undoLastAction(sender)
-    }
-
     enum UnsavedNotesChoice { case keepTrying, quitAnyway }
 
     /// Asks what to do about notes that could be saved nowhere. A test replaces it.
