@@ -362,6 +362,7 @@ final class NoteStoreTests: XCTestCase {
     /// newest write, so an older save of ours that iCloud kept as a conflict
     /// version holds only text the person has since edited away.
     func testAnOutsideAppendDoesNotStopAnOlderOwnVersionFromBeingDropped() throws {
+        NoteStore.systemComputerName = "This Mac"
         let store = makeStore()
         var note = makeNote(content: "teh cat\nsat down")
         store.save(note)
@@ -370,7 +371,7 @@ final class NoteStoreTests: XCTestCase {
         let older = root.appendingPathComponent("older.md")
         try "---\nid: \(note.id.uuidString)\nupdated: 1970-01-01T00:00:01Z\n---\nteh cat\nsat down\n"
             .write(to: older, atomically: true, encoding: .utf8)
-        store.conflictVersionsProvider = { _ in [.init(url: older, markResolved: {})] }
+        store.conflictVersionsProvider = { _ in [.init(url: older, markResolved: {}, savingComputer: "This Mac")] }
         store.otherVersionsRemover = { _ in }
         _ = store.loadActive()
 

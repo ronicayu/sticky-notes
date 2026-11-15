@@ -21,6 +21,7 @@ final class DailyDocumentTests: XCTestCase {
     private let day: TimeInterval = 86_400
 
     override func setUpWithError() throws {
+        NoteStore.systemComputerName = "This Mac"
         isolated = IsolatedSettings()
         clock = ManualClock()
         scheduler = TestScheduler(clock: clock)
@@ -742,7 +743,7 @@ final class DailyDocumentTests: XCTestCase {
 
     /// A stand-in for an `NSFileVersion`: a real file holding `body`.
     private func conflictVersion(
-        _ body: String?, modified: Date? = nil, computer: String? = nil, resolved: @escaping () -> Void = {}
+        _ body: String?, modified: Date? = nil, computer: String? = "This Mac", resolved: @escaping () -> Void = {}
     ) throws -> NoteStore.ConflictVersionHandle {
         let versionURL = vault.appendingPathComponent("version-\(UUID().uuidString).md")
         if let body {
@@ -1139,7 +1140,6 @@ final class DailyDocumentTests: XCTestCase {
     /// after our next one. It is not our own earlier save, and the line survives.
     func testARestoreThatArrivesAsADailyConflictVersionKeepsTheLine() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
-        document.computerName = "This Mac"
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
@@ -1153,7 +1153,7 @@ final class DailyDocumentTests: XCTestCase {
         document.setBody("A\nnew")
         scheduler.advance(by: 10)
 
-        versions = [try conflictVersion("A\nP", modified: t0.addingTimeInterval(15), computer: "This Mac")]
+        versions = [try conflictVersion("A\nP", modified: t0.addingTimeInterval(15), computer: "The Other Mac")]
         document.storeDidChange()
 
         let saved = try text()
@@ -1162,7 +1162,6 @@ final class DailyDocumentTests: XCTestCase {
 
     func testAnOlderOwnDailySaveThatThisMacSavedBeforeItsNextWriteIsStillDropped() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
-        document.computerName = "This Mac"
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
@@ -1179,5 +1178,55 @@ final class DailyDocumentTests: XCTestCase {
 
         XCTAssertEqual(try text(), "the cat\nsat down")
         XCTAssertFalse(document.body.contains("Conflicted copy"))
+    }
+
+    /// The template is the person's own write. When it is put back while a second line
+    /// is unsaved, the first line they saved on top of it survives.
+    func testATemplatePutBackWhileTypingDoesNotWipeTheSavedLines() throws {
+        try write("")
+        let document = makeDocument()
+        let template = try configureTemplate("## Today")
+        _ = template
+        document.templateDidChange()
+        XCTAssertEqual(try text(), "## Today")
+        document.setBody("## Today\nline one")
+        scheduler.advance(by: 1)
+        document.isEditing = { true }
+        document.setBody("## Today\nline one\nline two")
+        try write("## Today")
+        document.storeDidChange()
+
+        document.flush()
+
+        let saved = try text()
+        XCTAssertTrue(saved.contains("line one") && saved.contains("line two"), saved)
+    }
+
+    /// The template is the person's own write, so a put-back of it counts as an older
+    /// copy of our own text: our newest text stands in, and our other earlier save is
+    /// dropped with no divider.
+    func testAnOlderOwnSaveIsDroppedWhenTheTemplateIsPutBack() throws {
+        try write("")
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        try configureTemplate("## Today")
+        document.templateDidChange()
+        XCTAssertEqual(try text(), "## Today")
+        scheduler.advance(by: 1)
+        document.setBody("## Today\nteh line")
+        scheduler.advance(by: 10)
+        let typo = try conflictVersion("## Today\nteh line")
+        document.setBody("## Today\nthe line")
+        scheduler.advance(by: 10)
+        try write("## Today")
+
+        versions = [typo]
+        document.storeDidChange()
+
+        XCTAssertEqual(try text(), "## Today\nthe line")
+        XCTAssertEqual(document.body, "## Today\nthe line")
     }
 }

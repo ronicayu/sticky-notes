@@ -105,7 +105,9 @@ enum ConflictResolver {
     /// What this Mac knows of its own writes to one file, for `versionsToMerge`.
     struct OwnWrites {
         /// The version is an earlier save of this Mac's own: it equals one of the
-        /// writes (body, title and labels) and was saved here before the next one.
+        /// writes (body, title and labels) and names this Mac as its saving computer,
+        /// or names none and was saved between that write and the next
+        /// (`WriteLineage.History.isOwnEarlierSave`).
         var isOurs: (Candidate) -> Bool
         /// The note is exactly the newest write.
         var isNewest: (Note) -> Bool

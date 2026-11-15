@@ -612,6 +612,7 @@ final class ConflictSweepTests: XCTestCase {
     private var store: NoteStore!
 
     override func setUpWithError() throws {
+        NoteStore.systemComputerName = "This Mac"
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ConflictSweep-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -650,7 +651,7 @@ final class ConflictSweepTests: XCTestCase {
             try rawNote(id: note.id, content: content, updated: "1970-01-01T00:00:01Z")
                 .write(to: url, atomically: true, encoding: .utf8)
         }
-        return .init(url: url, markResolved: resolved)
+        return .init(url: url, markResolved: resolved, savingComputer: "This Mac")
     }
 
     func testAnUnreadableConflictVersionIsKeptForLater() throws {
@@ -721,7 +722,7 @@ final class ConflictSweepTests: XCTestCase {
         store.save(note)
         var resolved = 0
         store.otherVersionsRemover = { _ in }
-        let counting = NoteStore.ConflictVersionHandle(url: typo.url) { resolved += 1 }
+        let counting = NoteStore.ConflictVersionHandle(url: typo.url, markResolved: { resolved += 1 }, savingComputer: "This Mac")
         store.conflictVersionsProvider = { _ in [counting] }
 
         XCTAssertEqual(store.resolveConflicts(), 0)

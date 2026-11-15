@@ -18,7 +18,7 @@ final class DailyFile: NoteRepository {
     private let clock: AppClock
     private let id = UUID()
     /// This Mac's name as a conflict version's saving computer is compared with it.
-    var computerName: String? = NoteStore.systemComputerName
+    lazy var computerName: String? = NoteStore.systemComputerName
 
     init(clock: AppClock) {
         self.clock = clock
@@ -100,14 +100,20 @@ final class DailyFile: NoteRepository {
     /// taken from, and record the write in the lineage. For a writer that is not
     /// the document, such as healing a duplicate or applying a template. Returns
     /// the new fingerprint, or nil when the file changed or could not be written.
-    static func replaceFile(at url: URL, with body: String, expecting expected: Fingerprint) -> Fingerprint? {
+    ///
+    /// `asMerge` says the text comes from other versions, as a healed duplicate's
+    /// does, so it vouches for nothing; a template the person asked for is their own
+    /// write (`asMerge: false`).
+    static func replaceFile(
+        at url: URL, with body: String, expecting expected: Fingerprint, at date: Date = Date(), asMerge: Bool = true
+    ) -> Fingerprint? {
         guard let data = try? Data(contentsOf: url), Fingerprint(of: data) == expected else { return nil }
-        return try? writeRecording(Data(body.utf8), to: url, at: Date(), asMerge: true)
+        return try? writeRecording(Data(body.utf8), to: url, at: date, asMerge: asMerge)
     }
 
     func isEarlierOwnBody(_ body: String, ofNote id: UUID) -> Bool {
         guard let url = url else { return false }
-        return WriteLineage.containsEarlierBody(body, for: NoteStore.lineageKey(url))
+        return WriteLineage.containsEarlierBody(body, for: NoteStore.lineageKey(url), countingMerges: true)
     }
 
     func textAdopted(_ body: String, over previous: String?, ofNote id: UUID) {
@@ -491,7 +497,10 @@ final class DailyDocument {
     private func healDuplicates(now: Date) {
         guard let url = url else { return }
         lastDuplicateSweep = now
-        DailyNote.healDuplicates(in: url.deletingLastPathComponent(), now: now)
+        DailyNote.healDuplicates(
+            in: url.deletingLastPathComponent(), now: now,
+            write: { DailyFile.replaceFile(at: $0, with: $1, expecting: $2, at: now) != nil }
+        )
     }
 
     private func duplicateSweepIsDue(now: Date) -> Bool {
@@ -592,7 +601,9 @@ final class DailyDocument {
         var fingerprint: Fingerprint?
         if let onDisk {
             // Only over the blank file just read; if it changed since, take that in.
-            guard let written = DailyFile.replaceFile(at: url, with: templated, expecting: onDisk.fingerprint) else {
+            guard let written = DailyFile.replaceFile(
+                at: url, with: templated, expecting: onDisk.fingerprint, at: clock.now(), asMerge: false
+            ) else {
                 storeDidChange()
                 return
             }

@@ -17,6 +17,7 @@ final class OwnWriteLineageTests: XCTestCase {
             .appendingPathComponent("OwnWriteLineage-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         lineageFile = root.appendingPathComponent("machine/write-lineage.json")
+        NoteStore.systemComputerName = "This Mac"
         clock = ManualClock()
         scheduler = TestScheduler(clock: clock)
         store = NoteStore(rootURL: root.appendingPathComponent("notes"), clock: clock, scheduler: scheduler)
@@ -55,7 +56,7 @@ final class OwnWriteLineageTests: XCTestCase {
     }
 
     private func version(
-        _ id: UUID, _ body: String, savedAt: Date? = nil, by computer: String? = nil,
+        _ id: UUID, _ body: String, savedAt: Date? = nil, by computer: String? = "This Mac",
         resolved: @escaping () -> Void = {}
     ) throws -> NoteStore.ConflictVersionHandle {
         let url = root.appendingPathComponent("version-\(UUID().uuidString).md")
@@ -149,7 +150,7 @@ final class OwnWriteLineageTests: XCTestCase {
         let (note, older) = try savedWithATypoFixed()
         try writeOutside(note.id, "the cat\nsat down\nadded in Obsidian")
         var resolved = 0
-        store.conflictVersionsProvider = { _ in [.init(url: older.url, markResolved: { resolved += 1 })] }
+        store.conflictVersionsProvider = { _ in [.init(url: older.url, markResolved: { resolved += 1 }, savingComputer: "This Mac")] }
         store.otherVersionsRemover = { _ in }
 
         XCTAssertEqual(store.resolveConflicts(), 0)
@@ -187,7 +188,7 @@ final class OwnWriteLineageTests: XCTestCase {
         store.save(note)
         try writeOutside(note.id, "a line")
         var resolved = 0
-        store.conflictVersionsProvider = { _ in [.init(url: older.url, markResolved: { resolved += 1 })] }
+        store.conflictVersionsProvider = { _ in [.init(url: older.url, markResolved: { resolved += 1 }, savingComputer: "This Mac")] }
         store.otherVersionsRemover = { _ in }
 
         XCTAssertEqual(store.resolveConflicts(), 1)
@@ -234,7 +235,7 @@ final class OwnWriteLineageTests: XCTestCase {
         store.save(note)
         try writeOutside(note.id, "a line")
         var resolved = 0
-        store.conflictVersionsProvider = { _ in [.init(url: older.url, markResolved: { resolved += 1 })] }
+        store.conflictVersionsProvider = { _ in [.init(url: older.url, markResolved: { resolved += 1 }, savingComputer: "This Mac")] }
         store.otherVersionsRemover = { _ in }
 
         _ = store.resolveConflicts()
@@ -552,75 +553,103 @@ final class OwnWriteLineageTests: XCTestCase {
 
     // MARK: - A conflict version that equals an earlier write is dropped only if it is our own save
 
-    /// This Mac wrote "A\nP", then "A"; the other Mac put "A\nP" back on purpose; before
-    /// that arrived the person typed on here. iCloud keeps the restore as a conflict
-    /// version that equals our first write. It was saved after our next write, so it
-    /// is not our own earlier save, and the line must survive.
-    func testARestoreThatArrivesAsAConflictVersionKeepsTheLine() throws {
-        store.computerName = "This Mac"
-        var note = makeNote("A\nP")
+    /// A note that this Mac wrote as `bodies`, one write every ten seconds from now,
+    /// and the time of the first. Each case uses its own note, so no case sees
+    /// another's lineage.
+    private func writtenNote(_ bodies: [String]) -> (note: Note, t0: Date) {
+        var note = makeNote(bodies[0])
         store.save(note)
         let t0 = clock.now()
-        clock.advance(by: 10)
-        note.content = "A"
-        store.save(note)
-        clock.advance(by: 10)
-        note.content = "A\nnew"
-        store.save(note)
-        for (savedAt, computer) in [(t0.addingTimeInterval(15), nil), (t0.addingTimeInterval(5), "The Other Mac")] as [(Date, String?)] {
-            let restore = try version(note.id, "A\nP", savedAt: savedAt, by: computer)
-            store.conflictVersionsProvider = { _ in [restore] }
-            store.otherVersionsRemover = { _ in }
+        for body in bodies.dropFirst() {
+            clock.advance(by: 10)
+            note.content = body
+            store.save(note)
+        }
+        return (note, t0)
+    }
 
-            XCTAssertEqual(store.resolveConflicts(), 1, "a restore saved \(savedAt) by \(computer ?? "nobody") was dropped")
+    /// Whether the sweep drops a conflict version of `body` saved as given.
+    private func sweepDrops(
+        _ body: String, of note: Note, savedAt: Date?, by computer: String?
+    ) throws -> Bool {
+        let candidate = try version(note.id, body, savedAt: savedAt, by: computer)
+        let hex = String(note.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(6))
+        store.conflictVersionsProvider = { url in url.lastPathComponent.contains(hex) ? [candidate] : [] }
+        store.otherVersionsRemover = { _ in }
+        return store.resolveConflicts() == 0
+    }
 
+    /// This Mac wrote "A\nP", then "A"; the other Mac put "A\nP" back on purpose; before
+    /// that arrived the person typed on here. iCloud keeps the restore as a conflict
+    /// version that equals our first write. It names another computer, or none and a
+    /// date after our next write, so it is not our own earlier save.
+    func testARestoreThatArrivesAsAConflictVersionKeepsTheLine() throws {
+        let cases: [(offset: Double, computer: String?)] = [(15, nil), (5, "The Other Mac"), (15, "The Other Mac")]
+        for (offset, computer) in cases {
+            let (note, t0) = writtenNote(["A\nP", "A", "A\nnew"])
+            let dropped = try sweepDrops("A\nP", of: note, savedAt: t0.addingTimeInterval(offset), by: computer)
+            XCTAssertFalse(dropped, "a restore saved at +\(offset) by \(computer ?? "nobody") was dropped")
             let saved = try onDisk(note.id)
             XCTAssertTrue(saved.contains("P") && saved.contains("new"), saved)
-            // Back to the state before the merge for the second round.
-            try raw(note.id, "A\nnew").write(to: activeFile(), atomically: true, encoding: .utf8)
+            store.archive(note)
         }
     }
 
     func testAnUntickThatArrivesAsAConflictVersionIsKept() throws {
-        store.computerName = "This Mac"
-        var note = makeNote("- [ ] buy milk")
-        store.save(note)
-        let t0 = clock.now()
-        clock.advance(by: 10)
-        note.content = "- [x] buy milk"
-        store.save(note)
-        clock.advance(by: 10)
-        note.content = "- [x] buy milk\nmore"
-        store.save(note)
-        let unticked = try version(note.id, "- [ ] buy milk", savedAt: t0.addingTimeInterval(16), by: "This Mac")
-        store.conflictVersionsProvider = { _ in [unticked] }
-        store.otherVersionsRemover = { _ in }
-
-        XCTAssertEqual(store.resolveConflicts(), 1)
-
+        let (note, t0) = writtenNote(["- [ ] buy milk", "- [x] buy milk", "- [x] buy milk\nmore"])
+        XCTAssertFalse(try sweepDrops("- [ ] buy milk", of: note, savedAt: t0.addingTimeInterval(16), by: "The Other Mac"))
         XCTAssertTrue(try onDisk(note.id).contains("- [ ] buy milk"), "the untick was dropped")
     }
 
-    /// iCloud keeping an older save of this Mac (hypothesis H1): saved by this Mac
-    /// before its next write. Dropped, with no block.
-    func testAnOlderOwnSaveThatThisMacSavedBeforeItsNextWriteIsStillDropped() throws {
-        store.computerName = "This Mac"
-        var note = makeNote("teh cat\nsat down")
-        store.save(note)
-        let t0 = clock.now()
-        clock.advance(by: 10)
-        note.content = "the cat\nsat down"
-        store.save(note)
-        for computer in [nil, "This Mac"] as [String?] {
-            let older = try version(note.id, "teh cat\nsat down", savedAt: t0.addingTimeInterval(1), by: computer)
-            store.conflictVersionsProvider = { _ in [older] }
-            store.otherVersionsRemover = { _ in }
-
-            XCTAssertEqual(store.resolveConflicts(), 0)
-
-            let saved = try onDisk(note.id)
-            XCTAssertEqual(saved, "the cat\nsat down", "saved by \(computer ?? "nobody")")
+    /// iCloud keeping an older save of this Mac (hypothesis H1): it names this Mac, so
+    /// it is ours whatever its date says.
+    func testAnOlderOwnSaveThatNamesThisMacIsDroppedWhateverItsDate() throws {
+        let offsets: [Double?] = [nil, 0, 1, 500]
+        for offset in offsets {
+            let (note, t0) = writtenNote(["teh cat\nsat down", "the cat\nsat down"])
+            var savedAt: Date?
+            if let offset { savedAt = t0.addingTimeInterval(offset) }
+            let dropped = try sweepDrops("teh cat\nsat down", of: note, savedAt: savedAt, by: "This Mac")
+            XCTAssertTrue(dropped, "saved at \(String(describing: offset)) by this Mac")
+            XCTAssertEqual(try onDisk(note.id), "the cat\nsat down")
         }
+    }
+
+    func testTheComputerNameIsComparedAsTheSystemSpellsIt() {
+        XCTAssertTrue(WriteLineage.isSameComputer("Ronica\u{2019}s MacBook", "Ronica's MacBook"))
+        XCTAssertTrue(WriteLineage.isSameComputer("Cafe\u{301}", "Caf\u{e9}"))
+        XCTAssertFalse(WriteLineage.isSameComputer("Ronica's MacBook", "Ronica's Mac mini"))
+        XCTAssertFalse(WriteLineage.isSameComputer("Ronica's MacBook", nil))
+    }
+
+    /// With no computer named, the date decides: between the write and the next one,
+    /// each with 2 s to spare.
+    func testAVersionWithNoComputerIsOursOnlyBetweenTheWriteAndTheNextOne() throws {
+        let offsets: [Double?] = [-2, -3, 0, 10, 12, 12.5, nil]
+        let expected = [true, false, true, true, true, false, false]
+        for (offset, shouldDrop) in zip(offsets, expected) {
+            let (note, t0) = writtenNote(["teh cat\nsat down", "the cat\nsat down"])
+            var savedAt: Date?
+            if let offset { savedAt = t0.addingTimeInterval(offset) }
+            let dropped = try sweepDrops("teh cat\nsat down", of: note, savedAt: savedAt, by: nil)
+            XCTAssertEqual(dropped, shouldDrop, "saved at \(String(describing: offset)) by nobody")
+        }
+    }
+
+    /// The same text written twice: a version saved between the two matching writes
+    /// matches neither window, and one saved after the second matches its window.
+    func testARepeatedBodyIsMatchedAgainstEachOfItsWrites() throws {
+        let bodies = ["teh cat", "the cat", "teh cat", "a dog"]
+        let after = try { () -> Bool in
+            let (note, t0) = writtenNote(bodies)
+            return try sweepDrops("teh cat", of: note, savedAt: t0.addingTimeInterval(25), by: nil)
+        }()
+        let between = try { () -> Bool in
+            let (note, t0) = writtenNote(bodies)
+            return try sweepDrops("teh cat", of: note, savedAt: t0.addingTimeInterval(15), by: nil)
+        }()
+        XCTAssertTrue(after, "saved while the second write was the newest")
+        XCTAssertFalse(between, "saved after the first write's next one, before the second write")
     }
 
     /// A merge the store wrote holds the other Mac's text, which no window showed. A
@@ -645,5 +674,32 @@ final class OwnWriteLineageTests: XCTestCase {
         XCTAssertEqual(store.resolveConflicts(), 1)
 
         XCTAssertTrue(try onDisk(note.id).contains("from the other Mac"), "the only copy of the line was dropped")
+    }
+
+    /// The sweep wrote a merge M, the window adopted it and the person saved a line on
+    /// top; then Obsidian puts M back while a second line is unsaved. M adds nothing to
+    /// what the window last wrote, so the first line survives.
+    func testAMergePutBackByObsidianDoesNotWipeTheLinesTypedSinceTheWindowAdoptedIt() throws {
+        let note = makeNote("mine")
+        let document = open(note)
+        let other = try version(note.id, "from the other Mac", by: "The Other Mac")
+        store.beforeResolvingConflicts = { _ in document.flush() }
+        store.conflictVersionsProvider = { _ in [other] }
+        store.otherVersionsRemover = { _ in }
+        XCTAssertEqual(store.resolveConflicts(), 1)
+        let merged = try onDisk(note.id)
+        document.storeDidChange()
+        XCTAssertEqual(body(of: document.buffer), merged)
+        document.edit { $0.content = merged + "\nline one" }
+        scheduler.advance(by: 1)
+        document.isEditing = { true }
+        document.edit { $0.content = merged + "\nline one\nline two" }
+        try writeOutside(note.id, merged)
+        document.storeDidChange()
+
+        document.blur()
+
+        let saved = try onDisk(note.id)
+        XCTAssertTrue(saved.contains("line one") && saved.contains("line two"), saved)
     }
 }

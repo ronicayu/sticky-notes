@@ -1,4 +1,6 @@
 import CryptoKit
+import os
+import SystemConfiguration
 import Darwin
 import Foundation
 
@@ -125,9 +127,13 @@ struct MigrationReport {
 /// A foreign version is never in the list, and a version with a line none of
 /// our writes had is not an earlier write, so text found only in another
 /// version is merged as before. A conflict version that equals an earlier write
-/// is dropped only if it was also saved by this Mac before its next write
-/// (`History.isOwnEarlierSave`): the other Mac putting the same text back on
-/// purpose, after we removed it, produces the same bytes and must survive.
+/// is dropped only if it is also our own save (`History.isOwnEarlierSave`): it
+/// names this Mac as its saving computer, or names none and was saved between that
+/// write and the next. The other Mac putting the same text back on purpose,
+/// after we removed it, produces the same bytes and must survive. This assumes
+/// that the two Macs have different computer names, and that `NSFileVersion`
+/// reports this Mac's name for its own versions; neither is verified on real
+/// hardware, so every such decision is logged (category "conflicts").
 ///
 /// Privacy. The saved file holds hashes only: of each write, and of each line of
 /// the newest write. The text of the newest write is kept in memory, never saved.
@@ -168,25 +174,57 @@ enum WriteLineage {
         func contains(full hash: String) -> Bool { entries.contains { $0.full == hash } }
         /// The body equals one a window saved; a merge the store wrote does not count.
         func contains(body hash: String) -> Bool { entries.contains { $0.body == hash && !$0.merged } }
+        /// The body equals any write, a merge the store wrote included.
+        func containsAny(body hash: String) -> Bool { entries.contains { $0.body == hash } }
         func isNewest(full hash: String) -> Bool { entries.last?.full == hash }
 
         /// Whether a conflict version whose content hashes to `hash` is an earlier
         /// save of this Mac's own, as iCloud keeps them. Matching an earlier write
         /// is not enough: another Mac that put the same text back on purpose
-        /// produces the same bytes. The version must also have been saved before
-        /// this Mac's next write (with `skew` to spare), by this Mac or by a
-        /// writer that names no computer; a later one, or one saved by another
-        /// computer, is kept and merged. A version with no date or no computer
-        /// to compare is taken as it is, which a real `NSFileVersion` never is.
+        /// produces the same bytes. Of the versions that match an earlier write
+        /// that a window saved:
+        /// - one that names this Mac as its saving computer is ours;
+        /// - one that names another computer is kept and merged;
+        /// - one that names none is ours only if its date lies between that write
+        ///   and the next one (each with `clockSkew` to spare), so one with no date
+        ///   is kept.
+        /// The first two assume that the two Macs have different computer names.
+        /// Every such version is logged (`WriteLineage.logger`, category
+        /// "conflicts", no note text), so what `NSFileVersion` really reports can
+        /// be read off two Macs.
         func isOwnEarlierSave(
             full hash: String, savedAt: Date?, computer: String?, thisComputer: String?
         ) -> Bool {
-            if let computer, computer != thisComputer { return false }
-            for (index, entry) in entries.enumerated()
-            where entry.full == hash && !entry.merged && index + 1 < entries.count {
-                guard let savedAt else { return true }
-                if savedAt.timeIntervalSince1970 <= entries[index + 1].at + WriteLineage.clockSkew { return true }
+            let matches = entries.indices.filter {
+                entries[$0].full == hash && !entries[$0].merged && $0 + 1 < entries.count
             }
+            guard let last = matches.last else { return false }
+            func log(_ decision: String, _ index: Int) {
+                WriteLineage.logger.debug("""
+                    conflict version matches an earlier own write: saved \
+                    \(savedAt.map { String($0.timeIntervalSince1970) } ?? "no date", privacy: .public) \
+                    by \(computer ?? "no computer", privacy: .public), this Mac \
+                    \(thisComputer ?? "unknown", privacy: .public), write at \(entries[index].at, privacy: .public), \
+                    next write at \(entries[index + 1].at, privacy: .public): \(decision, privacy: .public)
+                    """)
+            }
+            if let computer {
+                let ours = WriteLineage.isSameComputer(computer, thisComputer)
+                log(ours ? "drop, saved by this Mac" : "keep, saved by another computer", last)
+                return ours
+            }
+            guard let savedAt else {
+                log("keep, no computer and no date", last)
+                return false
+            }
+            let time = savedAt.timeIntervalSince1970
+            for index in matches
+            where time >= entries[index].at - WriteLineage.clockSkew
+                && time <= entries[index + 1].at + WriteLineage.clockSkew {
+                log("drop, saved between the write and the next one", index)
+                return true
+            }
+            log("keep, saved outside the writes' dates", last)
             return false
         }
     }
@@ -216,6 +254,17 @@ enum WriteLineage {
     /// How far a version's save date may be after our next write and still be our
     /// own earlier save: the two Macs' clocks, and iCloud's rounding.
     static let clockSkew: TimeInterval = 2
+    static let logger = Logger(subsystem: "StickyNotes", category: "conflicts")
+
+    /// Computer names compared as the system spells them: Unicode-normalised, with
+    /// a typographic apostrophe taken for a straight one.
+    static func isSameComputer(_ a: String, _ b: String?) -> Bool {
+        guard let b else { return false }
+        func normal(_ name: String) -> String {
+            name.precomposedStringWithCanonicalMapping.replacingOccurrences(of: "\u{2019}", with: "'")
+        }
+        return normal(a) == normal(b)
+    }
 
     private static let lock = NSLock()
     // Every access holds `lock`.
@@ -329,11 +378,15 @@ enum WriteLineage {
     /// newest. The newest write is what the file holds or held last, and may hold
     /// text from another writer that a merge wrote for us, so it is no evidence
     /// that the text is the person's own older text.
-    static func containsEarlierBody(_ body: String, for key: String) -> Bool {
+    ///
+    /// `countingMerges` is for the window, which only asks whether an outside body
+    /// adds nothing to what it last wrote or read; the sweep and a stale file ask
+    /// without, because a merge vouches for nothing there.
+    static func containsEarlierBody(_ body: String, for key: String, countingMerges: Bool = false) -> Bool {
         let history = history(for: key)
         guard let newest = history.newest else { return false }
         let hash = NoteStore.contentHash(body: body)
-        return hash != newest.body && history.contains(body: hash)
+        return hash != newest.body && (countingMerges ? history.containsAny(body: hash) : history.contains(body: hash))
     }
 
     /// True when `hash` is the most recent write recorded for `key`.
@@ -1697,8 +1750,19 @@ final class NoteStore {
     }
 
     /// This Mac's name as `NSFileVersion` reports a saving computer.
-    static let systemComputerName: String? = Host.current().localizedName
-    var computerName: String? = NoteStore.systemComputerName
+    nonisolated(unsafe) private static var computerNameStorage: String??
+    /// Read once, from the system, the first time it is needed; a test sets it.
+    static var systemComputerName: String? {
+        get {
+            if let known = computerNameStorage { return known }
+            let name = SCDynamicStoreCopyComputerName(nil, nil) as String?
+            computerNameStorage = .some(name)
+            return name
+        }
+        set { computerNameStorage = .some(newValue) }
+    }
+    /// Read once, when the first conflict version needs it.
+    lazy var computerName: String? = NoteStore.systemComputerName
 
     static func systemConflictVersions(of url: URL) -> [ConflictVersionHandle] {
         // Asking for versions is a round trip to another process, and the watcher
@@ -1740,7 +1804,7 @@ final class NoteStore {
     /// an older copy of the person's own text from new text.
     func isEarlierOwnBody(_ body: String, ofNote id: UUID) -> Bool {
         guard let url = pathIndex[id] ?? existingURL(for: id, in: activeURL) else { return false }
-        return WriteLineage.containsEarlierBody(body, for: NoteStore.lineageKey(url))
+        return WriteLineage.containsEarlierBody(body, for: NoteStore.lineageKey(url), countingMerges: true)
     }
 
     func textAdopted(_ body: String, over previous: String?, ofNote id: UUID) {
