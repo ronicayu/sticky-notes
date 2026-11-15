@@ -20,6 +20,7 @@ final class ObsidianPropertiesTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        store?.stopWatching()
         try? FileManager.default.removeItem(at: root)
     }
 

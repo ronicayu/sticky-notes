@@ -27,6 +27,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         controllers.forEach { $0.window?.close() }
         controllers = []
         try? fm.removeItem(at: directory)

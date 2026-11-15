@@ -28,6 +28,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         for folder in [store.activeURL, store.archiveURL] {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
         }

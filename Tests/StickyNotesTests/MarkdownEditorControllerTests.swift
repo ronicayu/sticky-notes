@@ -19,6 +19,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         try? FileManager.default.removeItem(at: root)
     }
 

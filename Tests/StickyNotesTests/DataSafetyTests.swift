@@ -597,6 +597,7 @@ final class ConflictSweepTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        store?.stopWatching()
         try? FileManager.default.removeItem(at: root)
     }
 

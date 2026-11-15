@@ -20,6 +20,7 @@ final class NoteLeavesActiveFolderTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        store?.stopWatching()
         for folder in [store.activeURL, store.archiveURL, store.trashURL] {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
         }

@@ -32,6 +32,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         desk.dailyNote?.window?.close()
         isolated.tearDown()
         try? FileManager.default.removeItem(at: root)

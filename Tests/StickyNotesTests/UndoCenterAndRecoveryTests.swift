@@ -65,6 +65,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         isolated.tearDown()
     }
 

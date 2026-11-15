@@ -24,6 +24,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         controllers.forEach { $0.window?.close() }
         MarkdownStyler.baseFontSize = savedSize
         try? FileManager.default.removeItem(at: root)

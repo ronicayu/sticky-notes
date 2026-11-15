@@ -34,7 +34,10 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         controllers.forEach { $0.window?.close() }
+        // The test object lives until the run ends; a window controller keeps a folder watcher open.
+        controllers = []
         isolated.tearDown()
         try? FileManager.default.removeItem(at: vault)
     }

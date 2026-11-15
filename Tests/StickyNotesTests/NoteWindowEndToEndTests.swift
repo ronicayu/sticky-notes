@@ -33,6 +33,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         controllers.forEach { $0.window?.close() }
         try? FileManager.default.removeItem(at: root)
         try? FileManager.default.removeItem(at: layoutURL)

@@ -215,9 +215,9 @@ final class NoteStore {
     /// than per file, so a whole-tree rescan is the granularity we'd get
     /// anyway; the win is skipping the rescan while nothing is changing.
     ///
-    /// Everything here is main-queue only: `FileWatcher` sets its FSEvents
-    /// dispatch queue to main, so the invalidation and the reads that
-    /// repopulate it can't interleave.
+    /// Everything here is main-queue only: `FileWatcher` reports changes on
+    /// the main queue, so the invalidation and the reads that repopulate it
+    /// can't interleave.
     private var cache: [String: [Note]] = [:]
 
     /// Directory paths whose `pathIndex` entries are known to be
@@ -724,6 +724,15 @@ final class NoteStore {
         let sweep = UncheckedSendable { [weak self] in self?.resolveConflictsInBackground() }
         DispatchQueue.main.async { sweep.value() }
         return report
+    }
+
+    /// Stop listening for changes in the folders, which gives back the file
+    /// descriptors the listener holds (about a dozen per folder). A store does
+    /// this itself when it goes away; a test whose store lives as long as the
+    /// test object, which XCTest keeps until the run ends, calls it in tearDown.
+    func stopWatching() {
+        watcher?.stop()
+        watcher = nil
     }
 
     // MARK: - What a root held when it was left

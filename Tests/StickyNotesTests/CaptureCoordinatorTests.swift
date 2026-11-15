@@ -31,6 +31,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         desk.windowControllers.values.forEach { $0.window?.close() }
         desk.dailyNote?.window?.close()
         isolated.tearDown()

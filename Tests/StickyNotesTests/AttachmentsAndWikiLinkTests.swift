@@ -14,6 +14,7 @@ final class AttachmentsTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        store?.stopWatching()
         try? FileManager.default.removeItem(at: root)
     }
 

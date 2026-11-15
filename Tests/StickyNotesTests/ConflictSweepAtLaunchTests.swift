@@ -22,6 +22,7 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        store?.stopWatching()
         delegate?.desk.windowControllers.values.forEach { $0.window?.close() }
         delegate = nil
         isolated.tearDown()
