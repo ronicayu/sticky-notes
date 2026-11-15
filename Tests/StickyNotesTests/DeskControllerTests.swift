@@ -772,6 +772,53 @@ import XCTest
         XCTAssertFalse(undo.hasPendingOffer, "a deliberate never-mind was announced")
     }
 
+    func testPressingTheNewNoteChordAgainThroughTheDeskDoesNotAnnounceTheDiscardWhenTheWindowResignsKey() throws {
+        let id = desk.makeNote()
+        let controller = try XCTUnwrap(desk.windowControllers[id])
+        let window = try XCTUnwrap(controller.window)
+        desk.isKeyWindow = { $0 === window }
+        defer { undo.dismiss() }
+
+        desk.newNote()
+        // Closing the key window makes it resign key; a test host never does.
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: window))
+        waitForDeferredWork()
+
+        XCTAssertNil(desk.windowControllers[id])
+        XCTAssertFalse(undo.hasPendingOffer, "the discard the person asked for was announced as a sweep")
+    }
+
+    func testAnEmptyNoteSweptUpRightAfterHideAllLeavesTheShowOfferAlone() throws {
+        let id = desk.makeNote()
+        let controller = try XCTUnwrap(desk.windowControllers[id])
+        defer { undo.dismiss() }
+
+        desk.toggleHideAll()
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: controller.window))
+        waitForDeferredWork()
+        XCTAssertNil(desk.windowControllers[id])
+
+        undo.undoLastAction(nil)
+        XCTAssertFalse(desk.notesHidden, "Undo did something other than show the notes")
+        XCTAssertNil(desk.windowControllers[id], "Undo brought back the empty note instead of showing the notes")
+    }
+
+    func testAnEmptyNoteSweptUpWhileAnotherOfferIsUpLeavesThatOfferAlone() throws {
+        let archived = seed("Archived")
+        desk.archiveNote(archived)
+        let id = desk.makeNote()
+        let controller = try XCTUnwrap(desk.windowControllers[id])
+        defer { undo.dismiss() }
+        XCTAssertNil(store.loadActive().first { $0.id == archived.id })
+
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: controller.window))
+        waitForDeferredWork()
+        XCTAssertNil(desk.windowControllers[id])
+
+        undo.undoLastAction(nil)
+        XCTAssertNotNil(store.loadActive().first { $0.id == archived.id }, "Undo no longer brings the archived note back")
+    }
+
     func testTheFirstEditOfANewNoteWritesIt() throws {
         let id = desk.makeNote()
         let controller = try XCTUnwrap(desk.windowControllers[id])

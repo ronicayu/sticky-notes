@@ -725,6 +725,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     }
 
     private func closeThroughDocument(_ reason: NoteDocument.CloseReason, offeringUndo: Bool = false) {
+        // Closing the window resigns key, which asks to discard the note again.
+        guard !noteDocument.isClosed else { return }
         switch noteDocument.close(reason) {
         case .refused:
             // A note to be discarded that turned out to hold text just stays.

@@ -141,7 +141,7 @@ import AppKit
     var hasWindows: Bool { !windowControllers.isEmpty }
 
     func focusedController() -> NoteWindowController? {
-        windowControllers.values.first { $0.window?.isKeyWindow == true }
+        windowControllers.values.first { $0.window.map(isKeyWindow) == true }
     }
 
     /// The daily note, when its window is key.
@@ -219,7 +219,10 @@ import AppKit
             self?.undo.offerUndoForLabelRemoval(label, restore: restore)
         }
         controller.onEmptyNoteRemoved = { [weak self] emptyNote in
-            self?.undo.offerUndoForEmptyNoteRemoval { [weak self] in
+            // While notes are hidden, or another offer is up, the toast would
+            // take the place of the one the person can still answer.
+            guard let self = self, !self.notesHidden, !self.undo.hasPendingOffer else { return }
+            self.undo.offerUndoForEmptyNoteRemoval { [weak self] in
                 // The note's place is still in the layout, so it returns there.
                 self?.showAllIfHidden()
                 self?.presentWindow(for: emptyNote, animateIn: true)

@@ -128,7 +128,8 @@ final class NoteDocument {
     private let scheduler: Scheduler
     private let clock: AppClock
     private var saveTask: ScheduledWork?
-    private var isClosed = false
+    /// True once the note has been closed, discarded or archived. Closing again does nothing.
+    private(set) var isClosed = false
 
     /// True while the caret is in this note and the window would be disturbed by
     /// text changing under it. Read each time a decision needs it.
@@ -241,7 +242,7 @@ final class NoteDocument {
     /// A note is disposable when nothing was ever typed into it and it holds
     /// nothing, the shape a mis-pressed hotkey leaves behind.
     var isAbandonedCapture: Bool {
-        wasNeverEdited && Self.isBlank(buffer)
+        !isClosed && wasNeverEdited && Self.isBlank(buffer)
     }
 
     private static func isBlank(_ note: Note) -> Bool {
