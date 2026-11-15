@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-enum NoteColor: String, Codable, CaseIterable {
+enum NoteColor: String, Codable, CaseIterable, Sendable {
     case yellow, pink, orange, green, blue, purple, gray
 
     /// Body / paper color — bright, clean, high-luminosity pastels (TickTick-style).
@@ -85,7 +85,7 @@ enum NoteColor: String, Codable, CaseIterable {
 }
 
 /// How a note sits relative to other apps' windows.
-enum NoteFloatLevel: String, Codable, CaseIterable {
+enum NoteFloatLevel: String, Codable, CaseIterable, Sendable {
     /// Above everything — the app's original behavior.
     case floating
     /// Behind other apps, visible with the desktop. Classic Stickies.
@@ -104,7 +104,7 @@ enum NoteFloatLevel: String, Codable, CaseIterable {
 /// comments) as the lines it was read from, and where the app's own keys sat
 /// among them. Written back as it was; the app never edits any of it, so it is
 /// not part of a note's text and a merge takes it from the file.
-struct PreservedFrontmatter: Equatable {
+struct PreservedFrontmatter: Equatable, Sendable {
     var layout: [MarkdownFile.Slot] = []
     /// The file wrote `labels` as a block list, so it is written back that way.
     var labelsAsBlock = false
@@ -117,13 +117,13 @@ struct PreservedFrontmatter: Equatable {
 /// build keeps the window per Mac (see `DeviceLayoutStore`) and no longer writes
 /// these keys, but a file that still has them places the note once, on a Mac
 /// that has no layout for it.
-struct LegacyPlacement: Equatable {
+struct LegacyPlacement: Equatable, Sendable {
     var x: Double
     var y: Double
     var collapsed: Bool
 }
 
-struct Note: Codable, Identifiable {
+struct Note: Codable, Identifiable, Sendable {
     let id: UUID
     var title: String
     var content: String

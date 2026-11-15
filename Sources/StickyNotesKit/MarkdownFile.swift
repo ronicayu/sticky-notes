@@ -6,7 +6,7 @@ import Foundation
 /// so a file Obsidian has added to survives the app's next save.
 enum MarkdownFile {
     /// One place in the frontmatter, in file order.
-    enum Slot: Equatable {
+    enum Slot: Equatable, Sendable {
         /// A key the caller owns. It is written from `Document.frontmatter`,
         /// where the file had it.
         case key(String)
@@ -15,7 +15,7 @@ enum MarkdownFile {
         case verbatim(String)
     }
 
-    struct Original: Equatable {
+    struct Original: Equatable, Sendable {
         var value: String
         var raw: String
         /// The value was written in quotes.

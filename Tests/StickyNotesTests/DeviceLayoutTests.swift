@@ -529,7 +529,8 @@ import XCTest
         let observer = NotificationCenter.default.addObserver(
             forName: NoteStore.didChange, object: nil, queue: nil
         ) { note in
-            MainActor.assumeIsolated { desk.storeDidChange(note) }
+            nonisolated(unsafe) let notification = note
+            MainActor.assumeIsolated { desk.storeDidChange(notification) }
         }
         defer { NotificationCenter.default.removeObserver(observer) }
         store.restore(note)
@@ -551,7 +552,8 @@ import XCTest
         )
         store.archive(note)
         let observer = NotificationCenter.default.addObserver(forName: NoteStore.didChange, object: nil, queue: nil) { note in
-            MainActor.assumeIsolated { desk.storeDidChange(note) }
+            nonisolated(unsafe) let notification = note
+            MainActor.assumeIsolated { desk.storeDidChange(notification) }
         }
         defer { NotificationCenter.default.removeObserver(observer) }
 

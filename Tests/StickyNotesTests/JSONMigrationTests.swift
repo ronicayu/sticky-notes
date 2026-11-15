@@ -678,10 +678,10 @@ final class JSONMigrationTests: XCTestCase {
     func testAJSONFileThatArrivesAfterLaunchIsReportedAndLeftAlone() throws {
         let store = NoteStore(rootURL: root)
         XCTAssertNil(store.lastFailure)
-        var posted = 0
+        let posted = PostCount()
         let observer = NotificationCenter.default.addObserver(
             forName: NoteStore.healthDidChange, object: store, queue: nil
-        ) { _ in posted += 1 }
+        ) { _ in posted.increment() }
         defer { NotificationCenter.default.removeObserver(observer) }
         let late = try writeLegacy(makeNote("from the old Mac"), in: "notes")
         let bytes = try Data(contentsOf: late)
@@ -691,12 +691,12 @@ final class JSONMigrationTests: XCTestCase {
         XCTAssertEqual(store.lastFailure?.kind, .olderVersion)
         XCTAssertEqual(store.lastFailure?.fileName, late.lastPathComponent)
         XCTAssertEqual(store.lastFailure?.menuTitle, "Notes from an older version are waiting")
-        XCTAssertEqual(posted, 1)
+        XCTAssertEqual(posted.value, 1)
         XCTAssertEqual(try Data(contentsOf: late), bytes, "the file is not touched")
         XCTAssertEqual(try files("notes", ext: "md").count, 0, "and not converted while the other Mac may be editing it")
 
         store.handleFileSystemEvent()
-        XCTAssertEqual(posted, 1, "the same notice is not posted again")
+        XCTAssertEqual(posted.value, 1, "the same notice is not posted again")
 
         try fm.removeItem(at: late)
         store.handleFileSystemEvent()
@@ -824,4 +824,11 @@ final class JSONMigrationTests: XCTestCase {
         XCTAssertEqual(try files("local/notes", ext: "md").count, 1, "no second file for one note")
         XCTAssertEqual(store.loadActive().map(\.content), ["v1\nplus more"])
     }
+}
+
+private final class PostCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
 }
