@@ -141,10 +141,40 @@ final class Settings {
         localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
     }
 
-    /// Where this Mac keeps its note layout. Beside the storage roots, never in
-    /// one, so no sync service carries it to another Mac.
+    /// Where this Mac keeps the files that are its own and must not sync: the
+    /// local storage folder, which only this app uses. The store reads only the
+    /// `notes`, `archive`, `.trash` and `attachments` folders under a root, never
+    /// the files beside them, and a vault or iCloud root is a different folder, so
+    /// nothing here reaches another Mac.
+    var machineFilesFolder: URL { localStorageRoot }
+
+    /// Where this Mac keeps the layout of its note windows.
     var layoutURL: URL {
-        localRootURL.appendingPathComponent("layout.json")
+        machineFilesFolder.appendingPathComponent("layout.json")
+    }
+
+    /// Where a storage switch remembers what each root held when it was left.
+    var switchRecordsURL: URL {
+        machineFilesFolder.appendingPathComponent("storage-switch-records.json")
+    }
+
+    /// An earlier build wrote the two machine files straight into the Application
+    /// Support folder that every app shares. Move each one into the app's own
+    /// folder, once, if it is ours (it reads as this app's format); anything else
+    /// found there is left alone.
+    func migrateMachineFiles() {
+        let fm = FileManager.default
+        func move(_ name: String, to destination: URL, isOurs: (Data) -> Bool) {
+            let old = localRootURL.appendingPathComponent(name)
+            guard !fm.fileExists(atPath: destination.path), let data = try? Data(contentsOf: old), isOurs(data) else { return }
+            try? fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            guard (try? data.write(to: destination, options: .atomic)) != nil else { return }
+            try? fm.removeItem(at: old)
+        }
+        move("layout.json", to: layoutURL, isOurs: DeviceLayoutStore.isLayoutFile)
+        move("storage-switch-records.json", to: switchRecordsURL) {
+            (try? JSONDecoder().decode([String: [String: String]].self, from: $0)) != nil
+        }
     }
 
     var preferredStorageRoot: URL {

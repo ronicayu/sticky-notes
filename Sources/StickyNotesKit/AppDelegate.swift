@@ -32,7 +32,8 @@ import AppKit
         self.store = store
         self.settings = settings
         self.clock = clock
-        store.switchRecordsURL = settings.localRootURL.appendingPathComponent("storage-switch-records.json")
+        settings.migrateMachineFiles()
+        store.switchRecordsURL = settings.switchRecordsURL
         recovery = RecoveryFiles(settings: settings, store: store, clock: clock)
         undo = UndoCenter(clock: clock)
         desk = DeskController(store: store, settings: settings, clock: clock, undo: undo, recovery: recovery)
@@ -55,6 +56,7 @@ import AppKit
         menuBar.install()
         capture.registerHotkeys()
         desk.restoreActiveNotes()
+        desk.pruneLayout()
         desk.startObserving()
         menuBar.startObservingStorageHealth()
         // After the windows are up: asking about every file's conflict versions

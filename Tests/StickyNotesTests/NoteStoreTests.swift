@@ -459,4 +459,28 @@ final class NoteStoreTests: XCTestCase {
         let relaunched = NoteStore(rootURL: root)
         XCTAssertEqual(try XCTUnwrap(relaunched.snapshot(id: b.id)).note.content, "beta edited")
     }
+
+    func testANameHeldByAnICloudPlaceholderIsTakenToo() throws {
+        let store = makeStore()
+        let (a, b) = collidingNotes()
+        let stamp = NoteStore.filenameFormatterForTests.string(from: a.createdAt)
+        let shortName = "\(stamp)-\(a.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased()).md"
+        try Data().write(to: store.activeURL.appendingPathComponent(".\(shortName).icloud"))
+
+        store.save(b)
+
+        let files = try FileManager.default.contentsOfDirectory(at: store.activeURL, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "md" }
+        XCTAssertEqual(files.map(\.lastPathComponent), ["\(stamp)-\(b.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()).md"])
+    }
+
+    func testAnUnreadableFileNamedWithTheNumberedFormMayBeTheNotesAndIsNotCalledMissing() throws {
+        let store = makeStore()
+        let note = makeNote()
+        let stamp = NoteStore.filenameFormatterForTests.string(from: note.createdAt)
+        let hex6 = note.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased()
+        try Data([0xFF, 0xFE, 0xFD]).write(to: store.activeURL.appendingPathComponent("\(stamp)-\(hex6)-2.md"))
+
+        guard case .unknown = store.whereIs(id: note.id) else { return XCTFail("a file that may be the note's was ignored") }
+    }
 }

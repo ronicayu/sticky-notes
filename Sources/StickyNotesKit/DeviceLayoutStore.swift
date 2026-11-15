@@ -50,10 +50,35 @@ final class DeviceLayoutStore {
     init(url: URL? = nil, scheduler: Scheduler = MainScheduler()) {
         self.url = url
         self.scheduler = scheduler
-        // A missing or unreadable file is a Mac that has laid nothing out yet.
-        entries = url
-            .flatMap { try? Data(contentsOf: $0) }
-            .flatMap { try? JSONDecoder().decode([String: NoteLayout].self, from: $0) } ?? [:]
+        entries = [:]
+        guard let url, let data = try? Data(contentsOf: url) else { return }
+        if let readable = Self.entries(in: data) {
+            entries = readable
+        } else {
+            // Not a layout file. The first write would replace it, so keep it.
+            let aside = url.appendingPathExtension("bad")
+            try? FileManager.default.removeItem(at: aside)
+            try? FileManager.default.moveItem(at: url, to: aside)
+        }
+    }
+
+    /// The entries a layout file holds, one by one, so a single bad entry costs
+    /// that note its place and no other. Nil when the data is not a JSON object.
+    private static func entries(in data: Data) -> [String: NoteLayout]? {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        var result: [String: NoteLayout] = [:]
+        for (key, value) in object where UUID(uuidString: key) != nil {
+            guard JSONSerialization.isValidJSONObject(value),
+                  let entry = try? JSONSerialization.data(withJSONObject: value),
+                  let layout = try? JSONDecoder().decode(NoteLayout.self, from: entry) else { continue }
+            result[key] = layout
+        }
+        return result
+    }
+
+    /// Whether `data` is a layout file in full, with every entry readable.
+    static func isLayoutFile(_ data: Data) -> Bool {
+        (try? JSONDecoder().decode([String: NoteLayout].self, from: data)) != nil
     }
 
     func layout(for id: UUID) -> NoteLayout? {
@@ -78,6 +103,15 @@ final class DeviceLayoutStore {
         guard entries.removeValue(forKey: id.uuidString) != nil else { return }
         hasUnwrittenChanges = true
         scheduleWrite()
+    }
+
+    /// Forget the notes for which `isKnown` is false, for the ones that no longer
+    /// exist anywhere. The caller must answer true for any note that may exist.
+    func prune(keeping isKnown: (UUID) -> Bool) {
+        for key in entries.keys {
+            guard let id = UUID(uuidString: key), !isKnown(id) else { continue }
+            remove(id)
+        }
     }
 
     /// Write now whatever has not reached the file.

@@ -157,17 +157,99 @@ import XCTest
         XCTAssertNil(makeLayout().layout(for: UUID()))
     }
 
-    func testTheLayoutFileSitsBesideTheStorageRootsAndNeverInOne() {
+    func testTheMachineFilesLiveInTheAppsOwnFolderAndNotTheSharedApplicationSupportFolder() {
         let isolated = IsolatedSettings()
         defer { isolated.tearDown() }
         let settings = isolated.settings
-        let layout = settings.layoutURL.standardizedFileURL.path
+        let shared = settings.localRootURL.standardizedFileURL.path
 
-        XCTAssertEqual(settings.layoutURL.deletingLastPathComponent().standardizedFileURL.path,
-                       settings.localRootURL.standardizedFileURL.path)
-        for storage in [settings.localStorageRoot, settings.preferredStorageRoot] {
-            XCTAssertFalse(layout.hasPrefix(storage.standardizedFileURL.path + "/"), "layout is inside \(storage.path)")
+        for file in [settings.layoutURL, settings.switchRecordsURL] {
+            let folder = file.deletingLastPathComponent().standardizedFileURL.path
+            XCTAssertNotEqual(folder, shared, "\(file.lastPathComponent) is in the folder every app shares")
+            XCTAssertTrue(folder.hasPrefix(shared + "/StickyNotes"), "\(file.path) is not in this app's folder")
+            for scanned in [store.activeURL, store.archiveURL, store.trashURL] {
+                XCTAssertFalse(file.standardizedFileURL.path.hasPrefix(scanned.standardizedFileURL.path),
+                               "\(file.lastPathComponent) is in a folder the store reads")
+            }
         }
+    }
+
+    func testMachineFilesFromTheSharedFolderMoveOnceAndOnlyWhenTheyAreOurs() throws {
+        let isolated = IsolatedSettings()
+        defer { isolated.tearDown() }
+        let settings = isolated.settings
+        let id = UUID()
+        let oldLayout = settings.localRootURL.appendingPathComponent("layout.json")
+        let oldRecords = settings.localRootURL.appendingPathComponent("storage-switch-records.json")
+        let layout = DeviceLayoutStore(url: oldLayout, scheduler: layoutScheduler)
+        layout.set(NoteLayout(x: 5, y: 6, width: 7, height: 8), for: id)
+        layout.flush()
+        try Data("{\"root\": {\"\(id)\": \"active:abc\"}}".utf8).write(to: oldRecords)
+
+        settings.migrateMachineFiles()
+
+        XCTAssertFalse(fm.fileExists(atPath: oldLayout.path))
+        XCTAssertFalse(fm.fileExists(atPath: oldRecords.path))
+        XCTAssertEqual(DeviceLayoutStore(url: settings.layoutURL).layout(for: id)?.x, 5)
+        XCTAssertTrue(fm.fileExists(atPath: settings.switchRecordsURL.path))
+
+        // Another app's file with the same name is not ours and stays where it is.
+        try Data("{\"theme\": \"dark\"}".utf8).write(to: oldLayout)
+        try fm.removeItem(at: settings.layoutURL)
+        settings.migrateMachineFiles()
+        XCTAssertTrue(fm.fileExists(atPath: oldLayout.path))
+        XCTAssertFalse(fm.fileExists(atPath: settings.layoutURL.path))
+    }
+
+    func testOneBadEntryDoesNotCostTheOtherNotesTheirPlace() throws {
+        let good = UUID(), bad = UUID()
+        let json = """
+        {"\(good)": {"x": 1, "y": 2, "width": 3, "height": 4, "collapsed": false},
+         "\(bad)": {"x": "left"}, "not-an-id": {"x": 1}}
+        """
+        try Data(json.utf8).write(to: layoutURL())
+
+        let layout = makeLayout()
+
+        XCTAssertEqual(layout.layout(for: good)?.x, 1)
+        XCTAssertNil(layout.layout(for: bad))
+    }
+
+    func testAFileThatIsNotALayoutIsKeptAsideBeforeTheFirstWrite() throws {
+        try Data("garbage".utf8).write(to: layoutURL())
+
+        let id = UUID()
+        let layout = makeLayout()
+        layout.set(NoteLayout(x: 1, y: 2, width: 3, height: 4), for: id)
+        layout.flush()
+
+        XCTAssertEqual(try Data(contentsOf: layoutURL().appendingPathExtension("bad")), Data("garbage".utf8))
+        XCTAssertEqual(makeLayout().layout(for: id)?.x, 1)
+    }
+
+    func testNotesThatExistNowhereAreForgottenAtLaunchAndArchivedOnesAreKept() throws {
+        let isolated = IsolatedSettings()
+        defer { isolated.tearDown() }
+        var active = Note.makeNew(frame: NSRect(x: 0, y: 0, width: 240, height: 200), now: clock.now())
+        active.content = "a"
+        let archived = Note(id: UUID(), content: "b", width: 240, height: 200, color: .yellow, createdAt: clock.now(), updatedAt: clock.now())
+        store.save(active)
+        store.save(archived)
+        store.archive(archived)
+        let gone = UUID()
+        let desk = DeskController(
+            store: store, settings: isolated.settings, clock: clock, undo: UndoCenter(clock: clock),
+            recovery: RecoveryFiles(settings: isolated.settings, store: store, clock: clock), scheduler: scheduler
+        )
+        for id in [active.id, archived.id, gone] {
+            desk.layout.set(NoteLayout(x: 1, y: 1, width: 240, height: 200), for: id)
+        }
+
+        desk.pruneLayout()
+
+        XCTAssertNotNil(desk.layout.layout(for: active.id))
+        XCTAssertNotNil(desk.layout.layout(for: archived.id), "an archived note lost its place")
+        XCTAssertNil(desk.layout.layout(for: gone))
     }
 
     // MARK: - A note file is not written by a move
@@ -286,7 +368,7 @@ import XCTest
         XCTAssertEqual(layout.layout(for: legacyId)?.x, 50)
     }
 
-    func testAMoveLeavesTheOldKeysInTheFileAndTheNextContentSaveRemovesThem() throws {
+    func testTheOldKeysStayInTheFileUntouchedThroughMovesAndContentSaves() throws {
         _ = try writeLegacyFile()
         let note = try loadLegacy()
         let layout = makeLayout()
@@ -302,45 +384,43 @@ import XCTest
         scheduler.advance(by: 1)
 
         let after = try String(contentsOf: url, encoding: .utf8)
-        for key in ["positionX", "positionY", "collapsed"] {
-            XCTAssertFalse(after.contains("\(key):"), "\(key) is still in the file:\n\(after)")
+        for line in ["positionX: 50.00", "positionY: 140.00", "collapsed: true", "tags: [a]", "# kept comment", "width: 260.00"] {
+            XCTAssertTrue(after.contains(line), "\(line) changed in the file:\n\(after)")
         }
-        XCTAssertTrue(after.contains("tags: [a]"), after)
-        XCTAssertTrue(after.contains("# kept comment"), after)
-        XCTAssertTrue(after.contains("width: 260.00"), "the size hint stays: \(after)")
+        XCTAssertEqual(after.components(separatedBy: "positionX").count, 2, "a second positionX line was written")
         XCTAssertTrue(after.hasSuffix("hello again"), after)
         XCTAssertFalse(after.contains("Conflicted copy"), after)
-        XCTAssertEqual(layout.layout(for: legacyId)?.x, 70, "the move was lost with the keys")
+        XCTAssertEqual(layout.layout(for: legacyId)?.x, 70)
     }
 
-    func testTheOldKeysAreNotKeptAsLinesOfSomeoneElse() throws {
+    func testTheOldKeysAreKeptExactlyAsTheyWereByAWrite() throws {
         _ = try writeLegacyFile()
         let note = try loadLegacy()
 
         let text = store.recoveryText(for: note)
 
-        for key in ["positionX", "positionY", "collapsed"] {
-            XCTAssertFalse(text.contains("\(key):"), "\(key) survived a write as a preserved line:\n\(text)")
+        for line in ["positionX: 50.00", "positionY: 140.00", "collapsed: true"] {
+            XCTAssertTrue(text.contains("\n\(line)\n"), "\(line) changed:\n\(text)")
         }
-        XCTAssertTrue(text.contains("tags: [a]"))
     }
 
-    func testDroppingTheOldKeysIsNotAnOutsideChangeAndNotAConflict() throws {
+    func testChangedOrDroppedOldKeysAreNotAnOutsideChangeAndNotAConflict() throws {
         let url = try writeLegacyFile()
         let note = try loadLegacy()
         let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
         var applied: [NoteDocument.Applied] = []
         document.didApplyExternal = { applied.append($0) }
 
-        // A Mac on this build saved the same text without the old keys.
-        let stripped = try String(contentsOf: url, encoding: .utf8)
+        // A Mac on an older build moved the note, and one on a later build dropped the keys.
+        let moved = try String(contentsOf: url, encoding: .utf8)
+            .replacingOccurrences(of: "positionX: 50.00", with: "positionX: 999.00")
             .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.hasPrefix("positionX") && !$0.hasPrefix("positionY") && !$0.hasPrefix("collapsed") }
+            .filter { !$0.hasPrefix("collapsed") }
             .joined(separator: "\n")
-        try stripped.write(to: url, atomically: true, encoding: .utf8)
+        try moved.write(to: url, atomically: true, encoding: .utf8)
         document.storeDidChange()
 
-        XCTAssertTrue(applied.isEmpty, "the dropped keys were taken for an edit of the note")
+        XCTAssertTrue(applied.isEmpty, "a change of the old keys was taken for an edit of the note")
         document.setBody("hello again")
         scheduler.advance(by: 1)
         let after = try String(contentsOf: url, encoding: .utf8)
@@ -458,6 +538,30 @@ import XCTest
         XCTAssertEqual(desk.layout.layout(for: note.id)?.x, 40, "it came back somewhere else")
         let restored = try noteFile(for: note.id)
         XCTAssertEqual(try Data(contentsOf: restored), bytes, "restoring rewrote the file to expand it")
+    }
+
+    func testRestoringANoteTheOldKeysLeftCollapsedOpensItExpandedBelowItsBar() throws {
+        let isolated = IsolatedSettings()
+        defer { isolated.tearDown() }
+        _ = try writeLegacyFile()
+        let note = try loadLegacy()
+        let desk = DeskController(
+            store: store, settings: isolated.settings, clock: clock, undo: UndoCenter(clock: clock),
+            recovery: RecoveryFiles(settings: isolated.settings, store: store, clock: clock), scheduler: scheduler
+        )
+        store.archive(note)
+        let observer = NotificationCenter.default.addObserver(forName: NoteStore.didChange, object: nil, queue: nil) { note in
+            MainActor.assumeIsolated { desk.storeDidChange(note) }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        store.restore(note)
+
+        let entry = try XCTUnwrap(desk.layout.layout(for: legacyId))
+        XCTAssertFalse(entry.collapsed)
+        XCTAssertEqual(entry.x, 50)
+        XCTAssertEqual(entry.y, 140 - (210 - Double(NoteWindowController.collapsedHeight)), "it grows upward from its bar")
+        XCTAssertEqual(entry.height, 210)
     }
 
     // MARK: - Over full-screen apps

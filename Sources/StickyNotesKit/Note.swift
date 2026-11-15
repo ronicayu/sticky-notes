@@ -139,7 +139,8 @@ struct Note: Codable, Identifiable {
     var updatedAt: Date
     var preserved = PreservedFrontmatter()
     /// What the file's retired geometry keys held, when it still has them. Read
-    /// to place the note once; never written back.
+    /// to place the note once. Their lines stay in the file as an older build
+    /// left them; a later release removes them.
     var legacyPlacement: LegacyPlacement?
 
     private enum CodingKeys: String, CodingKey {

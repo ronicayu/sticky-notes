@@ -78,6 +78,39 @@ import AppKit
         applyVisibility()
     }
 
+    /// A note brought back from the archive opens expanded, wherever this Mac last
+    /// had it, and grows downward from where its bar was. A note this Mac has no
+    /// layout for that an older build left collapsed gets an expanded one from the
+    /// old keys; any other note is placed when its window opens.
+    private func openExpanded(restored id: UUID) {
+        let bar = NoteWindowController.collapsedHeight
+        if layout.layout(for: id) != nil {
+            layout.update(id) { entry in
+                guard entry.collapsed else { return }
+                entry.collapsed = false
+                entry.y -= entry.height - Double(bar)
+            }
+        } else if let note = store.loadNote(id: id), let old = note.legacyPlacement, old.collapsed {
+            layout.set(
+                NoteLayout(x: old.x, y: old.y - (note.height - Double(bar)), width: note.width, height: note.height),
+                for: id
+            )
+        }
+    }
+
+    /// Forget the layout of notes that exist nowhere: not in the notes, the
+    /// archive or the trash. A note that may only be unreadable or not downloaded
+    /// yet is kept. Run once at launch, so `layout.json` does not grow for ever.
+    func pruneLayout() {
+        guard let active = store.listActive() else { return }
+        let known = Set((active + store.loadArchived() + store.loadTrashed()).map(\.id))
+        layout.prune { id in
+            if known.contains(id) { return true }
+            if case .missing = store.whereIs(id: id) { return false }
+            return true
+        }
+    }
+
     /// The Mac woke: the midnight timer does not fire in sleep, so a daily note
     /// left open across midnight is brought to today now.
     @objc func handleWake() {
@@ -385,10 +418,8 @@ import AppKit
     /// external file changes — Obsidian edits, files arriving via iCloud
     /// Drive, archives created on another Mac, etc.
     @objc func storeDidChange(_ notification: Notification) {
-        // A note brought back from the archive opens expanded, wherever this Mac
-        // last had it.
         if case let .moved(id, from: .archive, to: .active) = NoteStore.change(in: notification) {
-            layout.update(id) { $0.collapsed = false }
+            openExpanded(restored: id)
         }
         // A save by this store of a note that already has a window changes
         // nothing on disk the app does not know. All that can differ is

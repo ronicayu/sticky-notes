@@ -233,6 +233,8 @@ final class NoteStore {
 
     private static let fileExtension = "md"
 
+    static var filenameFormatterForTests: DateFormatter { filenameFormatter }
+
     private static let filenameFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HHmmss"
@@ -335,7 +337,9 @@ final class NoteStore {
 
     /// Check the file at `url` against `expectation`, then write. A file that
     /// cannot be read is not overwritten: nothing is known about what it holds.
-    private func writeIfUnchanged(_ note: Note, to url: URL, expecting expectation: Expectation) -> SaveResult {
+    private func writeIfUnchanged(
+        _ note: Note, to url: URL, expecting expectation: Expectation, carryingLegacyPlacement: Bool = false
+    ) -> SaveResult {
         switch expectation {
         case .anything:
             break
@@ -350,7 +354,7 @@ final class NoteStore {
                 return .gone
             }
         }
-        switch writeReporting(note, to: url) {
+        switch writeReporting(note, to: url, carryingLegacyPlacement: carryingLegacyPlacement) {
         case let .success(fingerprint): return .saved(fingerprint)
         case let .failure(error): return .failed(error)
         }
@@ -1221,9 +1225,16 @@ final class NoteStore {
     }
 
     /// Whether `name` is one a note with `id` could have been given.
+    /// Also true for the `-2`, `-3` form `unusedURL` gives a name that was taken.
     private static func nameCarriesId(_ name: String, _ id: UUID) -> Bool {
         let hex = id.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        return name.hasSuffix("-\(hex.prefix(6)).\(fileExtension)") || name.hasSuffix("-\(hex).\(fileExtension)")
+        func carries(_ name: String) -> Bool {
+            name.hasSuffix("-\(hex.prefix(6)).\(fileExtension)") || name.hasSuffix("-\(hex).\(fileExtension)")
+        }
+        if carries(name) { return true }
+        let stem = (name as NSString).deletingPathExtension
+        guard let dash = stem.lastIndex(of: "-"), Int(stem[stem.index(after: dash)...]) != nil else { return false }
+        return carries(String(stem[..<dash]) + "." + fileExtension)
     }
 
     /// Builds a fresh URL for a new save into the given directory. A name that
@@ -1234,7 +1245,12 @@ final class NoteStore {
         let names = NoteStore.fileNames(for: note)
         for name in [names.short, names.long] {
             let url = dir.appendingPathComponent(name)
-            if !FileManager.default.fileExists(atPath: url.path) || readSnapshot(url)?.note.id == note.id {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                // A file iCloud has not downloaded is listed as ".<name>.icloud"
+                // and may be another note's.
+                let placeholder = dir.appendingPathComponent(".\(name).icloud")
+                if !FileManager.default.fileExists(atPath: placeholder.path) { return url }
+            } else if readSnapshot(url)?.note.id == note.id {
                 return url
             }
         }
@@ -1761,7 +1777,10 @@ final class NoteStore {
             let destination = existing?.url ?? NoteStore.unusedURL(generateURL(for: merged, in: dir))
             let result: SaveResult
             if let existing {
-                result = writeIfUnchanged(merged, to: destination, expecting: .fingerprint(existing.snapshot.fingerprint))
+                result = writeIfUnchanged(
+                    merged, to: destination, expecting: .fingerprint(existing.snapshot.fingerprint),
+                    carryingLegacyPlacement: true
+                )
             } else {
                 switch writeReporting(merged, to: destination, carryingLegacyPlacement: true) {
                 case let .success(fingerprint): result = .saved(fingerprint)
@@ -1898,13 +1917,18 @@ final class NoteStore {
     /// `candidate`, or the first of `name-2.md`, `name-3.md`… that is free.
     private static func unusedURL(_ candidate: URL) -> URL {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: candidate.path) else { return candidate }
+        func isTaken(_ url: URL) -> Bool {
+            fm.fileExists(atPath: url.path)
+                || fm.fileExists(atPath: url.deletingLastPathComponent()
+                    .appendingPathComponent(".\(url.lastPathComponent).icloud").path)
+        }
+        guard isTaken(candidate) else { return candidate }
         let base = candidate.deletingPathExtension()
         var counter = 2
         while true {
             let next = base.deletingLastPathComponent()
                 .appendingPathComponent("\(base.lastPathComponent)-\(counter).\(candidate.pathExtension)")
-            if !fm.fileExists(atPath: next.path) { return next }
+            if !isTaken(next) { return next }
             counter += 1
         }
     }
@@ -1928,10 +1952,14 @@ final class NoteStore {
     // MARK: - Markdown serialization
 
     /// The Markdown text of a note. The window's position and collapsed state
-    /// are this Mac's (`DeviceLayoutStore`) and are not in it; a file that still
-    /// has them loses them with the next write. `carryingLegacyPlacement` keeps
-    /// them, for a note converted from JSON that no layout has seen yet.
+    /// are this Mac's (`DeviceLayoutStore`), so no write gives them a value. A
+    /// file that has the old `positionX`, `positionY` and `collapsed` lines keeps
+    /// them exactly as they are, for one release, so a Mac still on an older
+    /// build keeps the positions it had; a later release removes them.
+    /// `carryingLegacyPlacement` writes them for a note converted from JSON that
+    /// no file has them for yet, so the position is not lost in the conversion.
     private func renderMarkdown(_ note: Note, carryingLegacyPlacement: Bool = false) -> String {
+        let carryingLegacyPlacement = carryingLegacyPlacement && Self.legacyValues(in: note.preserved.layout).isEmpty
         let labelsField = "[" + note.labels.joined(separator: ", ") + "]"
         var frontmatter: [(String, String)] = [
             ("id", note.id.uuidString),
@@ -1978,13 +2006,31 @@ final class NoteStore {
 
     /// The keys the app reads and writes itself. Any other key in a note's
     /// frontmatter is carried through as it was; see `PreservedFrontmatter`.
-    /// `positionX`, `positionY` and `collapsed` are read only, to place a note
-    /// once. They are named here so they are not kept as lines of the file
-    /// that belong to someone else, and they are not written.
+    /// `positionX`, `positionY` and `collapsed` are not owned: the app no longer
+    /// writes them, so the lines an older build left stay in the file untouched
+    /// (a later release removes them), and `legacyValues` reads them from there.
     private static let ownedFrontmatterKeys: Set<String> = [
-        "id", "title", "color", "labels", "positionX", "positionY", "width", "height",
-        "collapsed", "float", "created", "updated"
+        "id", "title", "color", "labels", "width", "height", "float", "created", "updated"
     ]
+
+    private static let legacyPlacementKeys: Set<String> = ["positionX", "positionY", "collapsed"]
+
+    /// The values of the retired window keys among the lines the file has that
+    /// the app does not own. The first line of each key counts.
+    private static func legacyValues(in layout: [MarkdownFile.Slot]) -> [String: String] {
+        var values: [String: String] = [:]
+        for case let .verbatim(text) in layout {
+            let line = text.components(separatedBy: "\n")[0]
+            guard let key = MarkdownFile.topLevelKey(of: line), legacyPlacementKeys.contains(key),
+                  values[key] == nil, let colon = line.firstIndex(of: ":") else { continue }
+            var value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.count >= 2, let quote = value.first, quote == "\"" || quote == "'", value.last == quote {
+                value = String(value.dropFirst().dropLast())
+            }
+            values[key] = value
+        }
+        return values
+    }
 
     private func parseMarkdown(_ raw: String, fallbackId: UUID?) -> Note? {
         let doc = MarkdownFile.parse(raw, ownedKeys: Self.ownedFrontmatterKeys)
@@ -1992,9 +2038,10 @@ final class NoteStore {
         let title = doc.value(for: "title") ?? ""
         let color = doc.value(for: "color").flatMap(NoteColor.init(rawValue:)) ?? .yellow
         let labels = parseLabelsList(doc.value(for: "labels"))
-        let legacyPlacement = Double(doc.value(for: "positionX") ?? "").flatMap { x in
-            Double(doc.value(for: "positionY") ?? "").map { y in
-                LegacyPlacement(x: x, y: y, collapsed: (doc.value(for: "collapsed") ?? "false") == "true")
+        let legacy = Self.legacyValues(in: doc.layout)
+        let legacyPlacement = Double(legacy["positionX"] ?? "").flatMap { x in
+            Double(legacy["positionY"] ?? "").map { y in
+                LegacyPlacement(x: x, y: y, collapsed: legacy["collapsed"] == "true")
             }
         }
         let width = Double(doc.value(for: "width") ?? "") ?? 240
