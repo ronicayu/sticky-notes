@@ -29,6 +29,9 @@ import Foundation
             stop()
             return
         }
+        // An outside edit held back for the person's typing would be written
+        // over, in a second copy, by an edit made on the text before it.
+        window.noteDocument.blur()
         let text = window.textView.string
         if let task = WelcomeNote.taskLine(for: step, in: text), !task.isChecked {
             window.replaceBody(range: task.box, with: "x")

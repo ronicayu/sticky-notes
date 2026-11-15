@@ -517,12 +517,20 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     }
 
     /// Replace part of the body as the person's own edit: it goes through the
-    /// text view, so it is undoable, restyled and saved like typing.
+    /// text view, so it is saved and restyled like typing. It is undone with its
+    /// own ⌘Z step, apart from whatever the person was typing. It opens no slash
+    /// menu or label list, and closes a label list that is open, whose position
+    /// the edit may have moved.
     func replaceBody(range: NSRange, with text: String) {
         guard NSMaxRange(range) <= textView.textStorage?.length ?? 0,
               textView.shouldChangeText(in: range, replacementString: text) else { return }
+        editor.dismissLabelCompletion()
+        editor.isEditingProgrammatically = true
+        defer { editor.isEditingProgrammatically = false }
+        textView.breakUndoCoalescing()
         textView.textStorage?.replaceCharacters(in: range, with: text)
         textView.didChangeText()
+        textView.breakUndoCoalescing()
     }
 
     func focusEditor() {
@@ -593,13 +601,18 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     private func resizeByAccessibilityAction(dx: CGFloat, dy: CGFloat) {
         guard let window = window, !geometry.collapsed else { return }
         var frame = window.frame
-        let size = NSSize(
+        var size = NSSize(
             width: max(window.minSize.width, frame.width + dx),
             height: max(window.minSize.height, frame.height + dy)
         )
+        // Never move the note to make room: a corner that does not fit stops growing.
+        if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+            size.width = min(size.width, max(window.minSize.width, visible.maxX - frame.minX))
+            size.height = min(size.height, max(window.minSize.height, frame.maxY - visible.minY))
+        }
         frame.origin.y += frame.height - size.height
         frame.size = size
-        window.setFrame(NoteWindow.clampToVisibleScreen(frame), display: true, animate: false)
+        window.setFrame(frame, display: true, animate: false)
     }
 
     private func updateExpandButtonIcon() {
@@ -670,12 +683,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             return
         case let .closed(archived):
             if let archived = archived { onArchived?(archived) }
+            // The note is saved and gone from the desk's books by now; only the
+            // picture of it is still on screen for the length of the fade. A note
+            // that was only discarded leaves at once.
+            let id = note.id
+            closeWindow(fading: archived != nil)
+            onClosed(id)
         }
-        // The note is saved and gone from the desk's books by now; only the
-        // picture of it is still on screen for the length of the fade.
-        let id = note.id
-        closeWindow(fading: reason == .archive)
-        onClosed(id)
     }
 
     /// Close the window. An archived note that is on screen fades toward the
@@ -690,6 +704,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         }
         isFadingOut = true
         window.ignoresMouseEvents = true
+        // Typing during the fade would go into a note that is already archived.
+        window.makeFirstResponder(nil)
         var target = window.frame
         if let icon = archiveDestination?() {
             target.origin.x += (icon.midX - target.midX) * 0.2
@@ -1032,6 +1048,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
                 window.makeFirstResponder(nil)
             }
             preCollapseHeight = frame.size.height
+            // Focus has left the body: an outside edit held back while the
+            // person typed is folded in now, as it is when the window loses key.
+            noteDocument.blur()
 
             refreshCollapsedTitle()
             titleLabel.isHidden = false

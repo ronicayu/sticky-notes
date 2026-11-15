@@ -142,6 +142,35 @@ import XCTest
         XCTAssertFalse(controller.isFadingOut)
     }
 
+    func testTypingDuringTheFadeDoesNotReachTheArchivedNote() throws {
+        fullMotion()
+        let controller = try seedAndOpen()
+        let window = try XCTUnwrap(controller.window)
+        window.makeFirstResponder(controller.textView)
+        XCTAssertTrue(window.firstResponder === controller.textView)
+
+        controller.closeNote()
+
+        XCTAssertTrue(controller.isFadingOut)
+        XCTAssertFalse(window.firstResponder === controller.textView, "keystrokes would still go into the note")
+    }
+
+    /// An untouched note that is closed was never kept, so there is nothing to say goodbye to.
+    func testClosingAnUntouchedNoteWithTheArchiveCommandDoesNotFade() throws {
+        fullMotion()
+        let id = desk.makeNote()
+        let controller = try XCTUnwrap(desk.windowControllers[id])
+        let window = try XCTUnwrap(controller.window)
+        let before = scheduler.pendingCount
+
+        controller.closeNote()
+
+        XCTAssertTrue(store.loadArchived().isEmpty, "the test needs a note that is discarded")
+        XCTAssertFalse(controller.isFadingOut)
+        XCTAssertEqual(scheduler.pendingCount, before)
+        XCTAssertFalse(window.isVisible)
+    }
+
     /// A note that was never used leaves no trace, and that includes no goodbye.
     func testDiscardingAnAbandonedCaptureDoesNotFade() throws {
         fullMotion()

@@ -226,6 +226,26 @@ import XCTest
         XCTAssertEqual(window.frame.minX, before.minX, accuracy: 0.5)
     }
 
+    func testResizingByActionNearTheScreenEdgeStopsGrowingInsteadOfMovingTheNote() throws {
+        let controller = try open()
+        let window = try XCTUnwrap(controller.window)
+        let screen = try XCTUnwrap(NSScreen.main?.visibleFrame, "no screen")
+        window.setFrame(
+            NSRect(x: screen.maxX - 250, y: screen.minY + 30, width: 240, height: 200), display: false
+        )
+        let grip = try XCTUnwrap(all(ResizeGripView.self, in: controller).first)
+        let actions = try XCTUnwrap(grip.accessibilityCustomActions())
+        let before = window.frame
+
+        XCTAssertTrue(try XCTUnwrap(actions[0].handler)())
+        XCTAssertTrue(try XCTUnwrap(actions[2].handler)())
+
+        XCTAssertEqual(window.frame.minX, before.minX, accuracy: 0.5, "the left edge moved")
+        XCTAssertEqual(window.frame.maxY, before.maxY, accuracy: 0.5, "the top edge moved")
+        XCTAssertLessThanOrEqual(window.frame.maxX, screen.maxX + 0.5)
+        XCTAssertGreaterThanOrEqual(window.frame.minY, screen.minY - 0.5)
+    }
+
     func testTheResizeGripIsNotThereForACollapsedNote() throws {
         let controller = try open()
         controller.toggleCollapse()
@@ -260,6 +280,43 @@ import XCTest
 
         XCTAssertTrue(boxes[1].accessibilityPerformPress())
         XCTAssertEqual(checkBoxes(of: controller).map { ($0.accessibilityValue() as? NSNumber)?.intValue }, [1, 0])
+    }
+
+    func testAnElementWhoseBoxHasMovedDoesNothingAndReadsSafely() throws {
+        let controller = try open(content: "- [ ] one\nplain [ text")
+        let stale = try XCTUnwrap(checkBoxes(of: controller).first)
+
+        controller.editor.replaceText("Added above\n\n- [ ] one\nplain [ text")
+        let before = controller.textView.string
+
+        XCTAssertFalse(stale.accessibilityPerformPress(), "a press landed on whatever is at the old place")
+        XCTAssertEqual(controller.textView.string, before)
+        XCTAssertNil(stale.accessibilityLabel())
+        XCTAssertNil(stale.accessibilityValue())
+        XCTAssertEqual(stale.accessibilityFrame(), .zero)
+
+        controller.editor.replaceText("x")
+        XCTAssertFalse(stale.accessibilityPerformPress())
+        XCTAssertNil(stale.accessibilityLabel())
+        XCTAssertNil(stale.accessibilityValue())
+        XCTAssertEqual(stale.accessibilityFrame(), .zero)
+        XCTAssertEqual(controller.textView.checkboxTitle(afterMarker: NSRange(location: 5, length: 20)), "")
+        XCTAssertEqual(controller.textView.string, "x")
+    }
+
+    func testTheCheckboxElementsAreKeptWhileTheirBoxesStayAndRenewedWhenTheyMove() throws {
+        let controller = try open(content: "- [ ] one\n- [ ] two")
+        let first = checkBoxes(of: controller)
+        XCTAssertTrue(first[0].accessibilityPerformPress())
+        let again = checkBoxes(of: controller)
+        XCTAssertTrue(zip(first, again).allSatisfy { $0 === $1 }, "VoiceOver's focus would jump after a toggle")
+
+        controller.editor.replaceText("Above\n- [x] one\n- [ ] two")
+        let moved = checkBoxes(of: controller)
+        XCTAssertEqual(moved.count, 2)
+        XCTAssertFalse(zip(first, moved).contains { $0 === $1 })
+        XCTAssertEqual(moved.map { $0.accessibilityLabel() }, ["one", "two"])
+        XCTAssertEqual(moved.map { ($0.accessibilityValue() as? NSNumber)?.intValue }, [1, 0])
     }
 
     func testANoteWithoutTasksExposesNoCheckboxes() throws {

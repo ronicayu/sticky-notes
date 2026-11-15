@@ -21,6 +21,7 @@ protocol TodoTextViewDelegate: AnyObject {
 /// itself is never modified — the checkbox is purely a render layer.
 final class TodoTextView: NSTextView {
     weak var todoDelegate: TodoTextViewDelegate?
+    private var checkboxElements: [NSRange: CheckboxAccessibilityElement] = [:]
 
     nonisolated static let leadingPaddingForCheckbox: CGFloat = 18
 
@@ -270,13 +271,35 @@ final class TodoTextView: NSTextView {
     /// whether it is checked and can be pressed.
     override func accessibilityChildren() -> [Any]? {
         guard let storage = textStorage else { return super.accessibilityChildren() }
-        var boxes: [CheckboxAccessibilityElement] = []
+        var markers: [NSRange] = []
         storage.enumerateAttribute(.checkboxRange, in: NSRange(location: 0, length: storage.length), options: []) { value, range, _ in
-            guard value is NSValue else { return }
-            boxes.append(CheckboxAccessibilityElement(textView: self, markerRange: range))
+            if value is NSValue { markers.append(range) }
         }
+        // An element is kept for as long as its box stays where it is, so
+        // VoiceOver's cursor does not jump when something else changes.
+        var kept: [NSRange: CheckboxAccessibilityElement] = [:]
+        let boxes = markers.map { marker -> CheckboxAccessibilityElement in
+            let element = checkboxElements[marker] ?? CheckboxAccessibilityElement(textView: self, markerRange: marker)
+            kept[marker] = element
+            return element
+        }
+        checkboxElements = kept
         guard !boxes.isEmpty else { return super.accessibilityChildren() }
         return (super.accessibilityChildren() ?? []) + boxes
+    }
+
+    /// True when a painted checkbox marker still covers exactly `marker`: the
+    /// text may have changed since an element was made.
+    func hasCheckbox(at marker: NSRange) -> Bool {
+        guard let storage = textStorage, marker.length > 0, NSMaxRange(marker) <= storage.length else { return false }
+        var effective = NSRange()
+        guard storage.attribute(
+            .checkboxRange, at: marker.location, longestEffectiveRange: &effective,
+            in: NSRange(location: 0, length: storage.length)
+        ) is NSValue else {
+            return false
+        }
+        return NSEqualRanges(effective, marker)
     }
 
     /// The box whose marker starts at `location`, as drawn now.
@@ -290,6 +313,7 @@ final class TodoTextView: NSTextView {
         let text = string as NSString
         guard marker.upperBound <= text.length else { return "" }
         let line = text.lineRange(for: NSRange(location: marker.location, length: 0))
+        guard line.upperBound >= marker.upperBound else { return "" }
         let rest = text.substring(with: NSRange(location: marker.upperBound, length: line.upperBound - marker.upperBound))
         return ["**", "~~", "`"]
             .reduce(rest) { $0.replacingOccurrences(of: $1, with: "") }
@@ -298,7 +322,7 @@ final class TodoTextView: NSTextView {
 
     /// Where the box is on screen.
     func checkboxScreenFrame(of marker: NSRange) -> NSRect {
-        guard let lm = layoutManager, let tc = textContainer, let window = window else { return .zero }
+        guard hasCheckbox(at: marker), let lm = layoutManager, let tc = textContainer, let window = window else { return .zero }
         let inView = boundingRectInView(for: marker, lm: lm, tc: tc)
         return window.convertToScreen(convert(inView, to: nil))
     }
@@ -354,18 +378,24 @@ final class CheckboxAccessibilityElement: NSAccessibilityElement {
     }
 
     override func accessibilityLabel() -> String? {
-        let title = MainActor.assumeIsolated { textView?.checkboxTitle(afterMarker: markerRange) ?? "" }
-        return title.isEmpty ? "Task" : title
+        MainActor.assumeIsolated {
+            guard let textView = textView, textView.hasCheckbox(at: markerRange) else { return nil }
+            let title = textView.checkboxTitle(afterMarker: markerRange)
+            return title.isEmpty ? "Task" : title
+        }
     }
 
     override func accessibilityValue() -> Any? {
-        let checked = MainActor.assumeIsolated { textView?.isCheckboxChecked(at: markerRange.location) == true }
-        return NSNumber(value: checked ? 1 : 0)
+        MainActor.assumeIsolated {
+            guard let textView = textView, textView.hasCheckbox(at: markerRange) else { return nil }
+            return NSNumber(value: textView.isCheckboxChecked(at: markerRange.location) ? 1 : 0)
+        }
     }
 
     override func accessibilityPerformPress() -> Bool {
         MainActor.assumeIsolated {
-            guard let textView = textView, let delegate = textView.todoDelegate else { return false }
+            guard let textView = textView, textView.hasCheckbox(at: markerRange),
+                  let delegate = textView.todoDelegate else { return false }
             delegate.textViewDidToggleCheckbox(at: markerRange.location)
             NSAccessibility.post(element: self, notification: .valueChanged)
             return true

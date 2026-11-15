@@ -242,9 +242,15 @@ final class SlashReplacement: NSObject {
 
     // MARK: - NSTextViewDelegate
 
+    /// True while the app edits the text itself, such as ticking a task. The
+    /// person's caret may sit after a `/` or a `#wo`, and an edit they did not
+    /// make must not open a menu for it.
+    var isEditingProgrammatically = false
+
     func textDidChange(_ notification: Notification) {
         onTextChange?(textView.string)
         restyleAfterEdit()
+        guard !isEditingProgrammatically else { return }
         if options.slashMenu { detectSlashTrigger() }
         detectLabelTrigger()
     }
@@ -628,6 +634,8 @@ final class SlashReplacement: NSObject {
         labelPanel = panel
         return panel
     }
+
+    var isShowingLabelCompletion: Bool { labelPanel?.isVisible == true }
 
     func dismissLabelCompletion() {
         if let panel = labelPanel, panel.isVisible { panel.orderOut(nil) }

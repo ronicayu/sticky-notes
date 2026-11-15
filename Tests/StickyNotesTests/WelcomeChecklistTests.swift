@@ -306,6 +306,99 @@ import XCTest
         XCTAssertTrue(saved.contains("- [x] Try a `#label`"), saved)
     }
 
+    func testAnOutsideEditHeldBackWhileTypingIsFoldedInBeforeATickSoThereIsOneCopy() throws {
+        let controller = try openWelcome()
+        controller.noteDocument.isEditing = { true }
+        var outside = try onDisk()
+        outside.content = outside.content.replacingOccurrences(
+            of: "This is a real note — edit it, or throw it away.", with: "Rewritten in Obsidian."
+        )
+        outside.updatedAt = clock.now().addingTimeInterval(5)
+        let other = NoteStore(rootURL: root, clock: clock)
+        other.save(outside)
+        defer { other.stopWatching() }
+        controller.handleStoreChange()
+        XCTAssertNotNil(controller.noteDocument.pendingExternal, "the outside edit was not held back")
+
+        desk.toggleLabelVisibility("work")
+        scheduler.advance(by: NoteDocument.debounce * 4)
+
+        let saved = try onDisk().content
+        XCTAssertEqual(saved.components(separatedBy: "make a new note").count - 1, 1, saved)
+        XCTAssertTrue(saved.contains("Rewritten in Obsidian."), saved)
+        XCTAssertFalse(saved.contains("This is a real note — edit it"), saved)
+        XCTAssertTrue(saved.contains("- [x] Try a `#label`"), saved)
+        XCTAssertFalse(saved.localizedCaseInsensitiveContains("conflict"), saved)
+        XCTAssertEqual(controller.textView.string, saved)
+    }
+
+    func testCollapsingFoldsInAnOutsideEditThatWasHeldBack() throws {
+        let controller = try openWelcome()
+        controller.noteDocument.isEditing = { true }
+        var outside = try onDisk()
+        outside.content += "\nAdded in Obsidian"
+        outside.updatedAt = clock.now().addingTimeInterval(5)
+        let other = NoteStore(rootURL: root, clock: clock)
+        other.save(outside)
+        defer { other.stopWatching() }
+        controller.handleStoreChange()
+        XCTAssertNotNil(controller.noteDocument.pendingExternal)
+
+        controller.toggleCollapse()
+
+        XCTAssertNil(controller.noteDocument.pendingExternal)
+        XCTAssertTrue(controller.textView.string.contains("Added in Obsidian"))
+    }
+
+    func testHidingTheLabelTheWelcomeNoteCarriesStillTicksAndSavesItsBox() throws {
+        var note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: store, defaults: defaults, now: clock.now()))
+        note.labels = ["work"]
+        store.save(note)
+        welcomeID = note.id
+        desk.presentWindow(for: note)
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        XCTAssertTrue(controller.window?.isVisible == true)
+
+        desk.toggleLabelVisibility("work")
+
+        XCTAssertFalse(controller.window?.isVisible == true, "the label did not hide the note")
+        XCTAssertEqual(checked(controller), [.hideLabel])
+        scheduler.advance(by: NoteDocument.debounce)
+        XCTAssertTrue(try onDisk().content.contains("- [x] Try a `#label`"))
+        XCTAssertEqual(try onDisk().labels, ["work"])
+    }
+
+    func testATickNextToTheCaretOpensNoLabelList() throws {
+        let controller = try openWelcome()
+        controller.editor.labelProvider = { ["work"] }
+        controller.editor.replaceText("#wo\n" + controller.textView.string)
+        controller.textView.setSelectedRange(NSRange(location: 3, length: 0))
+        controller.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
+        XCTAssertTrue(controller.editor.isShowingLabelCompletion, "typing #wo should open the list; the test proves nothing otherwise")
+        controller.editor.dismissLabelCompletion()
+
+        desk.toggleLabelVisibility("work")
+
+        XCTAssertEqual(checked(controller), [.hideLabel])
+        XCTAssertFalse(controller.editor.isShowingLabelCompletion)
+    }
+
+    func testTheTickIsItsOwnUndoStepApartFromTyping() throws {
+        let controller = try openWelcome()
+        let undoManager = try XCTUnwrap(controller.textView.undoManager)
+        controller.textView.insertText("typed ", replacementRange: NSRange(location: 0, length: 0))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+
+        desk.toggleLabelVisibility("work")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        XCTAssertEqual(checked(controller), [.hideLabel])
+
+        undoManager.undo()
+
+        XCTAssertEqual(checked(controller), [], "undo did not take the tick back")
+        XCTAssertTrue(controller.textView.string.hasPrefix("typed "), "undo took the typing with it")
+    }
+
     // MARK: - Helpers
 
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {

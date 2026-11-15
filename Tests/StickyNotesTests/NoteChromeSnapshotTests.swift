@@ -87,6 +87,11 @@ import XCTest
         let checklist = WelcomeChecklist(defaults: defaults, windowFor: { _ in controller })
         WelcomeNote.Step.allCases.forEach(checklist.did)
 
+        let text = controller.textView.string
+        XCTAssertTrue(WelcomeNote.allTasksChecked(in: text))
+        XCTAssertTrue(text.contains(WelcomeNote.doneLine))
+        XCTAssertFalse(checklist.isListening)
+        XCTAssertEqual(MarkdownEditing.checkboxProgress(in: text)?.done, 4)
         try save(try XCTUnwrap(controller.window?.contentView), as: "welcome-done.png")
     }
 }
