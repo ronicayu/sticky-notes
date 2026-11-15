@@ -9,7 +9,7 @@ import XCTest
 ///
 /// Settings, the note store, the clock and the scheduler are injected, so nothing
 /// here touches the real preferences, Application Support or the wall clock.
-final class DailyNoteWindowTests: XCTestCase {
+@MainActor final class DailyNoteWindowTests: XCTestCase {
     private var vault: URL!
     private var isolated: IsolatedSettings!
     private var store: NoteStore!

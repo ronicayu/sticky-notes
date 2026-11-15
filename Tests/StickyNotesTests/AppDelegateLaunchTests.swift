@@ -8,7 +8,7 @@ import XCTest
 ///
 /// One thing is still shared: the global hotkeys read their chords from the
 /// real `UserDefaults`, which is read-only library state.
-final class AppDelegateLaunchTests: XCTestCase {
+@MainActor final class AppDelegateLaunchTests: XCTestCase {
     private var root: URL!
     private var store: NoteStore!
     private var isolated: IsolatedSettings!

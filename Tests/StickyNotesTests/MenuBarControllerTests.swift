@@ -4,7 +4,7 @@ import XCTest
 
 /// The menus, built over a temp store and a throwaway settings suite. The
 /// status item is real, so these tests remove it when they finish.
-final class MenuBarControllerTests: XCTestCase {
+@MainActor final class MenuBarControllerTests: XCTestCase {
     private var root: URL!
     private var store: NoteStore!
     private var isolated: IsolatedSettings!

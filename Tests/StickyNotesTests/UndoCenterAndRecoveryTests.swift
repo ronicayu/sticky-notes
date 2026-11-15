@@ -2,7 +2,7 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-final class UndoCenterTests: XCTestCase {
+@MainActor final class UndoCenterTests: XCTestCase {
     private let clock = ManualClock()
 
     override func setUp() {
@@ -51,7 +51,7 @@ final class UndoCenterTests: XCTestCase {
     }
 }
 
-final class RecoveryFilesTests: XCTestCase {
+@MainActor final class RecoveryFilesTests: XCTestCase {
     private var isolated: IsolatedSettings!
     private var store: NoteStore!
     private var clock: ManualClock!

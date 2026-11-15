@@ -4,7 +4,7 @@ import AppKit
 /// them are showing, where new ones go, and what happens to them when the store
 /// changes underneath them. Capture, menus and storage settings all act on the
 /// desk through this one object.
-final class DeskController: NSObject {
+@MainActor final class DeskController: NSObject {
     private let store: NoteStore
     private let settings: Settings
     private let clock: AppClock

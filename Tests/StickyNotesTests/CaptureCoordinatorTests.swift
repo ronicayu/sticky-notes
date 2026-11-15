@@ -4,7 +4,7 @@ import XCTest
 
 /// Every way a note arrives from outside, driven without a hotkey, a URL
 /// handler registration or a real pasteboard.
-final class CaptureCoordinatorTests: XCTestCase {
+@MainActor final class CaptureCoordinatorTests: XCTestCase {
     private var root: URL!
     private var store: NoteStore!
     private var isolated: IsolatedSettings!

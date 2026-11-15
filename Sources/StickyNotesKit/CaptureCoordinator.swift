@@ -4,7 +4,7 @@ import KeyboardShortcuts
 /// Every way a note gets made from outside a window: the global hotkeys, the
 /// clipboard, a Service from another app, a `stickynotes://` URL. All of them
 /// end in the desk's `makeNote`.
-final class CaptureCoordinator: NSObject {
+@MainActor final class CaptureCoordinator: NSObject {
     private let desk: DeskController
     private let store: NoteStore
 

@@ -3,7 +3,7 @@ import AppKit
 /// Wires the app's pieces together and forwards the application lifecycle to
 /// them. What the app does lives in the pieces: the desk, capture, the menus,
 /// storage and undo.
-public final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor public final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The production wiring: the user's real storage, preferences and clock.
     /// Everything else about the app is built from the three injected pieces,
     /// so a test constructs it with a temp store, a throwaway `UserDefaults`

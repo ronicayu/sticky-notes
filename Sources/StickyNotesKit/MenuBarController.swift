@@ -5,7 +5,7 @@ import KeyboardShortcuts
 /// views their standard shortcuts, and the storage warning in the menu bar
 /// icon. Every item names its target, so none depends on the responder chain
 /// finding the app delegate.
-final class MenuBarController: NSObject, NSMenuDelegate {
+@MainActor final class MenuBarController: NSObject, NSMenuDelegate {
     private let store: NoteStore
     private let settings: Settings
     private let desk: DeskController

@@ -9,7 +9,7 @@ import XCTest
 /// document, and draws what the document adopts from outside.
 ///
 /// Not covered here: anything that needs a key window or a live field editor.
-final class NoteWindowEndToEndTests: XCTestCase {
+@MainActor final class NoteWindowEndToEndTests: XCTestCase {
     private var root: URL!
     private var store: NoteStore!
     private var clock: ManualClock!

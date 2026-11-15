@@ -16,7 +16,7 @@ final class SlashReplacement: NSObject {
 /// is elsewhere, list continuation, slash commands, label completion and
 /// checkbox toggling. It knows nothing about notes, files or windows; the host
 /// feeds it text and listens to `onTextChange`.
-final class MarkdownEditorController: NSObject, NSTextViewDelegate, TodoTextViewDelegate {
+@MainActor final class MarkdownEditorController: NSObject, NSTextViewDelegate, TodoTextViewDelegate {
     /// What differs between the editors that host this. The rest is shared.
     struct Options {
         var verticalInset: CGFloat

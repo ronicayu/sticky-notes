@@ -3,7 +3,7 @@ import AppKit
 /// Where the notes live: the storage mode, the vault and daily-note settings,
 /// the Settings window, and the iCloud prefetcher that follows the storage
 /// root. Moving the storage re-points the desk's daily note with it.
-final class StorageCoordinator: NSObject, SettingsCoordinator {
+@MainActor final class StorageCoordinator: NSObject, SettingsCoordinator {
     private let store: NoteStore
     private let settings: Settings
     private let desk: DeskController

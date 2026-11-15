@@ -4,7 +4,7 @@ import XCTest
 
 /// `NoteStore.save(_:expecting:)`, `snapshot(id:)` and the `Change` that
 /// `didChange` carries.
-final class CompareAndSwapSaveTests: XCTestCase {
+@MainActor final class CompareAndSwapSaveTests: XCTestCase {
     private var root: URL!
     private var lockedDirectories: [URL] = []
 

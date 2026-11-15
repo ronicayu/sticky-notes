@@ -5,7 +5,7 @@ import XCTest
 /// The desk on its own: a store in a temp folder, a throwaway settings suite and
 /// a hand-moved clock. No `AppDelegate`, no menus, no observers: each test
 /// calls what the real notifications would call.
-final class DeskControllerTests: XCTestCase {
+@MainActor final class DeskControllerTests: XCTestCase {
     private var root: URL!
     private var store: NoteStore!
     private var isolated: IsolatedSettings!

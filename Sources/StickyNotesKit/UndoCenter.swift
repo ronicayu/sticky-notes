@@ -3,7 +3,7 @@ import AppKit
 /// The undo offers the app makes after an action that makes notes vanish:
 /// archiving, hiding, a close that could not save. One toast at a time, and ⌘Z
 /// fires it.
-final class UndoCenter: NSObject {
+@MainActor final class UndoCenter: NSObject {
     private let toasts = ToastController()
     private let clock: AppClock
 

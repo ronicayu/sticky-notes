@@ -5,7 +5,7 @@ import XCTest
 /// The shared Markdown editor on its own: no window, no note, no `NSApp`. Typing
 /// is simulated the way AppKit does it: set the text, then fire the delegate
 /// callback a real keystroke would.
-final class MarkdownEditorControllerTests: XCTestCase {
+@MainActor final class MarkdownEditorControllerTests: XCTestCase {
     private var root: URL!
     private var store: NoteStore!
     private var clock: ManualClock!

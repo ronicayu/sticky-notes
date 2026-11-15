@@ -5,7 +5,7 @@ import XCTest
 /// Storage switching and the daily-note settings, against a temp store and a
 /// throwaway settings suite. Nothing here touches the real Application Support
 /// folder, iCloud Drive or the user's preferences.
-final class StorageCoordinatorTests: XCTestCase {
+@MainActor final class StorageCoordinatorTests: XCTestCase {
     private var root: URL!
     private var store: NoteStore!
     private var isolated: IsolatedSettings!
