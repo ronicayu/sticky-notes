@@ -76,7 +76,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// Discard without archiving. Used for abandoned captures, which should
     /// leave no trace at all.
     func discardAbandonedCapture() {
-        _ = noteDocument.close(.discard)
+        // Text arrived from outside since the window was opened: it is on
+        // screen now, and the note stays.
+        guard case .closed = noteDocument.close(.discard) else { return }
         window?.close()
         onClosed(note.id)
     }

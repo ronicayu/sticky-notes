@@ -6,6 +6,7 @@ protocol NoteRepository: AnyObject {
     @discardableResult
     func save(_ note: Note) -> SaveResult
     func loadNote(id: UUID, archived: Bool) -> Note?
+    func snapshot(id: UUID, archived: Bool) -> NoteSnapshot?
     func archive(_ note: Note)
     func discardActive(_ note: Note)
 }

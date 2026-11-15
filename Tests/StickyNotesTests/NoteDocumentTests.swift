@@ -58,6 +58,15 @@ final class NoteDocumentTests: XCTestCase {
         store.handleFileSystemEvent()
     }
 
+    /// An outside write that the store and the document have not been told about.
+    private func writeOutsideWithoutTellingTheDocument(_ document: NoteDocument, title: String = "Note", body: String) throws {
+        let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: store.activeURL, includingPropertiesForKeys: nil
+        ).first { $0.pathExtension == "md" })
+        try "---\nid: \(document.id.uuidString)\ntitle: \"\(title)\"\nupdated: 2030-01-01T00:00:00Z\n---\n\(body)"
+            .write(to: file, atomically: true, encoding: .utf8)
+    }
+
     /// Makes every write into the notes folder fail, as a full disk or a
     /// revoked permission would; the folder is made writable again on teardown.
     private func failWrites() throws {
@@ -495,6 +504,80 @@ final class NoteDocumentTests: XCTestCase {
         XCTAssertEqual(try onDisk(document).title, "Plan for the wee")
     }
 
+    /// The inverse: an idle title field has nothing to protect, so the title
+    /// changed elsewhere is the one that lands.
+    func testAnOutsideTitleLandsWhenNoTitleIsBeingTyped() throws {
+        let document = open(title: "Plan", content: "one")
+        document.isEditingTitle = { false }
+        document.setBody("one")
+        var external = try onDisk(document)
+        external.title = "Renamed elsewhere"
+        external.updatedAt = clock.now().addingTimeInterval(-1)
+        document.externalChange(external)
+
+        document.flush()
+
+        XCTAssertEqual(try onDisk(document).title, "Renamed elsewhere")
+    }
+
+    // MARK: - Closing a blank note
+
+    /// A blank note is deleted when it is closed, so text that arrived from
+    /// outside and was held back must be taken in first, not deleted with it.
+    func testAnEmptyNoteWithAHeldBackOutsideEditIsNotDiscarded() throws {
+        let document = open(content: "text")
+        _ = store.loadActive()
+        document.setBody("")
+        try writeOutside(document, body: "written in Obsidian")
+        document.storeDidChange()
+        XCTAssertNotNil(document.pendingExternal)
+
+        guard case let .closed(archivedNote) = document.close(.archive) else { return XCTFail("refused") }
+
+        XCTAssertEqual(archivedNote?.content, "written in Obsidian")
+        XCTAssertEqual(try archived(document).content, "written in Obsidian")
+    }
+
+    /// The watcher reports an outside write only after a delay, and the window
+    /// judges "empty" from what it shows. (Model finding F3.)
+    func testAnEmptyNoteWithTextOnDiskIsNotDiscarded() throws {
+        let document = open(title: "", content: "")
+        try writeOutsideWithoutTellingTheDocument(document, title: "", body: "typed in Obsidian a moment ago")
+
+        guard case let .closed(archivedNote) = document.close(.archive) else { return XCTFail("refused") }
+
+        XCTAssertEqual(archivedNote?.content, "typed in Obsidian a moment ago")
+        XCTAssertEqual(try archived(document).content, "typed in Obsidian a moment ago")
+    }
+
+    func testAnAbandonedCaptureThatTextArrivedInIsKeptAndShown() throws {
+        let document = open(title: "", content: "")
+        var applied: [NoteDocument.Applied] = []
+        document.didApplyExternal = { applied.append($0) }
+        try writeOutsideWithoutTellingTheDocument(document, title: "", body: "synced in from the other Mac")
+
+        guard case .refused = document.close(.discard) else { return XCTFail("discarded a note holding text") }
+
+        XCTAssertEqual(try onDisk(document).content, "synced in from the other Mac")
+        XCTAssertEqual(document.buffer.content, "synced in from the other Mac")
+        XCTAssertEqual(applied.count, 1)
+    }
+
+    func testABlankClosedDocumentsBlurWritesNothing() throws {
+        let document = open(content: "text")
+        document.setBody("mine")
+        var external = try onDisk(document)
+        external.content = "theirs"
+        external.updatedAt = clock.now().addingTimeInterval(-1)
+        document.externalChange(external)
+        store.discardActive(document.buffer)
+        _ = document.close(.externalDeletion)
+
+        document.blur()
+
+        XCTAssertNil(store.loadNote(id: document.id), "a closed document's blur wrote the note back")
+    }
+
     // MARK: - The file watcher's echo of our own writes
 
     /// The critical one. Our own writes come back through the file watcher, and
@@ -595,26 +678,5 @@ final class NoteDocumentTests: XCTestCase {
 
         XCTAssertEqual(document.buffer.content, "shopping\n- milk\n- bread")
         XCTAssertEqual(store.loadActive().filter { $0.id == document.id }.count, 1, "the note was duplicated")
-    }
-
-    /// An outside write ends the lineage, so an older save of ours that iCloud
-    /// kept as a conflict version is merged back rather than taken for text the
-    /// user has since edited away.
-    func testAnOutsideWriteEndsTheLineageSoAnOlderOwnVersionIsMerged() throws {
-        let document = open(content: "teh cat\nsat down")
-        document.setBody("the cat\nsat down")
-        document.flush()
-        let older = root.appendingPathComponent("older.md")
-        try "---\nid: \(document.id.uuidString)\nupdated: 1970-01-01T00:00:01Z\n---\nteh cat\nsat down\n"
-            .write(to: older, atomically: true, encoding: .utf8)
-        store.conflictVersionsProvider = { _ in [.init(url: older, markResolved: {})] }
-        store.otherVersionsRemover = { _ in }
-        _ = store.loadActive()
-
-        try writeOutside(document, body: "the cat\nsat down\nfrom Obsidian")
-
-        let content = try onDisk(document).content
-        XCTAssertTrue(content.contains("teh cat"), "the older version was dropped: \(content)")
-        XCTAssertTrue(content.contains("from Obsidian"), content)
     }
 }

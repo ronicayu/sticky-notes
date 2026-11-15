@@ -390,4 +390,31 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(first.id, second.id, "identity churned between loads")
     }
 
+    /// An outside write ends the lineage, so an older save of ours that iCloud
+    /// kept as a conflict version is merged back rather than taken for text the
+    /// user has since edited away.
+    func testAnOutsideWriteEndsTheLineageSoAnOlderOwnVersionIsMerged() throws {
+        let store = makeStore(.markdown)
+        var note = makeNote(content: "teh cat\nsat down")
+        store.save(note)
+        note.content = "the cat\nsat down"
+        store.save(note)
+        let older = root.appendingPathComponent("older.md")
+        try "---\nid: \(note.id.uuidString)\nupdated: 1970-01-01T00:00:01Z\n---\nteh cat\nsat down\n"
+            .write(to: older, atomically: true, encoding: .utf8)
+        store.conflictVersionsProvider = { _ in [.init(url: older, markResolved: {})] }
+        store.otherVersionsRemover = { _ in }
+        _ = store.loadActive()
+
+        let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: store.activeURL, includingPropertiesForKeys: nil
+        ).first { $0.pathExtension == "md" })
+        try "---\nid: \(note.id.uuidString)\ntitle: \"Note\"\nupdated: 2030-01-01T00:00:00Z\n---\nthe cat\nsat down\nfrom Obsidian"
+            .write(to: file, atomically: true, encoding: .utf8)
+        store.handleFileSystemEvent()
+
+        let content = try XCTUnwrap(store.loadNote(id: note.id)).content
+        XCTAssertTrue(content.contains("teh cat"), "the older version was dropped: \(content)")
+        XCTAssertTrue(content.contains("from Obsidian"), content)
+    }
 }

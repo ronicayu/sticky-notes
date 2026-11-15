@@ -116,6 +116,24 @@ final class NoteWindowEndToEndTests: XCTestCase {
         XCTAssertEqual(controller.bufferedNote.content, "half a sentence")
     }
 
+    /// Opening a window must not arm a save: otherwise quitting rewrites every
+    /// open note, and in a synced vault that re-uploads all of them.
+    func testOpeningAWindowLeavesTheNoteCleanAndAFlushWritesNothing() throws {
+        let controller = try openNote(content: "untouched")
+        let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: store.activeURL, includingPropertiesForKeys: nil
+        ).first)
+        let before = try Data(contentsOf: file)
+        let updated = try onDisk(controller).updatedAt
+        clock.advance(by: 60)
+
+        XCTAssertEqual(scheduler.pendingCount, 0, "opening the window armed a save")
+        XCTAssertTrue(controller.flushPendingSave())
+
+        XCTAssertEqual(try onDisk(controller).updatedAt, updated)
+        XCTAssertEqual(try Data(contentsOf: file), before, "flush rewrote an untouched note")
+    }
+
     // MARK: - Closing
 
     func testArchivingKeepsTextTypedRightBeforeIt() throws {

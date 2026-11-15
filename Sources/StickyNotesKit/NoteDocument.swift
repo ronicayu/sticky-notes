@@ -22,8 +22,8 @@ final class NoteDocument {
         /// The document is closed. `archived` is the note as archived, for undo,
         /// and is nil when the note was discarded or its file was already gone.
         case closed(archived: Note?)
-        /// The text could not be written, so nothing was archived or closed.
-        /// A retry is armed.
+        /// Nothing was closed: the text could not be written (a retry is armed),
+        /// or a note about to be discarded turned out to hold text.
         case refused
     }
 
@@ -170,7 +170,7 @@ final class NoteDocument {
     /// The window lost focus: fold in an outside edit that was held back.
     @discardableResult
     func blur() -> Bool {
-        guard pendingExternal != nil else { return true }
+        guard pendingExternal != nil, !isClosed else { return true }
         mergePendingExternal()
         return persist()
     }
@@ -254,6 +254,7 @@ final class NoteDocument {
     /// `persistedFingerprint`.
     @discardableResult
     private func persist() -> Bool {
+        guard !isClosed else { return true }
         buffer.updatedAt = clock.now()
         switch repository.save(buffer) {
         case .failed, .conflict:
@@ -299,9 +300,13 @@ final class NoteDocument {
             isClosed = true
             return .closed(archived: nil)
         case .discard:
+            foldInOutsideText()
+            // The note holds text after all; the window shows it, so keep it open.
+            guard Self.isBlank(buffer) else { return .refused }
             discard()
             return .closed(archived: nil)
         case .archive:
+            foldInOutsideText()
             if Self.isBlank(buffer) {
                 discard()
                 return .closed(archived: nil)
@@ -316,6 +321,19 @@ final class NoteDocument {
             repository.archive(buffer)
             return .closed(archived: buffer)
         }
+    }
+
+    /// A blank note is deleted, so whatever outside text it holds must be taken
+    /// in first: an edit held back, or one the file watcher has not reported
+    /// yet, which only the file itself shows.
+    private func foldInOutsideText() {
+        mergePendingExternal()
+        guard Self.isBlank(buffer), pendingExternal == nil,
+              let onDisk = repository.snapshot(id: buffer.id, archived: false)?.note,
+              !Self.isBlank(onDisk),
+              onDisk.content != persistedContent || onDisk.title != persistedTitle else { return }
+        pendingExternal = onDisk
+        mergePendingExternal()
     }
 
     private func discard() {
