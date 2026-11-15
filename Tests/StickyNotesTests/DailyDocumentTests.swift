@@ -742,7 +742,7 @@ final class DailyDocumentTests: XCTestCase {
 
     /// A stand-in for an `NSFileVersion`: a real file holding `body`.
     private func conflictVersion(
-        _ body: String?, modified: Date? = nil, resolved: @escaping () -> Void = {}
+        _ body: String?, modified: Date? = nil, computer: String? = nil, resolved: @escaping () -> Void = {}
     ) throws -> NoteStore.ConflictVersionHandle {
         let versionURL = vault.appendingPathComponent("version-\(UUID().uuidString).md")
         if let body {
@@ -751,7 +751,7 @@ final class DailyDocumentTests: XCTestCase {
                 try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: versionURL.path)
             }
         }
-        return .init(url: versionURL, markResolved: resolved)
+        return .init(url: versionURL, markResolved: resolved, modificationDate: modified, savingComputer: computer)
     }
 
     private func makeDocument(conflicts: [NoteStore.ConflictVersionHandle]) -> DailyDocument {
@@ -1132,5 +1132,52 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertTrue(saved.contains("typing") && saved.contains("B"), saved)
         XCTAssertEqual(document.body, saved)
         XCTAssertFalse(document.hasUnsavedEdits)
+    }
+
+    /// This Mac wrote "A\nP", then "A"; the other Mac put "A\nP" back on purpose; the
+    /// restore reaches iCloud as a conflict version equal to our first write, saved
+    /// after our next one. It is not our own earlier save, and the line survives.
+    func testARestoreThatArrivesAsADailyConflictVersionKeepsTheLine() throws {
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.computerName = "This Mac"
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("A\nP")
+        scheduler.advance(by: 1)
+        let t0 = clock.now()
+        scheduler.advance(by: 10)
+        document.setBody("A")
+        scheduler.advance(by: 10)
+        document.setBody("A\nnew")
+        scheduler.advance(by: 10)
+
+        versions = [try conflictVersion("A\nP", modified: t0.addingTimeInterval(15), computer: "This Mac")]
+        document.storeDidChange()
+
+        let saved = try text()
+        XCTAssertTrue(saved.contains("P") && saved.contains("new"), saved)
+    }
+
+    func testAnOlderOwnDailySaveThatThisMacSavedBeforeItsNextWriteIsStillDropped() throws {
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.computerName = "This Mac"
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("teh cat\nsat down")
+        scheduler.advance(by: 1)
+        let t0 = clock.now()
+        scheduler.advance(by: 10)
+        document.setBody("the cat\nsat down")
+        scheduler.advance(by: 10)
+
+        versions = [try conflictVersion("teh cat\nsat down", modified: t0.addingTimeInterval(1), computer: "This Mac")]
+        document.storeDidChange()
+
+        XCTAssertEqual(try text(), "the cat\nsat down")
+        XCTAssertFalse(document.body.contains("Conflicted copy"))
     }
 }

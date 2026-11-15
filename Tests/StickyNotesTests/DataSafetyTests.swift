@@ -373,29 +373,29 @@ final class ConflictResolverTests: XCTestCase {
         let current = note("newest own save\nan outside line", updated: 200)
         let own = note("older own save", updated: 100)
         let theirs = note("from another Mac", updated: 100)
-        let isOurs: (Note) -> Bool = { $0.content == "older own save" || $0.content == "newest own save" }
+        let isOurs: (ConflictResolver.Candidate) -> Bool = { $0.note.content == "older own save" || $0.note.content == "newest own save" }
         let isNewest: (Note) -> Bool = { $0.content == "newest own save" }
 
         let covered = ConflictResolver.versionsToMerge(
-            current: current, conflicts: [own, theirs],
+            current: current, conflicts: [own, theirs].map { .init(note: $0) },
             ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: ConflictResolver.lineDigests(of: "newest own save"))
         )
         XCTAssertEqual(covered.map(\.content), [current.content, "from another Mac"], "the file covers the newest write")
 
         let newestIsAVersion = ConflictResolver.versionsToMerge(
-            current: current, conflicts: [own, note("newest own save", updated: 150)],
+            current: current, conflicts: [own, note("newest own save", updated: 150)].map { .init(note: $0) },
             ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: nil)
         )
         XCTAssertEqual(newestIsAVersion.map(\.content), [current.content, "newest own save"])
 
         let lost = ConflictResolver.versionsToMerge(
-            current: current, conflicts: [own, theirs],
+            current: current, conflicts: [own, theirs].map { .init(note: $0) },
             ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: ConflictResolver.lineDigests(of: "a line only the newest write had"))
         )
         XCTAssertEqual(lost.count, 3, "the newest write is nowhere, so an earlier one may hold the only copy")
 
         let unknown = ConflictResolver.versionsToMerge(
-            current: current, conflicts: [own, theirs],
+            current: current, conflicts: [own, theirs].map { .init(note: $0) },
             ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: nil)
         )
         XCTAssertEqual(unknown.count, 3)

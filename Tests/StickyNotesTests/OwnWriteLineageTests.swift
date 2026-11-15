@@ -54,10 +54,13 @@ final class OwnWriteLineageTests: XCTestCase {
         try raw(id, body).write(to: activeFile(), atomically: true, encoding: .utf8)
     }
 
-    private func version(_ id: UUID, _ body: String, resolved: @escaping () -> Void = {}) throws -> NoteStore.ConflictVersionHandle {
+    private func version(
+        _ id: UUID, _ body: String, savedAt: Date? = nil, by computer: String? = nil,
+        resolved: @escaping () -> Void = {}
+    ) throws -> NoteStore.ConflictVersionHandle {
         let url = root.appendingPathComponent("version-\(UUID().uuidString).md")
         try raw(id, body, updated: "1970-01-01T00:00:01Z").write(to: url, atomically: true, encoding: .utf8)
-        return .init(url: url, markResolved: resolved)
+        return .init(url: url, markResolved: resolved, modificationDate: savedAt, savingComputer: computer)
     }
 
     private func body(of note: Note) -> String {
@@ -545,5 +548,102 @@ final class OwnWriteLineageTests: XCTestCase {
         store.reconfigure(rootURL: root.appendingPathComponent("elsewhere"))
 
         XCTAssertTrue(WriteLineage.history(for: key).entries.isEmpty)
+    }
+
+    // MARK: - A conflict version that equals an earlier write is dropped only if it is our own save
+
+    /// This Mac wrote "A\nP", then "A"; the other Mac put "A\nP" back on purpose; before
+    /// that arrived the person typed on here. iCloud keeps the restore as a conflict
+    /// version that equals our first write. It was saved after our next write, so it
+    /// is not our own earlier save, and the line must survive.
+    func testARestoreThatArrivesAsAConflictVersionKeepsTheLine() throws {
+        store.computerName = "This Mac"
+        var note = makeNote("A\nP")
+        store.save(note)
+        let t0 = clock.now()
+        clock.advance(by: 10)
+        note.content = "A"
+        store.save(note)
+        clock.advance(by: 10)
+        note.content = "A\nnew"
+        store.save(note)
+        for (savedAt, computer) in [(t0.addingTimeInterval(15), nil), (t0.addingTimeInterval(5), "The Other Mac")] as [(Date, String?)] {
+            let restore = try version(note.id, "A\nP", savedAt: savedAt, by: computer)
+            store.conflictVersionsProvider = { _ in [restore] }
+            store.otherVersionsRemover = { _ in }
+
+            XCTAssertEqual(store.resolveConflicts(), 1, "a restore saved \(savedAt) by \(computer ?? "nobody") was dropped")
+
+            let saved = try onDisk(note.id)
+            XCTAssertTrue(saved.contains("P") && saved.contains("new"), saved)
+            // Back to the state before the merge for the second round.
+            try raw(note.id, "A\nnew").write(to: activeFile(), atomically: true, encoding: .utf8)
+        }
+    }
+
+    func testAnUntickThatArrivesAsAConflictVersionIsKept() throws {
+        store.computerName = "This Mac"
+        var note = makeNote("- [ ] buy milk")
+        store.save(note)
+        let t0 = clock.now()
+        clock.advance(by: 10)
+        note.content = "- [x] buy milk"
+        store.save(note)
+        clock.advance(by: 10)
+        note.content = "- [x] buy milk\nmore"
+        store.save(note)
+        let unticked = try version(note.id, "- [ ] buy milk", savedAt: t0.addingTimeInterval(16), by: "This Mac")
+        store.conflictVersionsProvider = { _ in [unticked] }
+        store.otherVersionsRemover = { _ in }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+
+        XCTAssertTrue(try onDisk(note.id).contains("- [ ] buy milk"), "the untick was dropped")
+    }
+
+    /// iCloud keeping an older save of this Mac (hypothesis H1): saved by this Mac
+    /// before its next write. Dropped, with no block.
+    func testAnOlderOwnSaveThatThisMacSavedBeforeItsNextWriteIsStillDropped() throws {
+        store.computerName = "This Mac"
+        var note = makeNote("teh cat\nsat down")
+        store.save(note)
+        let t0 = clock.now()
+        clock.advance(by: 10)
+        note.content = "the cat\nsat down"
+        store.save(note)
+        for computer in [nil, "This Mac"] as [String?] {
+            let older = try version(note.id, "teh cat\nsat down", savedAt: t0.addingTimeInterval(1), by: computer)
+            store.conflictVersionsProvider = { _ in [older] }
+            store.otherVersionsRemover = { _ in }
+
+            XCTAssertEqual(store.resolveConflicts(), 0)
+
+            let saved = try onDisk(note.id)
+            XCTAssertEqual(saved, "the cat\nsat down", "saved by \(computer ?? "nobody")")
+        }
+    }
+
+    /// A merge the store wrote holds the other Mac's text, which no window showed. A
+    /// later write of ours that lacks it did not take it out, so a conflict version
+    /// equal to that merge is not an older save of ours to drop.
+    func testAMergeTheStoreWroteDoesNotVouchForAConflictVersionOfItself() throws {
+        store.computerName = "This Mac"
+        var note = makeNote("mine")
+        store.save(note)
+        let other = try version(note.id, "from the other Mac")
+        store.conflictVersionsProvider = { _ in [other] }
+        store.otherVersionsRemover = { _ in }
+        XCTAssertEqual(store.resolveConflicts(), 1)
+        let merged = try onDisk(note.id)
+        XCTAssertTrue(merged.contains("from the other Mac"), merged)
+        clock.advance(by: 10)
+        note.content = "mine"
+        store.save(note)
+        let ofTheMerge = try version(note.id, merged, savedAt: clock.now().addingTimeInterval(-9), by: "This Mac")
+        store.conflictVersionsProvider = { _ in [ofTheMerge] }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+
+        XCTAssertTrue(try onDisk(note.id).contains("from the other Mac"), "the only copy of the line was dropped")
     }
 }

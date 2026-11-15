@@ -88,10 +88,25 @@ enum ConflictResolver {
         return "\(local)\n\n\(divider(for: externalDate, now: now))\n\n\(external)"
     }
 
+    /// A conflict version as read: its content and where it came from.
+    struct Candidate {
+        var note: Note
+        /// When the system says it was saved, and by which computer.
+        var savedAt: Date?
+        var computer: String?
+
+        init(note: Note, savedAt: Date? = nil, computer: String? = nil) {
+            self.note = note
+            self.savedAt = savedAt
+            self.computer = computer
+        }
+    }
+
     /// What this Mac knows of its own writes to one file, for `versionsToMerge`.
     struct OwnWrites {
-        /// The note is exactly one of the writes (body, title and labels).
-        var isOurs: (Note) -> Bool
+        /// The version is an earlier save of this Mac's own: it equals one of the
+        /// writes (body, title and labels) and was saved here before the next one.
+        var isOurs: (Candidate) -> Bool
         /// The note is exactly the newest write.
         var isNewest: (Note) -> Bool
         /// Digests of the lines of the newest write, when they were kept.
@@ -112,13 +127,13 @@ enum ConflictResolver {
     /// is kept, because an earlier write may then hold the only copy of a line.
     /// A version that is not one of our writes, and the newest write itself, are
     /// never dropped.
-    static func versionsToMerge(current: Note, conflicts: [Note], ours: OwnWrites) -> [Note] {
+    static func versionsToMerge(current: Note, conflicts: [Candidate], ours: OwnWrites) -> [Note] {
         let newestSurvives = ours.newestIsAdded
             || ours.isNewest(current)
             || ours.newestLines.map({ areCovered($0, by: current.content) }) == true
-            || conflicts.contains(where: ours.isNewest)
-        guard newestSurvives else { return [current] + conflicts }
-        return [current] + conflicts.filter { ours.isNewest($0) || !ours.isOurs($0) }
+            || conflicts.contains(where: { ours.isNewest($0.note) })
+        guard newestSurvives else { return [current] + conflicts.map(\.note) }
+        return [current] + conflicts.filter { ours.isNewest($0.note) || !ours.isOurs($0) }.map(\.note)
     }
 
     /// When the file is an earlier write of ours (an older copy that Obsidian or a

@@ -17,6 +17,8 @@ final class DailyFile: NoteRepository {
     var otherVersionsRemover: (URL) -> Void = NoteStore.systemRemoveOtherVersions(of:)
     private let clock: AppClock
     private let id = UUID()
+    /// This Mac's name as a conflict version's saving computer is compared with it.
+    var computerName: String? = NoteStore.systemComputerName
 
     init(clock: AppClock) {
         self.clock = clock
@@ -81,14 +83,16 @@ final class DailyFile: NoteRepository {
         }
     }
 
-    private func write(_ data: Data, to url: URL) throws -> Fingerprint {
-        try Self.writeRecording(data, to: url)
+    private func write(_ data: Data, to url: URL, asMerge: Bool = false) throws -> Fingerprint {
+        try Self.writeRecording(data, to: url, at: clock.now(), asMerge: asMerge)
     }
 
-    private static func writeRecording(_ data: Data, to url: URL) throws -> Fingerprint {
+    private static func writeRecording(
+        _ data: Data, to url: URL, at date: Date, asMerge: Bool = false
+    ) throws -> Fingerprint {
         try data.write(to: url, options: .atomic)
         let body = String(decoding: data, as: UTF8.self)
-        WriteLineage.record(body: body, for: NoteStore.lineageKey(url))
+        WriteLineage.record(body: body, at: date, merged: asMerge, for: NoteStore.lineageKey(url))
         return Fingerprint(of: data)
     }
 
@@ -98,7 +102,7 @@ final class DailyFile: NoteRepository {
     /// the new fingerprint, or nil when the file changed or could not be written.
     static func replaceFile(at url: URL, with body: String, expecting expected: Fingerprint) -> Fingerprint? {
         guard let data = try? Data(contentsOf: url), Fingerprint(of: data) == expected else { return nil }
-        return try? writeRecording(Data(body.utf8), to: url)
+        return try? writeRecording(Data(body.utf8), to: url, at: Date(), asMerge: true)
     }
 
     func isEarlierOwnBody(_ body: String, ofNote id: UUID) -> Bool {
@@ -160,7 +164,7 @@ final class DailyFile: NoteRepository {
         guard case let .file(data, body) = read(url) else { return .unchanged }
         let current = note(body: body, updatedAt: Self.modificationDate(of: url) ?? .distantPast)
 
-        var conflictNotes: [Note] = []
+        var conflictNotes: [ConflictResolver.Candidate] = []
         var unreadable = Set<Int>()
         for (index, version) in conflicts.enumerated() {
             guard let raw = try? String(contentsOf: version.url, encoding: .utf8) else {
@@ -168,7 +172,10 @@ final class DailyFile: NoteRepository {
                 continue
             }
             let saved = version.modificationDate ?? Self.modificationDate(of: version.url) ?? .distantPast
-            conflictNotes.append(note(body: raw, updatedAt: saved))
+            conflictNotes.append(.init(
+                note: note(body: raw, updatedAt: saved),
+                savedAt: version.modificationDate, computer: version.savingComputer
+            ))
         }
 
         // Cleared when the merged text did not reach the file: the versions may
@@ -184,6 +191,7 @@ final class DailyFile: NoteRepository {
         }
 
         let history = WriteLineage.history(for: NoteStore.lineageKey(url))
+        let thisComputer = computerName
         let handled = ConflictResolver.handlingStaleFile(
             current, newestBody: history.newestBody,
             isEarlierBody: { history.contains(body: NoteStore.contentHash(body: $0)) },
@@ -194,7 +202,12 @@ final class DailyFile: NoteRepository {
             current: judged,
             conflicts: conflictNotes,
             ours: ConflictResolver.OwnWrites(
-                isOurs: { history.contains(full: NoteStore.contentHash($0)) },
+                isOurs: {
+                    history.isOwnEarlierSave(
+                        full: NoteStore.contentHash($0.note), savedAt: $0.savedAt,
+                        computer: $0.computer, thisComputer: thisComputer
+                    )
+                },
                 isNewest: { history.isNewest(full: NoteStore.contentHash($0)) },
                 newestLines: history.newestLines,
                 newestIsAdded: handled.addedNewest != nil
@@ -210,7 +223,7 @@ final class DailyFile: NoteRepository {
             mergeLanded = false
             return .unchanged
         }
-        guard (try? write(Data(merged.content.utf8), to: url)) != nil else {
+        guard (try? write(Data(merged.content.utf8), to: url, asMerge: true)) != nil else {
             mergeLanded = false
             return .couldNotWrite
         }
@@ -285,6 +298,11 @@ final class DailyDocument {
     var otherVersionsRemover: (URL) -> Void {
         get { file.otherVersionsRemover }
         set { file.otherVersionsRemover = newValue }
+    }
+    /// This Mac's name, which a conflict version's saving computer is compared with.
+    var computerName: String? {
+        get { file.computerName }
+        set { file.computerName = newValue }
     }
 
     /// True while the caret is in the note. See `NoteDocument.isEditing`.

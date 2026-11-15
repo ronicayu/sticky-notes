@@ -117,12 +117,24 @@ struct MigrationReport {
 /// ours that N covers, N's text stands in for it; when it is one that N does
 /// not cover it may be a restore the person made on purpose, so N's text is added
 /// as one more version and nothing is replaced (`ConflictResolver.handlingStaleFile`).
+/// A write the store made from other versions (`Entry.merged`: a conflict merge, a
+/// healed duplicate, a copy between roots, a conversion) is in the list, because
+/// the file then holds it, but it never vouches for an earlier version or a put-back
+/// body: it may hold the only copy of a line that no window ever showed, and a later
+/// write that lacks the line did not take it out of a note the person had seen.
 /// A foreign version is never in the list, and a version with a line none of
 /// our writes had is not an earlier write, so text found only in another
-/// version is merged as before.
+/// version is merged as before. A conflict version that equals an earlier write
+/// is dropped only if it was also saved by this Mac before its next write
+/// (`History.isOwnEarlierSave`): the other Mac putting the same text back on
+/// purpose, after we removed it, produces the same bytes and must survive.
 ///
 /// Privacy. The saved file holds hashes only: of each write, and of each line of
 /// the newest write. The text of the newest write is kept in memory, never saved.
+/// The hashes are plain, unsalted SHA-256 (the first 8 bytes of each line's): they
+/// are not encryption, so whoever can read the file can confirm a guess at a short
+/// line or a whole short note. The file lives in the machine-local folder with the
+/// layout file and is as private as that folder.
 /// After a relaunch the hashes still show that an outside append left the newest
 /// write in the file, but a stale file can no longer be replaced by it.
 ///
@@ -134,6 +146,12 @@ enum WriteLineage {
         var full: String
         /// The same of the body alone.
         var body: String
+        /// When this Mac wrote it, in seconds since 1970.
+        var at: TimeInterval
+        /// Written by the store from other versions (a conflict merge, a copy from
+        /// another root, a conversion), not saved from a window. Its text may hold
+        /// what no window ever showed, so it vouches for nothing.
+        var merged: Bool = false
     }
 
     /// What one file's list says, as a value a merge can use without the lock.
@@ -148,8 +166,29 @@ enum WriteLineage {
 
         var newest: Entry? { entries.last }
         func contains(full hash: String) -> Bool { entries.contains { $0.full == hash } }
-        func contains(body hash: String) -> Bool { entries.contains { $0.body == hash } }
+        /// The body equals one a window saved; a merge the store wrote does not count.
+        func contains(body hash: String) -> Bool { entries.contains { $0.body == hash && !$0.merged } }
         func isNewest(full hash: String) -> Bool { entries.last?.full == hash }
+
+        /// Whether a conflict version whose content hashes to `hash` is an earlier
+        /// save of this Mac's own, as iCloud keeps them. Matching an earlier write
+        /// is not enough: another Mac that put the same text back on purpose
+        /// produces the same bytes. The version must also have been saved before
+        /// this Mac's next write (with `skew` to spare), by this Mac or by a
+        /// writer that names no computer; a later one, or one saved by another
+        /// computer, is kept and merged. A version with no date or no computer
+        /// to compare is taken as it is, which a real `NSFileVersion` never is.
+        func isOwnEarlierSave(
+            full hash: String, savedAt: Date?, computer: String?, thisComputer: String?
+        ) -> Bool {
+            if let computer, computer != thisComputer { return false }
+            for (index, entry) in entries.enumerated()
+            where entry.full == hash && !entry.merged && index + 1 < entries.count {
+                guard let savedAt else { return true }
+                if savedAt.timeIntervalSince1970 <= entries[index + 1].at + WriteLineage.clockSkew { return true }
+            }
+            return false
+        }
     }
 
     private struct Stored: Codable {
@@ -160,7 +199,7 @@ enum WriteLineage {
     }
 
     private struct FileContents: Codable {
-        var version = 2
+        var version = 3
         var files: [String: Stored]
     }
 
@@ -174,6 +213,9 @@ enum WriteLineage {
     /// Every write arms a save of the whole file, so the save waits and gathers
     /// them. Quit and sleep save at once (`saveNow`).
     static let saveDelay: TimeInterval = 45
+    /// How far a version's save date may be after our next write and still be our
+    /// own earlier save: the two Macs' clocks, and iCloud's rounding.
+    static let clockSkew: TimeInterval = 2
 
     private static let lock = NSLock()
     // Every access holds `lock`.
@@ -184,10 +226,15 @@ enum WriteLineage {
     nonisolated(unsafe) private static var saveScheduled = false
     private static let fileQueue = DispatchQueue(label: "WriteLineage.file", qos: .utility)
 
-    static func record(body: String, title: String = "", labels: [String] = [], for key: String) {
+    static func record(
+        body: String, title: String = "", labels: [String] = [], at date: Date = Date(),
+        merged: Bool = false, for key: String
+    ) {
         let entry = Entry(
             full: NoteStore.contentHash(body: body, title: title, labels: labels),
-            body: NoteStore.contentHash(body: body)
+            body: NoteStore.contentHash(body: body),
+            at: date.timeIntervalSince1970,
+            merged: merged
         )
         let small = body.utf8.count <= newestBodyLimit
         let lines = small ? ConflictResolver.lineDigests(of: body) : nil
@@ -304,7 +351,7 @@ enum WriteLineage {
     static func useFile(_ url: URL?) {
         var loaded: [String: Stored] = [:]
         if let url, let data = try? Data(contentsOf: url),
-           let contents = try? JSONDecoder().decode(FileContents.self, from: data), contents.version == 2 {
+           let contents = try? JSONDecoder().decode(FileContents.self, from: data), contents.version == 3 {
             loaded = contents.files
         }
         lock.lock()
@@ -553,7 +600,8 @@ final class NoteStore {
     /// Check the file at `url` against `expectation`, then write. A file that
     /// cannot be read is not overwritten: nothing is known about what it holds.
     private func writeIfUnchanged(
-        _ note: Note, to url: URL, expecting expectation: Expectation, carryingLegacyPlacement: Bool = false
+        _ note: Note, to url: URL, expecting expectation: Expectation, carryingLegacyPlacement: Bool = false,
+        asMerge: Bool = false
     ) -> SaveResult {
         switch expectation {
         case .anything:
@@ -569,7 +617,7 @@ final class NoteStore {
                 return .gone
             }
         }
-        switch writeReporting(note, to: url, carryingLegacyPlacement: carryingLegacyPlacement) {
+        switch writeReporting(note, to: url, carryingLegacyPlacement: carryingLegacyPlacement, asMerge: asMerge) {
         case let .success(fingerprint): return .saved(fingerprint)
         case let .failure(error): return .failed(error)
         }
@@ -1191,7 +1239,9 @@ final class NoteStore {
         var whole = note
         whole.preserved = onDisk.note.preserved
         if renderMarkdown(whole) != renderMarkdown(onDisk.note) {
-            guard case .saved = writeIfUnchanged(whole, to: url, expecting: .fingerprint(onDisk.fingerprint)) else { return false }
+            guard case .saved = writeIfUnchanged(
+                whole, to: url, expecting: .fingerprint(onDisk.fingerprint), asMerge: true
+            ) else { return false }
         }
         if folder == .trash { stampDeletionDate(on: url, at: placed) }
         pathIndex[note.id] = url
@@ -1209,7 +1259,9 @@ final class NoteStore {
             var merged = ConflictResolver.merge([onDisk.note, note], now: clock.now()) ?? note
             merged.preserved = onDisk.note.preserved
             guard renderMarkdown(merged) != renderMarkdown(onDisk.note) else { break }
-            if case .saved = writeIfUnchanged(merged, to: existing, expecting: .fingerprint(onDisk.fingerprint)) { break }
+            if case .saved = writeIfUnchanged(
+                merged, to: existing, expecting: .fingerprint(onDisk.fingerprint), asMerge: true
+            ) { break }
         }
         if folder == .trash {
             stampDeletionDate(on: existing, at: max(heldSince ?? .distantPast, placed))
@@ -1639,7 +1691,14 @@ final class NoteStore {
         /// When the version was saved, as the system reports it. Nil when it
         /// does not say; the merge then goes by what the version's file holds.
         var modificationDate: Date?
+        /// The name of the computer that saved the version, as the system reports
+        /// it; nil when it does not say.
+        var savingComputer: String?
     }
+
+    /// This Mac's name as `NSFileVersion` reports a saving computer.
+    static let systemComputerName: String? = Host.current().localizedName
+    var computerName: String? = NoteStore.systemComputerName
 
     static func systemConflictVersions(of url: URL) -> [ConflictVersionHandle] {
         // Asking for versions is a round trip to another process, and the watcher
@@ -1651,7 +1710,8 @@ final class NoteStore {
         return (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []).map { version in
             ConflictVersionHandle(
                 url: version.url, markResolved: { version.isResolved = true },
-                modificationDate: version.modificationDate
+                modificationDate: version.modificationDate,
+                savingComputer: version.localizedNameOfSavingComputer
             )
         }
     }
@@ -1668,9 +1728,10 @@ final class NoteStore {
     /// copy. Returning false leaves the versions for a later sweep.
     var beforeResolvingConflicts: (UUID) -> Bool = { _ in true }
 
-    private func recordWrite(_ note: Note, to url: URL) {
+    private func recordWrite(_ note: Note, to url: URL, merged: Bool = false) {
         WriteLineage.record(
-            body: note.content, title: note.title, labels: note.labels, for: NoteStore.lineageKey(url)
+            body: note.content, title: note.title, labels: note.labels, at: clock.now(),
+            merged: merged, for: NoteStore.lineageKey(url)
         )
     }
 
@@ -1732,7 +1793,7 @@ final class NoteStore {
         guard let snapshot = readSnapshot(url) else { return nil }
         let current = snapshot.note
 
-        var conflictNotes: [Note] = []
+        var conflictNotes: [ConflictResolver.Candidate] = []
         // A version that can't be read yet (iCloud has not downloaded it) is
         // left unresolved for a later sweep; resolving it now would lose it.
         var unreadable = Set<Int>()
@@ -1742,7 +1803,9 @@ final class NoteStore {
                 continue
             }
             if let saved = version.modificationDate { note.updatedAt = saved }
-            conflictNotes.append(note)
+            conflictNotes.append(.init(
+                note: note, savedAt: version.modificationDate, computer: version.savingComputer
+            ))
         }
 
         // Cleared when the merged text did not reach the file: the versions
@@ -1760,6 +1823,7 @@ final class NoteStore {
         }
 
         let history = WriteLineage.history(for: NoteStore.lineageKey(url))
+        let thisComputer = computerName
         let handled = ConflictResolver.handlingStaleFile(
             current, newestBody: history.newestBody,
             isEarlierBody: { history.contains(body: NoteStore.contentHash(body: $0)) },
@@ -1770,7 +1834,12 @@ final class NoteStore {
             current: judged,
             conflicts: conflictNotes,
             ours: ConflictResolver.OwnWrites(
-                isOurs: { history.contains(full: NoteStore.contentHash($0)) },
+                isOurs: {
+                    history.isOwnEarlierSave(
+                        full: NoteStore.contentHash($0.note), savedAt: $0.savedAt,
+                        computer: $0.computer, thisComputer: thisComputer
+                    )
+                },
                 isNewest: { history.isNewest(full: NoteStore.contentHash($0)) },
                 newestLines: history.newestLines,
                 newestIsAdded: handled.addedNewest != nil
@@ -1792,7 +1861,7 @@ final class NoteStore {
 
         // Only over the file this merge was computed from. If something wrote
         // it since, the merge is stale and the next sweep redoes it.
-        switch writeIfUnchanged(merged, to: url, expecting: .fingerprint(snapshot.fingerprint)) {
+        switch writeIfUnchanged(merged, to: url, expecting: .fingerprint(snapshot.fingerprint), asMerge: true) {
         case .saved:
             return merged.id
         case .failed:
@@ -1891,7 +1960,7 @@ final class NoteStore {
     }
 
     private func writeReporting(
-        _ note: Note, to url: URL, carryingLegacyPlacement: Bool = false
+        _ note: Note, to url: URL, carryingLegacyPlacement: Bool = false, asMerge: Bool = false
     ) -> Result<Fingerprint, Error> {
         let data = Data(renderMarkdown(note, carryingLegacyPlacement: carryingLegacyPlacement).utf8)
         do {
@@ -1909,7 +1978,7 @@ final class NoteStore {
             }
         }
         recordSuccess()
-        recordWrite(note, to: url)
+        recordWrite(note, to: url, merged: asMerge)
         return .success(Fingerprint(of: data))
     }
 
@@ -2059,10 +2128,10 @@ final class NoteStore {
             if let existing {
                 result = writeIfUnchanged(
                     merged, to: destination, expecting: .fingerprint(existing.snapshot.fingerprint),
-                    carryingLegacyPlacement: true
+                    carryingLegacyPlacement: true, asMerge: true
                 )
             } else {
-                switch writeReporting(merged, to: destination, carryingLegacyPlacement: true) {
+                switch writeReporting(merged, to: destination, carryingLegacyPlacement: true, asMerge: true) {
                 case let .success(fingerprint): result = .saved(fingerprint)
                 case let .failure(error): result = .failed(error)
                 }
@@ -2172,7 +2241,7 @@ final class NoteStore {
         guard let back = readSnapshot(url), back.fingerprint == Fingerprint(of: updated), back.note.id == newId else {
             return false
         }
-        recordWrite(back.note, to: url)
+        recordWrite(back.note, to: url, merged: true)
         return true
     }
 
