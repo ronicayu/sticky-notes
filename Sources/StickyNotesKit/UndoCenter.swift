@@ -24,6 +24,10 @@ import AppKit
     }
 
     @objc private func textDidChange(_ notification: Notification) {
+        // An edit the app makes itself, such as ticking a welcome task, is not
+        // typing, and ⌘Z has nothing in the text to take.
+        let editor = (notification.object as? NSTextView)?.delegate as? MarkdownEditorController
+        guard editor?.isEditingProgrammatically != true else { return }
         textEditedSinceOffer = true
     }
 
