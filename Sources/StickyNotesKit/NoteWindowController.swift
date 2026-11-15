@@ -212,7 +212,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         )
         colorButton = NoteWindowController.makeChromeButton(
             symbol: "paintpalette",
-            tooltip: "Change color"
+            tooltip: "Color and float level"
         )
         labelButton = NoteWindowController.makeChromeButton(
             symbol: "tag",
@@ -867,7 +867,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
                 xRadius: 3,
                 yRadius: 3
             )
-            NSColor(hex: color.bodyHex)?.setFill()
+            // The light paper colour in both appearances: the menu stays light
+            // or dark with the system, and the dark papers are all near black.
+            NSColor(hex: color.lightBodyHex)?.setFill()
             path.fill()
             NSColor.black.withAlphaComponent(0.18).setStroke()
             path.lineWidth = 0.5
