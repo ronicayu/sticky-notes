@@ -4,6 +4,38 @@ Written against commit `cbbec66` (v0.9.0 + three data-safety commits). Line numb
 PLAN.md, UX-PLAN.md and BUGFIX-PLAN.md are fully shipped; nothing here re-proposes them. Read their
 "Deliberately not done" lists first — most of them stay not done, on purpose, and §8 says why.
 
+## Status (2026-11-15)
+
+Phases 0–3 and the hotfix 1.0 are implemented on branch `masterpiece`; Phase 5 is deferred by
+the owner. 1120 tests (4 skipped: opt-in benchmarks and one test that needs a real key window),
+CI green on macos-15 with `-strict-concurrency=complete`. Every item had an Opus review; every
+finding was fixed or is listed below. The TLA+ model in `model/` was re-run against the new code
+twice; its findings N1–N6 and the review's C1 are fixed (see `model/REPORT.md`).
+
+| Phase | State |
+|-------|-------|
+| 1.0 Hotfix | ✅ merged to `main` (PR #2) |
+| 0 Foundations | ✅ 0.1 NoteDocument/DailyDocument · 0.2 CAS + Change payload · 0.3 injection · 0.4 AppDelegate split + strict concurrency · 0.5 MarkdownEditorController · 0.6 Markdown only (D1) · 0.7 build number |
+| 1 Trust | ✅ 1.1–1.8 |
+| 2 Two Macs | ✅ 2.1 per-device layout (D2) · 2.2 full-screen (D6) · 2.3 daily note in switcher/panel/Arrange |
+| 3 Craft | ✅ 3.1–3.8 |
+| 5 Distribution | ⏸ deferred (D3–D5) |
+
+Not done, or left on purpose:
+
+- A put-back older copy holding an old version of a line the person has since edited keeps both
+  texts under one divider: a deliberate restore has the same bytes.
+- The conflict-version rule trusts `NSFileVersion`'s saving computer; it assumes the two Macs have
+  different computer names (they do). Its real behaviour is logged (`Logger` subsystem
+  `StickyNotes`, category `conflicts`) and not yet verified on two Macs.
+- The retired `positionX/positionY/collapsed` keys stay in note files for one release; remove them
+  in the next.
+- A storage switch runs on the main thread and may wait up to 5 s for iCloud downloads.
+- Find Next (⌘G); the daily note's geometry is still in `_daily.json`, not `layout.json`.
+- Attachment link rewriting misses `x.png|200` and similar forms.
+- PERF.md has the restyle and idle-cost rows; launch, hotkey-to-caret and memory rows are not
+  measured.
+
 ## Conclusion
 
 The feature set is complete and the UX is already better than Apple's Stickies. Three things stand
