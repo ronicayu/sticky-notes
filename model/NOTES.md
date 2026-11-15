@@ -3,7 +3,10 @@
 Code modelled: commit `c16cef1` (branch `masterpiece`, Phase 0 and 1 complete). Every file:line below is
 `git show c16cef1:<path>`. HEAD was `6838780` when the work began; later commits (to `83e94dc`) change
 geometry and comments in `NoteDocument.swift` and `DailyDocument.swift` and add layout pruning to
-`DeskController.reconcileOpenWindows`, which do not change a modelled transition.
+`DeskController.reconcileOpenWindows`, which do not change a modelled transition. Re-checked at `9f58340`:
+`ConflictResolver.swift` unchanged; the changes to `NoteStore` (layout, storage switch, legacy placement),
+`NoteWindowController` and the new Note menu (⌘W calls `closeNote`) touch no modelled transition; the anchors of
+N1-N6 are all still there.
 
 The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of the first run.
 
@@ -14,9 +17,9 @@ The cbbec66 models, configs and outputs stay in `v1-cbbec66/` as the record of t
 | `LineMerge.tla` | Text operators shared by both models: `Covered`, `Superset`, `MergeVersions`, `MergeBodies`, `ThreeWay`, `NoRepeat` |
 | `NoteDocument.tla` | Model (a): one note in Obsidian vault mode, vault in iCloud Drive |
 | `DailyDocument.tla` | Model (b): today's daily note across midnight, this Mac plus the other Mac through iCloud |
-| `n-*.cfg`, `d-*.cfg` | Configs; `*-regress-*` are the faithfulness configs; `-r2`, `-r3` are peel rounds |
+| `n-*.cfg`, `d-*.cfg`, `regress-*.cfg` | Configs; `regress-note-*` and `regress-daily-*` are the faithfulness configs; `-r2`, `-r3` are peel rounds |
 | `note-doc-view.mjs`, `daily-doc-view.mjs` | Chart views |
-| `out-v2/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config |
+| `out-v3/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config |
 | `run-all.sh` | Reruns every config and the base check |
 
 ## Switch convention
