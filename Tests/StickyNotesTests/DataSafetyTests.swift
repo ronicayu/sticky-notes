@@ -12,8 +12,7 @@ final class ConflictResolverTests: XCTestCase {
     ) -> Note {
         Note(
             id: id, title: "T", content: content,
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: labels,
+            width: 240, height: 200, color: .yellow, labels: labels,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_000 + updated)
         )
@@ -183,6 +182,50 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertEqual(merged.id, id)
     }
 
+    // MARK: - Titles
+
+    func testWhenOnlyTheTitleDiffersTheNewestVersionIsReturnedAsItIs() throws {
+        var older = note("same", updated: 100)
+        older.title = "Old name"
+        var newer = note("same", updated: 200)
+        newer.title = "New name"
+        let merged = try XCTUnwrap(ConflictResolver.merge([newer, older], now: now))
+        XCTAssertEqual(merged.title, "New name")
+        XCTAssertEqual(merged.content, "same")
+        XCTAssertEqual(merged.updatedAt, newer.updatedAt, "nothing was merged, so nothing is restamped")
+    }
+
+    func testATitleThatLosesAMergeIsKeptAsAnAlsoTitledLine() throws {
+        var older = note("shared\nonly older", updated: 100)
+        older.title = "Old name"
+        var newer = note("shared\nonly newer", updated: 200)
+        newer.title = "New name"
+        let merged = try XCTUnwrap(ConflictResolver.merge([older, newer], now: now))
+        XCTAssertEqual(merged.title, "New name")
+        XCTAssertTrue(merged.content.contains("only older"))
+        XCTAssertTrue(merged.content.hasSuffix("Also titled: Old name"), merged.content)
+    }
+
+    func testAMergeGivesAnUntitledWinnerTheOtherTitleInsteadOfAnAlsoTitledLine() throws {
+        var older = note("shared\nonly older", updated: 100)
+        older.title = "Old name"
+        var newer = note("shared\nonly newer", updated: 200)
+        newer.title = ""
+        let merged = try XCTUnwrap(ConflictResolver.merge([older, newer], now: now))
+        XCTAssertEqual(merged.title, "Old name")
+        XCTAssertFalse(merged.content.contains("Also titled"))
+    }
+
+    func testMergingTheSameVersionsAgainDoesNotStackAlsoTitledLines() throws {
+        var older = note("shared\nonly older", updated: 100)
+        older.title = "Old name"
+        var newer = note("shared\nonly newer", updated: 200)
+        newer.title = "New name"
+        let once = try XCTUnwrap(ConflictResolver.merge([older, newer], now: now))
+        let twice = try XCTUnwrap(ConflictResolver.merge([once, older], now: now.addingTimeInterval(60)))
+        XCTAssertEqual(twice.content, once.content)
+    }
+
     // MARK: - Line-based merge rule
 
     func testAConflictVersionWithNothingNewLeavesTheNoteAlone() throws {
@@ -303,12 +346,19 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertTrue(merged.content.contains("Conflicted copy"), "got \(merged.content)")
     }
 
-    func testAClearedNoteIsNotRevertedByAnOlderCopy() throws {
+    func testABlankCurrentFileTakesAConflictVersionWithoutADivider() throws {
         let merged = try XCTUnwrap(ConflictResolver.merge([
-            note("", updated: 200), note("old text", updated: 100)
+            note("", updated: 200), note("text from the other Mac\nsecond line", updated: 100)
         ], now: now))
-        XCTAssertTrue(merged.content.contains("Conflicted copy"), "got \(merged.content)")
-        XCTAssertTrue(merged.content.contains("old text"), "got \(merged.content)")
+        XCTAssertEqual(merged.content, "text from the other Mac\nsecond line")
+    }
+
+    func testABlankCurrentFileTakesTheOlderOfTwoVersionsAndKeepsTheOtherUnderADivider() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("", updated: 300), note("one", updated: 100), note("two", updated: 200)
+        ], now: now))
+        XCTAssertTrue(merged.content.hasPrefix("one"), "got \(merged.content)")
+        XCTAssertTrue(merged.content.contains("Conflicted copy") && merged.content.contains("two"), "got \(merged.content)")
     }
 
     func testABodyMergeDoesNotRevertAReorder() {
@@ -319,21 +369,36 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertTrue(merged.contains("Conflicted copy"), "got \(merged)")
     }
 
-    func testVersionsFromThisProcessAreDroppedOnlyWhenTheFileIsOursToo() {
-        let current = note("current", updated: 200)
+    func testAnEarlierOwnVersionIsDroppedOnlyWhileTheNewestWriteIsStillInTheMerge() {
+        let current = note("newest own save\nan outside line", updated: 200)
         let own = note("older own save", updated: 100)
         let theirs = note("from another Mac", updated: 100)
-        let isOurs: (Note) -> Bool = { $0.content == "older own save" }
+        let isOurs: (ConflictResolver.Candidate) -> Bool = { $0.note.content == "older own save" || $0.note.content == "newest own save" }
+        let isNewest: (Note) -> Bool = { $0.content == "newest own save" }
 
-        let ours = ConflictResolver.versionsToMerge(
-            current: current, currentIsOurNewest: true, conflicts: [own, theirs], isOurs: isOurs
+        let covered = ConflictResolver.versionsToMerge(
+            current: current, conflicts: [own, theirs].map { .init(note: $0) },
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: ConflictResolver.lineDigests(of: "newest own save"))
         )
-        XCTAssertEqual(ours.map(\.content), ["current", "from another Mac"])
+        XCTAssertEqual(covered.map(\.content), [current.content, "from another Mac"], "the file covers the newest write")
 
-        let notOurs = ConflictResolver.versionsToMerge(
-            current: current, currentIsOurNewest: false, conflicts: [own, theirs], isOurs: isOurs
+        let newestIsAVersion = ConflictResolver.versionsToMerge(
+            current: current, conflicts: [own, note("newest own save", updated: 150)].map { .init(note: $0) },
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: nil)
         )
-        XCTAssertEqual(notOurs.count, 3)
+        XCTAssertEqual(newestIsAVersion.map(\.content), [current.content, "newest own save"])
+
+        let lost = ConflictResolver.versionsToMerge(
+            current: current, conflicts: [own, theirs].map { .init(note: $0) },
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: ConflictResolver.lineDigests(of: "a line only the newest write had"))
+        )
+        XCTAssertEqual(lost.count, 3, "the newest write is nowhere, so an earlier one may hold the only copy")
+
+        let unknown = ConflictResolver.versionsToMerge(
+            current: current, conflicts: [own, theirs].map { .init(note: $0) },
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: nil)
+        )
+        XCTAssertEqual(unknown.count, 3)
     }
 
     // MARK: - needsMerge
@@ -381,46 +446,39 @@ final class TrashTests: XCTestCase {
     private func makeNote(_ content: String = "n") -> Note {
         Note(
             id: UUID(), title: "", content: content,
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: [],
+            width: 240, height: 200, color: .yellow, labels: [],
             createdAt: Date(), updatedAt: Date()
         )
     }
 
-    private let formats: [StorageFormat] = [.json, .markdown]
-
     func testDeletingForeverMovesTheNoteToTheTrash() throws {
-        for format in formats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            let note = makeNote("recoverable")
-            store.save(note)
-            store.archive(note)
-            store.deleteForever(note)
+        let store = NoteStore(rootURL: root)
+        let note = makeNote("recoverable")
+        store.save(note)
+        store.archive(note)
+        store.deleteForever(note)
 
-            XCTAssertTrue(store.loadArchived().isEmpty, "\(format)")
-            XCTAssertEqual(store.loadTrashed().map(\.content), ["recoverable"],
-                           "\(format): delete should be recoverable")
-        }
+        XCTAssertTrue(store.loadArchived().isEmpty)
+        XCTAssertEqual(store.loadTrashed().map(\.content), ["recoverable"],
+                       "delete should be recoverable")
     }
 
     func testATrashedNoteCanBeRestored() throws {
-        for format in formats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("restore-\(format)"), format: format)
-            let note = makeNote("came back")
-            store.save(note)
-            store.archive(note)
-            store.deleteForever(note)
+        let store = NoteStore(rootURL: root)
+        let note = makeNote("came back")
+        store.save(note)
+        store.archive(note)
+        store.deleteForever(note)
 
-            let trashed = try XCTUnwrap(store.loadTrashed().first, "\(format)")
-            store.restoreFromTrash(trashed)
+        let trashed = try XCTUnwrap(store.loadTrashed().first)
+        store.restoreFromTrash(trashed)
 
-            XCTAssertEqual(store.loadArchived().map(\.content), ["came back"], "\(format)")
-            XCTAssertTrue(store.loadTrashed().isEmpty, "\(format)")
-        }
+        XCTAssertEqual(store.loadArchived().map(\.content), ["came back"])
+        XCTAssertTrue(store.loadTrashed().isEmpty)
     }
 
     func testTrashedNotesAreNotListedAsActiveOrArchived() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         store.save(note)
         store.archive(note)
@@ -433,14 +491,13 @@ final class TrashTests: XCTestCase {
     /// Two notes created in the same second get the same Markdown filename, and
     /// the trash is the one place we must not overwrite anything.
     func testTwoDeletionsWithTheSameFilenameBothSurvive() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let created = Date(timeIntervalSince1970: 1_700_000_000)
 
         for content in ["first", "second"] {
             let note = Note(
                 id: UUID(), title: "", content: content,
-                positionX: 0, positionY: 0, width: 240, height: 200,
-                collapsed: false, color: .yellow, labels: [],
+                width: 240, height: 200, color: .yellow, labels: [],
                 createdAt: created, updatedAt: created
             )
             store.save(note)
@@ -453,7 +510,7 @@ final class TrashTests: XCTestCase {
     }
 
     func testRecentlyTrashedNotesAreNotPurged() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         store.save(note)
         store.archive(note)
@@ -464,7 +521,7 @@ final class TrashTests: XCTestCase {
     }
 
     func testExpiredNotesArePurged() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         store.save(note)
         store.archive(note)
@@ -480,7 +537,7 @@ final class TrashTests: XCTestCase {
     /// modification date, so a note last edited months ago used to be purged
     /// the moment it was deleted — the one thing the trash exists to prevent.
     func testANoteDeletedTodaySurvivesEvenIfItWasEditedLongAgo() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         store.save(note)
         store.archive(note)
@@ -503,18 +560,18 @@ final class TrashTests: XCTestCase {
     }
 
     func testPurgingAnEmptyTrashIsHarmless() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         XCTAssertEqual(store.purgeExpiredTrash(), 0)
     }
 
     func testTrashLivesInsideTheStorageRoot() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         XCTAssertEqual(store.trashURL.lastPathComponent, ".trash")
         XCTAssertEqual(store.trashURL.deletingLastPathComponent().path, root.path)
     }
 
-    func testTheTrashTabListsDeletedNotes() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+    @MainActor func testTheTrashTabListsDeletedNotes() throws {
+        let store = NoteStore(rootURL: root)
         let note = makeNote("deleted")
         store.save(note)
         store.archive(note)
@@ -527,8 +584,8 @@ final class TrashTests: XCTestCase {
         XCTAssertEqual(panel.visibleTitles, ["deleted"])
     }
 
-    func testPuttingBackFromTheTrashTabReturnsTheNoteToArchive() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+    @MainActor func testPuttingBackFromTheTrashTabReturnsTheNoteToArchive() throws {
+        let store = NoteStore(rootURL: root)
         let note = makeNote("put back")
         store.save(note)
         store.archive(note)
@@ -543,7 +600,7 @@ final class TrashTests: XCTestCase {
     }
 
     func testResolvingConflictsOnACleanStoreChangesNothing() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         store.save(makeNote("untouched"))
         XCTAssertEqual(store.resolveConflicts(), 0)
         XCTAssertEqual(store.loadActive().map(\.content), ["untouched"])
@@ -555,13 +612,16 @@ final class ConflictSweepTests: XCTestCase {
     private var store: NoteStore!
 
     override func setUpWithError() throws {
+        NoteStore.systemComputerName = "This Mac"
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ConflictSweep-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        store = NoteStore(rootURL: root, format: .markdown)
+        store = NoteStore(rootURL: root)
+        store.offMain = .inline
     }
 
     override func tearDownWithError() throws {
+        store?.stopWatching()
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -592,7 +652,7 @@ final class ConflictSweepTests: XCTestCase {
             try rawNote(id: note.id, content: content, updated: "1970-01-01T00:00:01Z")
                 .write(to: url, atomically: true, encoding: .utf8)
         }
-        return .init(url: url, markResolved: resolved)
+        return .init(url: url, markResolved: resolved, savingComputer: "This Mac")
     }
 
     func testAnUnreadableConflictVersionIsKeptForLater() throws {
@@ -663,7 +723,7 @@ final class ConflictSweepTests: XCTestCase {
         store.save(note)
         var resolved = 0
         store.otherVersionsRemover = { _ in }
-        let counting = NoteStore.ConflictVersionHandle(url: typo.url) { resolved += 1 }
+        let counting = NoteStore.ConflictVersionHandle(url: typo.url, markResolved: { resolved += 1 }, savingComputer: "This Mac")
         store.conflictVersionsProvider = { _ in [counting] }
 
         XCTAssertEqual(store.resolveConflicts(), 0)
@@ -721,14 +781,17 @@ final class ConflictSweepTests: XCTestCase {
     /// window adopts it, then any save writes the adopted text back. The
     /// older own save now holds text the file lacks and must be merged.
     func testAnOwnVersionIsMergedAfterAdoptingAnotherMacsFile() throws {
-        var note = savedNote("A\nmine")
+        let note = savedNote("A\nmine")
         let own = try version(of: note, content: "A\nmine")
+        let clock = ManualClock()
+        let scheduler = TestScheduler(clock: clock)
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
         try rawNote(id: note.id, content: "A\ntheirs", updated: "2026-01-01T00:00:00Z")
             .write(to: fileURL(), atomically: true, encoding: .utf8)
-        XCTAssertEqual(try XCTUnwrap(store.loadNote(id: note.id)).content.trimmingCharacters(in: .whitespacesAndNewlines), "A\ntheirs")
-        note.content = "A\ntheirs\nmoved the window"
-        note.updatedAt = Date()
-        store.save(note)
+        document.storeDidChange()
+        XCTAssertEqual(document.buffer.content.trimmingCharacters(in: .whitespacesAndNewlines), "A\ntheirs")
+        document.edit { $0.content = "A\ntheirs\nmoved the window" }
+        scheduler.advance(by: 1)
         store.conflictVersionsProvider = { _ in [own] }
         store.otherVersionsRemover = { _ in }
 
@@ -749,7 +812,7 @@ final class ConflictSweepTests: XCTestCase {
         store.save(note)
 
         WriteLineage.reset()
-        let relaunched = NoteStore(rootURL: root, format: .markdown)
+        let relaunched = NoteStore(rootURL: root)
         relaunched.conflictVersionsProvider = { _ in [typo] }
         relaunched.otherVersionsRemover = { _ in }
 
@@ -781,7 +844,8 @@ final class ConflictSweepTests: XCTestCase {
     }
 
     /// The same, when the sweep was skipped: the window adopts the older body
-    /// and the user types on from it.
+    /// and the user types on from it. The newer save then exists only in the
+    /// conflict version, because the older body took its line out.
     func testANewerOwnSaveIsKeptAfterTheWindowAdoptsAnOlderOwnBody() throws {
         var note = savedNote("A")
         let url = try fileURL()
@@ -789,13 +853,15 @@ final class ConflictSweepTests: XCTestCase {
         note.updatedAt = Date()
         store.save(note)
         let newer = try version(of: note, content: "A\nnew line")
+        let clock = ManualClock()
+        let scheduler = TestScheduler(clock: clock)
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
         try rawNote(id: note.id, content: "A", updated: "2026-12-01T00:00:00Z")
             .write(to: url, atomically: true, encoding: .utf8)
-        XCTAssertEqual(try XCTUnwrap(store.loadNote(id: note.id)).content
-            .trimmingCharacters(in: .whitespacesAndNewlines), "A")
-        note.content = "A!"
-        note.updatedAt = Date()
-        store.save(note)
+        document.storeDidChange()
+        XCTAssertEqual(document.buffer.content.trimmingCharacters(in: .whitespacesAndNewlines), "A")
+        document.edit { $0.content = "A!" }
+        scheduler.advance(by: 1)
         store.conflictVersionsProvider = { _ in [newer] }
         store.otherVersionsRemover = { _ in }
 
@@ -814,7 +880,7 @@ final class ConflictSweepTests: XCTestCase {
         note.updatedAt = Date()
         store.save(note)
 
-        let second = NoteStore(rootURL: root, format: .markdown)
+        let second = NoteStore(rootURL: root)
         second.conflictVersionsProvider = { _ in [typo] }
         second.otherVersionsRemover = { _ in }
 

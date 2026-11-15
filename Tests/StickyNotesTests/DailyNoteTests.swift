@@ -379,4 +379,33 @@ final class DailyNoteTests: XCTestCase {
             .appendingPathComponent("NotThere-\(UUID().uuidString)", isDirectory: true)
         XCTAssertEqual(DailyNote.healDuplicates(in: missing, now: now, dispose: deleteInstead), 0)
     }
+
+    func testAHealedDuplicateIsWrittenOnlyOverTheBytesItWasMergedFrom() throws {
+        let dir = try makeVaultFolder()
+        try write("typed on the laptop", "2026-08-26.md", in: dir)
+        try write("typed on the desktop", "2026-08-26 2.md", in: dir)
+        var expected: Fingerprint?
+        let refuse: (URL, String, Fingerprint) -> Bool = { _, _, fingerprint in
+            expected = fingerprint
+            return false
+        }
+
+        XCTAssertEqual(DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead, write: refuse), 0)
+
+        XCTAssertEqual(expected, Fingerprint(of: Data("typed on the laptop".utf8)))
+        XCTAssertEqual(try read("2026-08-26.md", in: dir), "typed on the laptop")
+        XCTAssertTrue(exists("2026-08-26 2.md", in: dir), "the duplicate must stay while its text is nowhere else")
+    }
+
+    func testAHealedMergeIsRecordedAsThisMacsNewestWrite() throws {
+        let dir = try makeVaultFolder()
+        try write("typed on the laptop", "2026-08-26.md", in: dir)
+        try write("typed on the desktop", "2026-08-26 2.md", in: dir)
+
+        DailyNote.healDuplicates(in: dir, now: now, dispose: deleteInstead)
+
+        let merged = try read("2026-08-26.md", in: dir)
+        let key = NoteStore.lineageKey(dir.appendingPathComponent("2026-08-26.md"))
+        XCTAssertTrue(WriteLineage.isNewest(NoteStore.contentHash(body: merged), for: key))
+    }
 }

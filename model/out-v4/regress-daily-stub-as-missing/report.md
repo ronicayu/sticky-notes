@@ -1,0 +1,32 @@
+# DailyDocument
+
+TLC reached 61,416 states, more than the chart budget of 500, so the chart draws only the bug paths: 7 states and 5 arrows.
+The chart has 0 label warnings.
+The chart does not draw 3 steps that stay in one chart state.
+The step the clock passes midnight changes This Mac and iCloud at the same time.
+
+## DailyTextKept breaks
+The shortest path has 7 steps:
+0. This Mac Showing today's note (day 1), iCloud Day 1, no day-2 file
+1. the clock passes midnight: This Mac Showing yesterday's note, iCloud No file for today in iCloud
+2. the other Mac creates today's file offline: This Mac Showing yesterday's note, iCloud The other Mac created today's file offline
+3. iCloud uploads the other Mac's new file: This Mac Showing yesterday's note, iCloud One file for today in iCloud
+4. iCloud downloads the newer file to this Mac: This Mac Showing yesterday's note, iCloud One file for today in iCloud
+5. iCloud turns the synced file into a placeholder: This Mac Showing yesterday's note, iCloud One file for today in iCloud
+6. the midnight timer or wake switches to today: This Mac Today's note open, iCloud One file for today in iCloud
+7. iCloud uploads this Mac's file: This Mac Today's note open, iCloud One file for today in iCloud
+
+## Rules that hold
+TypeOK, ClockNeverCreates, DuplicateOnlyFromTwoPeople, RightDay, NoSpuriousConflictBlock, NoRepeatedText, WindowMatchesDisk, ConflictVersionsMerged, NoDeadlock
+
+## Label warnings
+No label has a warning.
+
+## Arrows
+| Label | From | To | TLA+ actions | Steps |
+| --- | --- | --- | --- | --- |
+| the clock passes midnight | This Mac: Showing today's note (day 1) | This Mac: Showing yesterday's note | Midnight | 1 |
+| the midnight timer or wake switches to today [when One file for today in iCloud] | This Mac: Showing yesterday's note | This Mac: Today's note open | Rollover | 1 |
+| the clock passes midnight | iCloud: Day 1, no day-2 file | iCloud: No file for today in iCloud | Midnight | 1 |
+| the other Mac creates today's file offline | iCloud: No file for today in iCloud | iCloud: The other Mac created today's file offline | BCreatesOffline | 1 |
+| iCloud uploads the other Mac's new file | iCloud: The other Mac created today's file offline | iCloud: One file for today in iCloud | BUploads | 1 |

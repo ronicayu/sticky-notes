@@ -4,21 +4,21 @@ import XCTest
 
 /// Renders the notes panel offscreen so layout regressions in the new filter
 /// row, empty state, and result rows show up as more than a passing assertion.
-final class NotesPanelSnapshotTests: XCTestCase {
+@MainActor final class NotesPanelSnapshotTests: XCTestCase {
     private var root: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("NotesPanelSnapshot-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: root)
     }
 
     private func seededStore() -> NoteStore {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let samples: [(String, String, [String], NoteColor, TimeInterval)] = [
             ("Groceries", "- [ ] oat milk\n- [x] eggs", ["home"], .yellow, -120),
             ("Q3 planning", "Ship the search release first.", ["work"], .blue, -3600),
@@ -29,8 +29,7 @@ final class NotesPanelSnapshotTests: XCTestCase {
         for sample in samples {
             store.save(Note(
                 id: UUID(), title: sample.0, content: sample.1,
-                positionX: 0, positionY: 0, width: 240, height: 200,
-                collapsed: false, color: sample.3, labels: sample.2,
+                width: 240, height: 200, color: sample.3, labels: sample.2,
                 createdAt: Date().addingTimeInterval(sample.4),
                 updatedAt: Date().addingTimeInterval(sample.4)
             ))

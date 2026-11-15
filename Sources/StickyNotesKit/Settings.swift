@@ -1,10 +1,25 @@
 import CoreGraphics
 import Foundation
 
+/// Every user preference, over an injected `UserDefaults` so a test can use a
+/// throwaway suite. The two folder roots are injected too: they are where this
+/// machine keeps per-Mac files and where iCloud Drive lives, and a test must
+/// never reach the real ones.
 final class Settings {
-    static let shared = Settings()
+    let defaults: UserDefaults
+    let localRootURL: URL
+    let iCloudRootURL: URL?
 
-    private let defaults = UserDefaults.standard
+    init(
+        defaults: UserDefaults,
+        localRootURL: URL = Settings.systemLocalRootURL,
+        iCloudRootURL: URL? = Settings.systemICloudRootURL
+    ) {
+        self.defaults = defaults
+        self.localRootURL = localRootURL
+        self.iCloudRootURL = iCloudRootURL
+    }
+
     private enum Keys {
         static let useICloud = "useICloud"
         static let launchAtLogin = "launchAtLogin"
@@ -15,8 +30,6 @@ final class Settings {
         static let hiddenLabels = "hiddenLabels"
         static let bodyFontSize = "bodyFontSize"
     }
-
-    private init() {}
 
     var useICloud: Bool {
         get { defaults.bool(forKey: Keys.useICloud) }
@@ -109,35 +122,75 @@ final class Settings {
         set { defaults.set(newValue.rawValue, forKey: Keys.defaultNoteColor) }
     }
 
-    static var iCloudAvailable: Bool {
+    static var systemICloudRootURL: URL? {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
+    }
+
+    static var systemLocalRootURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    }
+
+    var iCloudAvailable: Bool {
         guard let url = iCloudRootURL else { return false }
         return FileManager.default.fileExists(atPath: url.path)
     }
 
-    static var iCloudRootURL: URL? {
-        let fm = FileManager.default
-        guard let home = fm.homeDirectoryForCurrentUser as URL? else { return nil }
-        return home
-            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
+    /// Where notes live in the local, non-synced mode.
+    var localStorageRoot: URL {
+        localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
     }
 
-    static var localRootURL: URL {
-        let fm = FileManager.default
-        return fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    /// Where this Mac keeps the files that are its own and must not sync: the
+    /// local storage folder, which only this app uses. The store reads only the
+    /// `notes`, `archive`, `.trash` and `attachments` folders under a root, never
+    /// the files beside them, and a vault or iCloud root is a different folder, so
+    /// nothing here reaches another Mac.
+    var machineFilesFolder: URL { localStorageRoot }
+
+    /// Where this Mac keeps the layout of its note windows.
+    var layoutURL: URL {
+        machineFilesFolder.appendingPathComponent("layout.json")
     }
 
-    static var preferredStorageRoot: URL {
-        if let vault = shared.obsidianVaultPath {
+    /// Where this Mac keeps what it wrote to each note file, so that an older copy
+    /// of its own text that turns up after a relaunch is still recognised.
+    var writeLineageURL: URL {
+        machineFilesFolder.appendingPathComponent("write-lineage.json")
+    }
+
+    /// Where a storage switch remembers what each root held when it was left.
+    var switchRecordsURL: URL {
+        machineFilesFolder.appendingPathComponent("storage-switch-records.json")
+    }
+
+    /// An earlier build wrote the two machine files straight into the Application
+    /// Support folder that every app shares. Move each one into the app's own
+    /// folder, once, if it is ours (it reads as this app's format); anything else
+    /// found there is left alone.
+    func migrateMachineFiles() {
+        let fm = FileManager.default
+        func move(_ name: String, to destination: URL, isOurs: (Data) -> Bool) {
+            let old = localRootURL.appendingPathComponent(name)
+            guard !fm.fileExists(atPath: destination.path), let data = try? Data(contentsOf: old), isOurs(data) else { return }
+            try? fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            guard (try? data.write(to: destination, options: .atomic)) != nil else { return }
+            try? fm.removeItem(at: old)
+        }
+        move("layout.json", to: layoutURL, isOurs: DeviceLayoutStore.isLayoutFile)
+        move("storage-switch-records.json", to: switchRecordsURL) {
+            (try? JSONDecoder().decode([String: [String: String]].self, from: $0)) != nil
+        }
+    }
+
+    var preferredStorageRoot: URL {
+        if let vault = obsidianVaultPath {
             return URL(fileURLWithPath: vault, isDirectory: true)
                 .appendingPathComponent("StickyNotes", isDirectory: true)
         }
-        if shared.useICloud, let icloud = iCloudRootURL, FileManager.default.fileExists(atPath: icloud.path) {
+        if useICloud, let icloud = iCloudRootURL, FileManager.default.fileExists(atPath: icloud.path) {
             return icloud.appendingPathComponent("StickyNotes", isDirectory: true)
         }
-        return localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
-    }
-
-    static var preferredFormat: StorageFormat {
-        shared.obsidianVaultPath != nil ? .markdown : .json
+        return localStorageRoot
     }
 }

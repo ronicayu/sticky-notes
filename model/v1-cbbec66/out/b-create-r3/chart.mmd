@@ -1,0 +1,80 @@
+---
+title: "Today's daily note on two Macs across midnight"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: Breaks DailyTextKept in some cases
+    lg1: Path to the DailyTextKept bug
+    state "Terms" as terms {
+      direction TB
+      state " " as tc0 {
+        direction LR
+        tm0: person = The owner, at whichever Mac they are using.
+        tm1: daily note = The vault file for today's date, shown in its own floating window.
+        tm2: save timer = The pause after typing before the daily note is written.
+        tm3: file watcher = The part of the app that notices the daily folder changed.
+      }
+      state " " as tc1 {
+        direction LR
+        tm4: numbered duplicate = '#60;date> 2.md', which iCloud makes when two Macs each create the same new file.
+        tm5: outside edit = A change to the file from the other Mac or Obsidian.
+        tm6: evicts = iCloud replaces the local file with a placeholder until it is read again.
+        tm7: five-second retry = The reload the app schedules while it waits for a download.
+      }
+    }
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  state "At the same time" as all {
+    state "Mac A" as r0 {
+      s0: Showing today's note (day 1)
+      s1: Showing yesterday's note
+      s2: Today's note shown, file not created
+      s3: Typing, save pending
+      s4: Today's note open
+      [*] --> s0
+      s0 --> s1: the clock passes midnight
+      s1 --> s2: the midnight timer or wake switches to today
+      s2 --> s3: the person types in the daily note
+      s3 --> s4: the save timer writes the daily note [when Mac B is Today's note open and iCloud is One file for today in iCloud]
+    }
+    --
+    state "Mac B" as r1 {
+      s5: Showing today's note (day 1)
+      s6: Showing yesterday's note
+      s7: Today's note shown, file not created
+      s8: Today's note open
+      s9: Typing, save pending
+      [*] --> s5
+      s5 --> s6: the clock passes midnight
+      s6 --> s7: the midnight timer or wake switches to today [when Mac A is Typing, save pending]
+      s7 --> s8: the person opens today's note from the menu
+      s8 --> s9: the person types in the daily note [when Mac A is Typing, save pending and iCloud is No file for today in iCloud]
+      s9 --> s8: the save timer writes the daily note [when iCloud is One file for today in iCloud]
+    }
+    --
+    state "iCloud" as r2 {
+      s10: Day 1, no day-2 file
+      s11: No file for today in iCloud
+      s12: One file for today in iCloud
+      [*] --> s10
+      s10 --> s11: the clock passes midnight
+      s11 --> s12: iCloud uploads the local change [when Mac A is Typing, save pending and Mac B is Typing, save pending]
+    }
+  }
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 mayBreak
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 bugPath
+  class s9 bugPath
+  class s10 bugPath
+  class s11 bugPath
+  class s12 bugPath

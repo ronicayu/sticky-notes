@@ -1,0 +1,112 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 0 and seed -1458199001774635133 with 1 worker on 18 cores with 30688MB heap and 64MB offheap memory [pid: 60306] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/ronica/projects/sticky-notes/model/NotePersistence.tla
+Parsing file /private/var/folders/sv/kh4_0kxd3ll5ckdnxsc7h5rm0000gn/T/statechart-43l30d/statechart-LyNb2z/tmp-verdict-1/FiniteSets.tla
+Parsing file /private/var/folders/sv/kh4_0kxd3ll5ckdnxsc7h5rm0000gn/T/statechart-43l30d/statechart-LyNb2z/tmp-verdict-1/Naturals.tla
+Parsing file /private/var/folders/sv/kh4_0kxd3ll5ckdnxsc7h5rm0000gn/T/statechart-43l30d/statechart-LyNb2z/tmp-verdict-1/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module NotePersistence
+Starting... (2026-11-15 08:02:49)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-15 08:02:49.
+Error: Invariant TypedTextKept is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+s = [ app |-> "running",
+  win |-> "open",
+  loc |-> {"active"},
+  listed |-> TRUE,
+  disk |-> {},
+  diskOwn |-> TRUE,
+  buf |-> {},
+  hasPersisted |-> FALSE,
+  persisted |-> {},
+  armed |-> FALSE,
+  hasPending |-> FALSE,
+  pending |-> {},
+  unseen |-> TRUE,
+  focus |-> "typing",
+  touched |-> FALSE,
+  typed |-> {},
+  rewrites |-> {},
+  extRemoved |-> {},
+  hasConflict |-> FALSE,
+  conflict |-> {},
+  conflictKind |-> "none",
+  hasPrevOwn |-> FALSE,
+  prevOwn |-> {},
+  spurious |-> FALSE,
+  purgedEarly |-> FALSE,
+  legitGone |-> FALSE,
+  trashAge |-> "fresh",
+  mtimeOld |-> FALSE ]
+
+State 2: <Type line 159, col 3 to line 164, col 58 of module NotePersistence>
+s = [ app |-> "running",
+  win |-> "open",
+  loc |-> {"active"},
+  listed |-> TRUE,
+  disk |-> {},
+  diskOwn |-> TRUE,
+  buf |-> {"l1"},
+  hasPersisted |-> FALSE,
+  persisted |-> {},
+  armed |-> TRUE,
+  hasPending |-> FALSE,
+  pending |-> {},
+  unseen |-> TRUE,
+  focus |-> "typing",
+  touched |-> TRUE,
+  typed |-> {"l1"},
+  rewrites |-> {},
+  extRemoved |-> {},
+  hasConflict |-> FALSE,
+  conflict |-> {},
+  conflictKind |-> "none",
+  hasPrevOwn |-> FALSE,
+  prevOwn |-> {},
+  spurious |-> FALSE,
+  purgedEarly |-> FALSE,
+  legitGone |-> FALSE,
+  trashAge |-> "fresh",
+  mtimeOld |-> FALSE ]
+
+State 3: <CloseNote line 211, col 3 to line 222, col 44 of module NotePersistence>
+s = [ app |-> "running",
+  win |-> "closed",
+  loc |-> {"archive"},
+  listed |-> TRUE,
+  disk |-> {},
+  diskOwn |-> TRUE,
+  buf |-> {},
+  hasPersisted |-> FALSE,
+  persisted |-> {},
+  armed |-> FALSE,
+  hasPending |-> FALSE,
+  pending |-> {},
+  unseen |-> TRUE,
+  focus |-> "away",
+  touched |-> FALSE,
+  typed |-> {"l1"},
+  rewrites |-> {},
+  extRemoved |-> {},
+  hasConflict |-> FALSE,
+  conflict |-> {},
+  conflictKind |-> "none",
+  hasPrevOwn |-> FALSE,
+  prevOwn |-> {},
+  spurious |-> FALSE,
+  purgedEarly |-> FALSE,
+  legitGone |-> FALSE,
+  trashAge |-> "fresh",
+  mtimeOld |-> FALSE ]
+
+24 states generated, 15 distinct states found, 12 states left on queue.
+The depth of the complete state graph search is 3.
+The average outdegree of the complete state graph is 7 (minimum is 7, the maximum 7 and the 95th percentile is 7).
+Finished in 00s at (2026-11-15 08:02:49)
+

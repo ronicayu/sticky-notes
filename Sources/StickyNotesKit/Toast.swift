@@ -30,12 +30,41 @@ struct Toast {
         return trimmed.isEmpty ? "Note archived" : "Archived “\(shorten(trimmed))”"
     }
 
+    static func labelRemovedMessage(label: String) -> String { "Removed #\(label)" }
+
     static func hiddenMessage(count: Int, label: String?) -> String {
         let noun = count == 1 ? "note" : "notes"
         if let label = label {
             return "Hid \(count) #\(label) \(noun)"
         }
         return "Hid \(count) \(noun)"
+    }
+
+    /// One calm sentence for what a storage switch carried over, or nil when
+    /// there was nothing to carry. What went wrong is said last and plainly.
+    static func storageMovedMessage(_ report: StorageSwitchReport) -> String? {
+        func count(_ n: Int, _ singular: String, _ plural: String) -> String {
+            "\(n) \(n == 1 ? singular : plural)"
+        }
+        var moved: [String] = []
+        if report.notes > 0 { moved.append(count(report.notes, "note", "notes")) }
+        if report.archived > 0 { moved.append("\(report.archived) archived") }
+        if report.trashed > 0 { moved.append("\(report.trashed) in Trash") }
+        if report.attachments > 0 { moved.append(count(report.attachments, "attachment", "attachments")) }
+
+        var message = ""
+        if !moved.isEmpty {
+            message = "Moved " + moved.dropLast().joined(separator: ", ")
+                + (moved.count > 1 ? " and " : "") + (moved.last ?? "")
+            if report.merged > 0 { message += "; \(report.merged) merged" }
+        }
+        var problems: [String] = []
+        if report.couldNotCopy > 0 { problems.append("\(report.couldNotCopy) could not be copied") }
+        if report.notReadable > 0 { problems.append("\(report.notReadable) not downloaded yet") }
+        if !problems.isEmpty {
+            message += (message.isEmpty ? "" : "; ") + problems.joined(separator: ", ")
+        }
+        return message.isEmpty ? nil : message
     }
 
     /// Keep a long first line from pushing the undo button off the toast.
@@ -50,6 +79,7 @@ struct Toast {
 /// Only one is ever on screen: a second action replaces the first, because a
 /// stack of undo offers is noise and only the most recent one is the thing
 /// the user is reacting to.
+@MainActor
 final class ToastController {
     private var panel: NSPanel?
     private var current: Toast?

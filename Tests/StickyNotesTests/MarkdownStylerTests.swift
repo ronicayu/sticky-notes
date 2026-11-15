@@ -2,7 +2,7 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-final class MarkdownStylerTests: XCTestCase {
+@MainActor final class MarkdownStylerTests: XCTestCase {
 
     // MARK: - Helpers
 
@@ -258,10 +258,88 @@ final class MarkdownStylerTests: XCTestCase {
         let storage = NSTextStorage(string: source)
         XCTAssertGreaterThan(storage.length, 40_000, "not a big enough sample to be meaningful")
 
-        let start = Date()
-        MarkdownStyler.apply(to: storage)
-        let elapsed = Date().timeIntervalSince(start)
+        let elapsed = bestTime(runs: 3) { MarkdownStyler.apply(to: storage) }
         XCTAssertLessThan(elapsed, 0.5, "styling got quadratic again: \(elapsed)s")
+    }
+
+    /// A character typed in the middle of a long note restyles a few paragraphs,
+    /// not the whole note. The bound compares with a full restyle on the same
+    /// machine, so it holds on a slow one too.
+    func testRestylingOneEditInALargeNoteCostsAFractionOfRestylingItAll() {
+        let source = (0..<400).map { i in
+            "## Section \(i)\n\nSome **bold** and *italic* with a [link](https://example.com) and `code`.\n\n- [ ] task \(i)\n"
+        }.joined(separator: "\n")
+        let storage = NSTextStorage(string: source)
+        let restyler = MarkdownRestyler()
+        restyler.restyleAll(storage)
+        let full = bestTime(runs: 3) { MarkdownStyler.apply(to: storage) }
+        restyler.restyleAll(storage)
+
+        let spot = (source as NSString).range(of: "task 200").location
+        var location = spot
+        let incremental = bestTime(runs: 5) {
+            storage.replaceCharacters(in: NSRange(location: location, length: 0), with: "x")
+            restyler.restyle(storage, edited: NSRange(location: location, length: 1), changeInLength: 1)
+            location += 1
+        }
+        XCTAssertEqual(restyler.fullCount, 2, "only the two explicit full restyles may have run")
+        XCTAssertLessThan(incremental, full / 2, "one edit took \(incremental)s against \(full)s for everything")
+    }
+
+    /// The URL detector, given a whole note, reported no links at all when one
+    /// address in it had a backtick in it.
+    func testOneOddAddressDoesNotStopOtherLinksFromBeingFound() {
+        let source = "see https://example.com`/a here\n\nand https://example.org/fine too"
+        let storage = styled(source)
+        let location = (source as NSString).range(of: "https://example.org/fine").location
+        XCTAssertEqual(
+            storage.attribute(.link, at: location, effectiveRange: nil) as? URL,
+            URL(string: "https://example.org/fine"))
+    }
+
+    /// The same node, found where it really is: styled, and with exactly its
+    /// delimiters hidden and never a letter of the text.
+    func testAListContinuationLineKeepsItsEmphasisAndHidesOnlyTheDelimiters() {
+        for source in ["- [x] a done task\nA **bold** word and *italic*",
+                       "- 项目二 **加粗**\n全部 **粗体**与*斜体*和`代码` 完"] {
+            let storage = styled(source)
+            MarkdownStyler.updateMarkerVisibility(in: storage, selection: NSRange(location: 0, length: 0))
+            let ns = source as NSString
+            var hidden: [String] = []
+            storage.enumerateAttribute(.mdHidden, in: fullRange(storage)) { value, range, _ in
+                if value != nil { hidden.append(ns.substring(with: range)) }
+            }
+            XCTAssertFalse(hidden.isEmpty, source)
+            for piece in hidden {
+                XCTAssertTrue(piece.allSatisfy { "*`".contains($0) }, "hid “\(piece)” in \(source.debugDescription)")
+            }
+            let bold = source.contains("bold") ? "bold" : "粗体"
+            let italic = source.contains("italic") ? "italic" : "斜体"
+            if source.contains("bold") {
+                XCTAssertTrue(traits(storage, at: ns.range(of: bold).location).contains(.bold), "\(bold) is not bold")
+                XCTAssertTrue(traits(storage, at: ns.range(of: italic).location).contains(.italic), "\(italic) is not italic")
+            } else {
+                // The system font has no bold or italic for Chinese, so look for the marker scope.
+                for (text, scope) in [("**粗体**", "**粗体**"), ("*斜体*", "*斜体*")] {
+                    let range = ns.range(of: text)
+                    let found = storage.attribute(.mdMarkerScope, at: range.location, effectiveRange: nil) as? MarkerScope
+                    XCTAssertEqual(found?.range, ns.range(of: scope), "\(text) was not found where it is")
+                }
+            }
+        }
+    }
+
+    /// swift-markdown places inline nodes on the continuation lines of a list item
+    /// too far right, by the width of the item's marker. That must not style the
+    /// paragraph that follows.
+    func testStylingOnAListContinuationLineDoesNotReachTheNextParagraph() {
+        let source = "- [x] a done task\nA **bold** word and *italic*\n\nnext paragraph stays plain"
+        let storage = styled(source)
+        let next = (source as NSString).range(of: "next paragraph stays plain")
+        storage.enumerateAttribute(.font, in: next) { value, range, _ in
+            XCTAssertEqual((value as? NSFont)?.fontDescriptor.symbolicTraits.intersection([.bold, .italic]), [],
+                           "styled the text at \(range)")
+        }
     }
 
     func testALongMixedDocumentStylesWithoutCrashing() {

@@ -23,7 +23,7 @@ final class NoteTests: XCTestCase {
 
         XCTAssertEqual(note.content, "hello")
         XCTAssertEqual(note.title, "", "missing title should default to empty")
-        XCTAssertFalse(note.collapsed)
+        XCTAssertEqual(note.legacyPlacement, LegacyPlacement(x: 10, y: 20, collapsed: false))
         XCTAssertEqual(note.color, .yellow, "missing color should default to yellow")
         XCTAssertEqual(note.labels, [])
     }
@@ -60,13 +60,14 @@ final class NoteTests: XCTestCase {
     }
 
     func testEncodeDecodeRoundTripPreservesEveryField() throws {
-        let note = Note(
+        var note = Note(
             id: UUID(), title: "Title", content: "Body\nwith lines",
-            positionX: 1.5, positionY: 2.5, width: 300, height: 400,
-            collapsed: true, color: .purple, labels: ["a", "b"],
+            width: 300, height: 400,
+            color: .purple, labels: ["a", "b"],
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
         )
+        note.legacyPlacement = LegacyPlacement(x: 1.5, y: 2.5, collapsed: true)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let decoder = JSONDecoder()
@@ -76,7 +77,9 @@ final class NoteTests: XCTestCase {
         XCTAssertEqual(back.id, note.id)
         XCTAssertEqual(back.title, note.title)
         XCTAssertEqual(back.content, note.content)
-        XCTAssertEqual(back.collapsed, note.collapsed)
+        XCTAssertEqual(back.width, note.width)
+        XCTAssertEqual(back.height, note.height)
+        XCTAssertEqual(back.legacyPlacement, note.legacyPlacement)
         XCTAssertEqual(back.color, note.color)
         XCTAssertEqual(back.labels, note.labels)
     }
@@ -89,14 +92,11 @@ final class NoteTests: XCTestCase {
         let note = Note.makeNew(frame: NoteTests.sampleFrame)
         XCTAssertTrue(note.content.isEmpty)
         XCTAssertTrue(note.title.isEmpty)
-        XCTAssertFalse(note.collapsed)
         XCTAssertTrue(note.labels.isEmpty)
     }
 
     func testNewNoteUsesTheFrameItWasGiven() {
         let note = Note.makeNew(frame: NoteTests.sampleFrame)
-        XCTAssertEqual(note.positionX, 100)
-        XCTAssertEqual(note.positionY, 200)
         XCTAssertEqual(note.width, 240)
         XCTAssertEqual(note.height, 200)
     }
@@ -109,15 +109,15 @@ final class NoteTests: XCTestCase {
 
     // MARK: - Colors
 
-    func testEveryColorHasDistinctBodyAndHeaderHexValues() {
-        let bodies = NoteColor.allCases.map(\.bodyHex)
+    @MainActor func testEveryColorHasDistinctBodyAndHeaderHexValues() {
+        let bodies = NoteColor.allCases.map { $0.bodyHex }
         XCTAssertEqual(Set(bodies).count, bodies.count, "two colors share a body hex")
 
-        let headers = NoteColor.allCases.map(\.headerHex)
+        let headers = NoteColor.allCases.map { $0.headerHex }
         XCTAssertEqual(Set(headers).count, headers.count, "two colors share a header hex")
     }
 
-    func testEveryColorHexIsWellFormed() {
+    @MainActor func testEveryColorHexIsWellFormed() {
         for color in NoteColor.allCases {
             for hex in [color.bodyHex, color.headerHex] {
                 XCTAssertEqual(hex.count, 7, "\(color) hex \(hex) is not #RRGGBB")

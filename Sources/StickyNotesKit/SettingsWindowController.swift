@@ -7,8 +7,9 @@ import KeyboardShortcuts
 ///
 /// Side effects (re-pointing the NoteStore at a new root, restarting
 /// the iCloud prefetcher, etc.) belong to the `SettingsCoordinator`
-/// — this controller only mutates `Settings.shared` and tells the
+/// — this controller only mutates the `Settings` it is given and tells the
 /// coordinator what changed.
+@MainActor
 protocol SettingsCoordinator: AnyObject {
     func applyStorageMode(_ mode: SettingsWindowController.StorageMode)
     func applyDailyPattern(_ pattern: String?)
@@ -17,6 +18,7 @@ protocol SettingsCoordinator: AnyObject {
     func openTodaysDailyNote()
 }
 
+@MainActor
 final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
 
     enum StorageMode: Equatable {
@@ -52,13 +54,15 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     }
 
     private weak var coordinator: SettingsCoordinator?
+    private let settings: Settings
 
     private let container = NSView()
     private var paneViews: [Pane: NSView] = [:]
     private var current: Pane = .general
 
-    init(coordinator: SettingsCoordinator) {
+    init(coordinator: SettingsCoordinator, settings: Settings) {
         self.coordinator = coordinator
+        self.settings = settings
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
@@ -132,11 +136,11 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSW
     }
 
     private func buildPanes() {
-        paneViews[.general] = GeneralPaneView()
-        paneViews[.storage] = StoragePaneView(coordinator: coordinator) { [weak self] in
+        paneViews[.general] = GeneralPaneView(settings: settings)
+        paneViews[.storage] = StoragePaneView(coordinator: coordinator, settings: settings) { [weak self] in
             self?.refreshDailyPaneState()
         }
-        paneViews[.daily]   = DailyNotePaneView(coordinator: coordinator)
+        paneViews[.daily]   = DailyNotePaneView(coordinator: coordinator, settings: settings)
     }
 
     private func refreshDailyPaneState() {
@@ -193,8 +197,10 @@ private final class GeneralPaneView: NSView {
                                         target: nil, action: nil)
     private let colorRow = NSStackView()
     private var colorButtons: [NoteColor: NSButton] = [:]
+    private let settings: Settings
 
-    init() {
+    init(settings: Settings) {
+        self.settings = settings
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         build()
@@ -219,6 +225,9 @@ private final class GeneralPaneView: NSView {
             swatch.isBordered = false
             swatch.imagePosition = .imageOnly
             swatch.toolTip = color.displayName
+            swatch.setAccessibilityLabel(color.displayName)
+            swatch.setAccessibilityRole(.radioButton)
+            swatch.setAccessibilityHelp("Color for new notes")
             swatch.identifier = NSUserInterfaceItemIdentifier(color.rawValue)
             swatch.translatesAutoresizingMaskIntoConstraints = false
             swatch.widthAnchor.constraint(equalToConstant: 28).isActive = true
@@ -228,21 +237,11 @@ private final class GeneralPaneView: NSView {
         }
 
         let shortcutsLabel = SectionLabel(text: "Keyboard shortcuts")
-        let newNoteRow = recorderRow(title: "New note",
-                                     name: .newNote,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .newNote))
-        let findRow    = recorderRow(title: "Find note",
-                                     name: .quickSwitcher,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .quickSwitcher))
-        let clipRow    = recorderRow(title: "New note from clipboard",
-                                     name: .newFromClipboard,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .newFromClipboard))
-        let panelRow   = recorderRow(title: "Show notes panel",
-                                     name: .notesPanel,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .notesPanel))
-        let hideRow    = recorderRow(title: "Hide all notes",
-                                     name: .hideAll,
-                                     recorder: KeyboardShortcuts.RecorderCocoa(for: .hideAll))
+        let newNoteRow = recorderRow(title: "New note", name: .newNote)
+        let findRow    = recorderRow(title: "Find note", name: .quickSwitcher)
+        let clipRow    = recorderRow(title: "New note from clipboard", name: .newFromClipboard)
+        let panelRow   = recorderRow(title: "Show notes panel", name: .notesPanel)
+        let hideRow    = recorderRow(title: "Hide all notes", name: .hideAll)
 
         let stack = NSStackView(views: [
             launchToggle,
@@ -270,29 +269,22 @@ private final class GeneralPaneView: NSView {
 
     /// A recorder row, plus a line naming what else commonly uses the chord.
     /// The hint updates as the shortcut is re-recorded.
-    private func recorderRow(title: String,
-                             name: KeyboardShortcuts.Name,
-                             recorder: KeyboardShortcuts.RecorderCocoa) -> NSView {
-        let row = recorderRow(title: title, recorder: recorder)
-
+    private func recorderRow(title: String, name: KeyboardShortcuts.Name) -> NSView {
         let hint = NSTextField(labelWithString: "")
         hint.translatesAutoresizingMaskIntoConstraints = false
         hint.font = NSFont.systemFont(ofSize: 10)
         hint.textColor = .tertiaryLabelColor
 
-        func refreshHint() {
+        let refreshHint: @MainActor @Sendable () -> Void = { [weak hint] in
             let note = HotkeyAdvice.conflictNote(for: HotkeyAdvice.describe(name))
-            hint.stringValue = note ?? ""
-            hint.isHidden = note == nil
+            hint?.stringValue = note ?? ""
+            hint?.isHidden = note == nil
         }
         refreshHint()
-        // The recorder doesn't expose a change hook, so refresh when the
-        // window comes back to the front — which is when a rebind is done.
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didBecomeKeyNotification,
-            object: nil,
-            queue: .main
-        ) { _ in refreshHint() }
+        let recorder = KeyboardShortcuts.RecorderCocoa(for: name) { _ in
+            MainActor.assumeIsolated { refreshHint() }
+        }
+        let row = recorderRow(title: title, recorder: recorder)
 
         let stack = NSStackView(views: [row, hint])
         stack.orientation = .vertical
@@ -328,9 +320,10 @@ private final class GeneralPaneView: NSView {
             ? nil
             : "Available only when launched from the bundled .app"
 
-        let current = Settings.shared.defaultNoteColor
+        let current = settings.defaultNoteColor
         for (color, button) in colorButtons {
             button.image = Self.swatchImage(for: color, size: 22, selected: color == current)
+            button.setAccessibilityValue(color == current ? 1 : 0)
         }
     }
 
@@ -367,7 +360,7 @@ private final class GeneralPaneView: NSView {
     @objc private func pickColor(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue,
               let color = NoteColor(rawValue: raw) else { return }
-        Settings.shared.defaultNoteColor = color
+        settings.defaultNoteColor = color
         refresh()
     }
 
@@ -419,8 +412,11 @@ private final class StoragePaneView: NSView {
     private let revealButton = NSButton(title: "Reveal in Finder",
                                         target: nil, action: nil)
 
-    init(coordinator: SettingsCoordinator?, onChange: @escaping () -> Void) {
+    private let settings: Settings
+
+    init(coordinator: SettingsCoordinator?, settings: Settings, onChange: @escaping () -> Void) {
         self.coordinator = coordinator
+        self.settings = settings
         self.onChange = onChange
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -543,9 +539,9 @@ private final class StoragePaneView: NSView {
     }
 
     func refresh() {
-        let vaultPath = Settings.shared.obsidianVaultPath
-        let useICloud = Settings.shared.useICloud
-        let icloudOK  = Settings.iCloudAvailable
+        let vaultPath = settings.obsidianVaultPath
+        let useICloud = settings.useICloud
+        let icloudOK  = settings.iCloudAvailable
 
         if vaultPath != nil {
             vaultRadio.state = .on
@@ -569,7 +565,7 @@ private final class StoragePaneView: NSView {
         vaultPathField.stringValue = vaultPath ?? ""
         chooseVaultButton.title = vaultPath == nil ? "Choose…" : "Change…"
 
-        footerLabel.stringValue = "Current: \(Settings.preferredStorageRoot.path)"
+        footerLabel.stringValue = "Current: \(settings.preferredStorageRoot.path)"
     }
 
     @objc private func radioChanged(_ sender: NSButton) {
@@ -580,7 +576,7 @@ private final class StoragePaneView: NSView {
         case "icloud":
             coordinator?.applyStorageMode(.iCloud)
         case "vault":
-            if let existing = Settings.shared.obsidianVaultPath {
+            if let existing = settings.obsidianVaultPath {
                 coordinator?.applyStorageMode(.vault(path: existing))
             } else {
                 presentVaultPicker()
@@ -640,8 +636,11 @@ private final class DailyNotePaneView: NSView {
     private let openTodayButton = NSButton(title: "Open Today's Note",
                                            target: nil, action: nil)
 
-    init(coordinator: SettingsCoordinator?) {
+    private let settings: Settings
+
+    init(coordinator: SettingsCoordinator?, settings: Settings) {
         self.coordinator = coordinator
+        self.settings = settings
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         build()
@@ -751,20 +750,20 @@ private final class DailyNotePaneView: NSView {
     }
 
     func refresh() {
-        let vaultActive = Settings.shared.obsidianVaultPath != nil
+        let vaultActive = settings.obsidianVaultPath != nil
 
         unavailableLabel.isHidden = vaultActive
         formStack.isHidden = !vaultActive
 
         guard vaultActive else { return }
 
-        let pattern = Settings.shared.dailyNotesPattern ?? ""
+        let pattern = settings.dailyNotesPattern ?? ""
         if patternField.stringValue != pattern {
             patternField.stringValue = pattern
         }
         updatePreview()
 
-        if let path = Settings.shared.dailyTemplatePath {
+        if let path = settings.dailyTemplatePath {
             templateField.stringValue = path
             clearTemplateButton.isEnabled = true
         } else {
@@ -795,7 +794,7 @@ private final class DailyNotePaneView: NSView {
     }
 
     @objc private func chooseTemplate() {
-        guard let vault = Settings.shared.obsidianVaultPath else { return }
+        guard let vault = settings.obsidianVaultPath else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose Daily Note Template"
         panel.message = "Pick the markdown template applied when today's daily note doesn't exist yet."

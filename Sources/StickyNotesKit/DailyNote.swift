@@ -106,9 +106,9 @@ enum DailyNote {
 
     /// Absolute path of the daily note for `date`. Returns nil if the vault
     /// or pattern isn't configured.
-    static func resolvedURL(for date: Date = Date()) -> URL? {
-        guard let vault = Settings.shared.obsidianVaultPath,
-              let pattern = Settings.shared.dailyNotesPattern,
+    static func resolvedURL(for date: Date, settings: Settings) -> URL? {
+        guard let vault = settings.obsidianVaultPath,
+              let pattern = settings.dailyNotesPattern,
               !pattern.isEmpty else { return nil }
         let rendered = render(pattern, date: date)
         guard !rendered.isEmpty else { return nil }
@@ -120,33 +120,32 @@ enum DailyNote {
     /// Application Support rather than in the vault. Sharing one file over
     /// iCloud meant hiding the note on one Mac hid it on the other, and each
     /// machine's window position kept overwriting the other's.
-    static var stateURL: URL? {
-        Settings.localRootURL
-            .appendingPathComponent("StickyNotes", isDirectory: true)
-            .appendingPathComponent("_daily.json")
+    static func stateURL(settings: Settings) -> URL {
+        settings.localStorageRoot.appendingPathComponent("_daily.json")
     }
 
     /// Where the state used to live. Read once, to carry a user's existing
     /// window position over instead of resetting it.
-    private static var legacyStateURL: URL? {
-        guard let vault = Settings.shared.obsidianVaultPath else { return nil }
+    private static func legacyStateURL(settings: Settings) -> URL? {
+        guard let vault = settings.obsidianVaultPath else { return nil }
         return URL(fileURLWithPath: vault, isDirectory: true)
             .appendingPathComponent("StickyNotes/_daily.json")
     }
 
-    static func loadState() -> DailyNoteState {
-        if let url = stateURL,
-           let data = try? Data(contentsOf: url),
+    /// `dataless` guards the read of the old copy in the vault, which may be in iCloud only.
+    static func loadState(settings: Settings, dataless: DatalessGuard = DatalessGuard()) -> DailyNoteState {
+        let url = stateURL(settings: settings)
+        if let data = try? Data(contentsOf: url),
            let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) {
             return state
         }
-        if let legacy = legacyStateURL,
-           let data = try? Data(contentsOf: legacy),
+        if let legacy = legacyStateURL(settings: settings),
+           case let .bytes(data) = dataless.read(legacy),
            let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) {
-            saveState(state)
+            saveState(state, settings: settings)
             // Only drop the old copy once the new one is definitely written,
             // or a failed save would lose the window's position outright.
-            if let new = stateURL, FileManager.default.fileExists(atPath: new.path) {
+            if FileManager.default.fileExists(atPath: url.path) {
                 try? FileManager.default.removeItem(at: legacy)
             }
             return state
@@ -154,8 +153,8 @@ enum DailyNote {
         return DailyNoteState.defaultState
     }
 
-    static func saveState(_ state: DailyNoteState) {
-        guard let url = stateURL else { return }
+    static func saveState(_ state: DailyNoteState, settings: Settings) {
+        let url = stateURL(settings: settings)
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -164,6 +163,76 @@ enum DailyNote {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let data = try? encoder.encode(state) {
             try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    // MARK: - Listing today's note beside the stored notes
+
+    /// The id the switcher and the notes panel give today's note. It is not a
+    /// stored note and never reaches the store; the desk recognises it and opens
+    /// the daily window instead.
+    static let candidateID = UUID(uuidString: "DA117000-0000-0000-0000-000000000000")!
+
+    /// "Sun, Nov 15": the day, as the window's title and the list rows show it.
+    static func shortDate(_ day: Date) -> String {
+        shortDateFormatter.string(from: day)
+    }
+
+    private static let shortDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d"
+        f.locale = Locale.autoupdatingCurrent
+        return f
+    }()
+
+    /// Today's note as a value a list can rank and show. Titled "Today"; its
+    /// creation date is the day, for the row to print. Nothing about it is ever
+    /// written to the file.
+    static func candidate(body: String, day: Date, modified: Date?, color: NoteColor) -> Note {
+        Note(
+            id: candidateID, title: "Today", content: body,
+            width: 0, height: 0, color: color,
+            createdAt: day, updatedAt: modified ?? day
+        )
+    }
+
+    /// Whether a `[[wiki link]]` target names the daily file at `url`: "Today",
+    /// the file's name, or its path in the vault, with or without `.md`.
+    static func linkNamesDailyNote(_ target: String, fileURL url: URL?, settings: Settings) -> Bool {
+        var wanted = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if wanted.hasSuffix(".md") { wanted.removeLast(3) }
+        guard !wanted.isEmpty else { return false }
+        if wanted == "today" { return true }
+        guard let url = url else { return false }
+        if url.deletingPathExtension().lastPathComponent.lowercased() == wanted { return true }
+        guard let vault = settings.obsidianVaultPath else { return false }
+        let root = URL(fileURLWithPath: vault, isDirectory: true).standardizedFileURL.path + "/"
+        let full = url.deletingPathExtension().standardizedFileURL.path
+        return full.hasPrefix(root) && String(full.dropFirst(root.count)).lowercased() == wanted
+    }
+
+    /// What a watcher on the daily note's folder takes notice of: the day's file, its
+    /// placeholder, and iCloud's numbered copies of it, and only in that folder. The
+    /// stream also reports everything below the folder, which in a vault with the
+    /// pattern at its root is the whole vault, our own note store included.
+    static func watchFilter(for file: URL) -> @Sendable (String) -> Bool {
+        // Paths are compared as the volume does, without case, and the event's own
+        // path is only trimmed (the system reports real paths), not resolved: this
+        // runs on the watcher's queue for every event.
+        @Sendable func plain(_ path: String) -> String {
+            (path.hasPrefix("/private/") ? String(path.dropFirst(8)) : path).lowercased()
+        }
+        let folder = plain(file.deletingLastPathComponent().resolvingSymlinksInPath().path)
+        let name = file.lastPathComponent.lowercased()
+        let stem = file.deletingPathExtension().lastPathComponent.lowercased()
+        let ext = file.pathExtension.lowercased()
+        return { path in
+            let ns = path as NSString
+            guard plain(ns.deletingLastPathComponent) == folder else { return false }
+            let last = ns.lastPathComponent.lowercased()
+            if last == name || last == ".\(name).icloud" { return true }
+            guard (last as NSString).pathExtension == ext else { return false }
+            return duplicateBase(of: (last as NSString).deletingPathExtension) == stem
         }
     }
 
@@ -185,12 +254,18 @@ enum DailyNote {
     /// duplicate's text is merged in first, and the file itself goes to the
     /// Trash rather than being deleted, so a wrong guess is recoverable.
     ///
+    /// `write` replaces the original's text only if the original still has the
+    /// bytes this read; by default it also records the write in the daily file's
+    /// lineage.
+    ///
     /// Returns how many duplicates were folded in.
     @discardableResult
     static func healDuplicates(
         in directory: URL,
         now: Date = Date(),
-        dispose: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+        dataless: DatalessGuard = DatalessGuard(),
+        dispose: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) },
+        write: (URL, String, Fingerprint) -> Bool = { DailyFile.replaceFile(at: $0, with: $1, expecting: $2) != nil }
     ) -> Int {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return 0 }
@@ -207,9 +282,12 @@ enum DailyNote {
             let original = directory
                 .appendingPathComponent(base)
                 .appendingPathExtension(duplicate.pathExtension)
+            // A file that is not downloaded is left alone: the pair is healed once both
+            // are here, and reading one now would wait for the download.
             guard fm.fileExists(atPath: original.path),
-                  let duplicateBody = try? String(contentsOf: duplicate, encoding: .utf8),
-                  let originalBody = try? String(contentsOf: original, encoding: .utf8)
+                  let duplicateBody = dataless.readText(duplicate),
+                  case let .bytes(originalData) = dataless.read(original),
+                  let originalBody = String(data: originalData, encoding: .utf8)
             else { continue }
 
             let merged = ConflictResolver.mergeBodies(
@@ -219,10 +297,10 @@ enum DailyNote {
                 now: now
             )
             if merged != originalBody {
-                // A failed write means the duplicate is still the only copy
-                // of its text, so leave it where it is.
-                do { try merged.write(to: original, atomically: true, encoding: .utf8) }
-                catch { continue }
+                // A failed write, or a file that changed since it was read, means
+                // the duplicate is still the only copy of its text, so leave it
+                // where it is.
+                guard write(original, merged, Fingerprint(of: originalData)) else { continue }
             }
             do { try dispose(duplicate) } catch { continue }
             healed += 1
@@ -254,15 +332,15 @@ enum DailyNote {
     /// Resolve the template file. Accepts either an absolute path or a
     /// vault-relative path (with or without a `.md` suffix), matching how
     /// Obsidian itself stores `template` in `daily-notes.json`.
-    static func resolvedTemplateURL() -> URL? {
-        guard let raw = Settings.shared.dailyTemplatePath, !raw.isEmpty else { return nil }
+    static func resolvedTemplateURL(settings: Settings) -> URL? {
+        guard let raw = settings.dailyTemplatePath, !raw.isEmpty else { return nil }
         let fm = FileManager.default
 
         if raw.hasPrefix("/") {
             let direct = URL(fileURLWithPath: raw)
             if fm.fileExists(atPath: direct.path) { return direct }
         }
-        guard let vault = Settings.shared.obsidianVaultPath else { return nil }
+        guard let vault = settings.obsidianVaultPath else { return nil }
         let vaultURL = URL(fileURLWithPath: vault, isDirectory: true)
         let candidates = [raw, raw + ".md"]
         for candidate in candidates {
@@ -275,9 +353,11 @@ enum DailyNote {
     /// Load the template body for `date`, expanding the supported subset of
     /// Obsidian Daily Notes / Templates tokens. Returns nil when no template
     /// is configured or the file can't be read.
-    static func renderedTemplate(for date: Date, fileURL: URL) -> String? {
-        guard let templateURL = resolvedTemplateURL(),
-              let raw = try? String(contentsOf: templateURL, encoding: .utf8) else { return nil }
+    static func renderedTemplate(
+        for date: Date, fileURL: URL, settings: Settings, dataless: DatalessGuard = DatalessGuard()
+    ) -> String? {
+        guard let templateURL = resolvedTemplateURL(settings: settings),
+              let raw = dataless.readText(templateURL) else { return nil }
         return expandTokens(in: raw, for: date, fileURL: fileURL)
     }
 

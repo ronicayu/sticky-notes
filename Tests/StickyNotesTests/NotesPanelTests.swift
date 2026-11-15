@@ -2,16 +2,16 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-final class NotesPanelTests: XCTestCase {
+@MainActor final class NotesPanelTests: XCTestCase {
     private var root: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("NotesPanelTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -26,8 +26,7 @@ final class NotesPanelTests: XCTestCase {
     ) -> Note {
         let note = Note(
             id: UUID(), title: title, content: content,
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: color, labels: labels,
+            width: 240, height: 200, color: color, labels: labels,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000 + updated),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_000 + updated)
         )
@@ -40,7 +39,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testPanelListsEveryActiveNoteByDefault() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "One")
         seed(store, title: "Two")
         seed(store, title: "Three")
@@ -50,7 +49,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSearchNarrowsTheList() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Groceries")
         seed(store, title: "Standup")
         seed(store, content: "buy groceries on the way home")
@@ -64,7 +63,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSearchMatchesLabels() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Tagged", labels: ["urgent"])
         seed(store, title: "Untagged")
 
@@ -74,7 +73,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testClearingSearchRestoresTheFullList() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "One")
         seed(store, title: "Two")
 
@@ -86,7 +85,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testLabelFilterNarrowsToTaggedNotes() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Work note", labels: ["work"])
         seed(store, title: "Home note", labels: ["home"])
         seed(store, title: "Untagged")
@@ -100,7 +99,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testLabelFilterAndSearchCombine() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Work plan", labels: ["work"])
         seed(store, title: "Work log", labels: ["work"])
         seed(store, title: "Home plan", labels: ["home"])
@@ -112,7 +111,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testAFilterOnADeletedLabelFallsBackToAllNotes() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let tagged = seed(store, title: "Work", labels: ["work"])
         seed(store, title: "Other")
 
@@ -128,7 +127,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSortByTitleIsAlphabetical() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Charlie", updated: 300)
         seed(store, title: "alpha", updated: 200)
         seed(store, title: "Bravo", updated: 100)
@@ -140,7 +139,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSortByLastEditedIsNewestFirst() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Oldest", updated: 0)
         seed(store, title: "Newest", updated: 300)
         seed(store, title: "Middle", updated: 100)
@@ -151,7 +150,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSearchResultsKeepRelevanceOrderRegardlessOfSort() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "zzz plan", updated: 0)           // title hit
         seed(store, content: "a plan mentioned here", updated: 900)  // body hit, newer
 
@@ -163,7 +162,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testArchivedTabListsArchivedNotesOnly() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let archived = seed(store, title: "Gone")
         seed(store, title: "Here")
         store.archive(archived)
@@ -176,7 +175,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testPanelRefreshesWhenTheStoreChanges() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "First")
 
         let panel = makePanel(store)
@@ -188,63 +187,61 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testEmptyStoreShowsNoRows() {
-        let panel = makePanel(NoteStore(rootURL: root, format: .json))
+        let panel = makePanel(NoteStore(rootURL: root))
         XCTAssertEqual(panel.rowCount, 0)
     }
 }
 
 final class LabelVisibilityTests: XCTestCase {
-    /// Settings.shared is a singleton over UserDefaults.standard, so put the
-    /// developer's real preference back when we're done with it.
-    private var savedHiddenLabels: Set<String> = []
+    private var isolated: IsolatedSettings!
+    private var settings: Settings { isolated.settings }
 
-    override func setUpWithError() throws {
-        savedHiddenLabels = Settings.shared.hiddenLabels
+    override func setUp() {
+        isolated = IsolatedSettings()
     }
 
-    override func tearDownWithError() throws {
-        Settings.shared.hiddenLabels = savedHiddenLabels
+    override func tearDown() {
+        isolated.tearDown()
     }
 
     private func note(labels: [String]) -> Note {
         Note(
             id: UUID(), title: "", content: "",
-            positionX: 0, positionY: 0, width: 1, height: 1,
-            collapsed: false, color: .yellow, labels: labels,
+            width: 1, height: 1, color: .yellow, labels: labels,
             createdAt: Date(), updatedAt: Date()
         )
     }
 
     func testNoHiddenLabelsMeansEverythingIsVisible() {
-        Settings.shared.hiddenLabels = []
-        XCTAssertFalse(Settings.shared.isHiddenByLabel(note(labels: ["work"])))
-        XCTAssertFalse(Settings.shared.isHiddenByLabel(note(labels: [])))
+        settings.hiddenLabels = []
+        XCTAssertFalse(settings.isHiddenByLabel(note(labels: ["work"])))
+        XCTAssertFalse(settings.isHiddenByLabel(note(labels: [])))
     }
 
     func testHidingALabelHidesNotesCarryingIt() {
-        Settings.shared.hiddenLabels = ["work"]
-        XCTAssertTrue(Settings.shared.isHiddenByLabel(note(labels: ["work"])))
-        XCTAssertFalse(Settings.shared.isHiddenByLabel(note(labels: ["home"])))
+        settings.hiddenLabels = ["work"]
+        XCTAssertTrue(settings.isHiddenByLabel(note(labels: ["work"])))
+        XCTAssertFalse(settings.isHiddenByLabel(note(labels: ["home"])))
     }
 
     func testUnlabeledNotesAreNeverHiddenByALabelFilter() {
-        Settings.shared.hiddenLabels = ["work"]
-        XCTAssertFalse(Settings.shared.isHiddenByLabel(note(labels: [])),
+        settings.hiddenLabels = ["work"]
+        XCTAssertFalse(settings.isHiddenByLabel(note(labels: [])),
                        "hiding #work should not sweep away untagged notes")
     }
 
     /// A note tagged both #work and #home disappears when either is hidden —
     /// the intent to put something away is the narrower one.
     func testANoteWithAnyHiddenLabelIsHidden() {
-        Settings.shared.hiddenLabels = ["work"]
-        XCTAssertTrue(Settings.shared.isHiddenByLabel(note(labels: ["work", "home"])))
+        settings.hiddenLabels = ["work"]
+        XCTAssertTrue(settings.isHiddenByLabel(note(labels: ["work", "home"])))
     }
 
     func testHiddenLabelsPersistAndRoundTrip() {
-        Settings.shared.hiddenLabels = ["work", "someday"]
-        XCTAssertEqual(Settings.shared.hiddenLabels, ["work", "someday"])
+        settings.hiddenLabels = ["work", "someday"]
+        XCTAssertEqual(settings.hiddenLabels, ["work", "someday"])
 
-        Settings.shared.hiddenLabels = []
-        XCTAssertTrue(Settings.shared.hiddenLabels.isEmpty)
+        settings.hiddenLabels = []
+        XCTAssertTrue(settings.hiddenLabels.isEmpty)
     }
 }

@@ -1,12 +1,51 @@
 import AppKit
 
-final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSLayoutManagerDelegate, NoteDragZoneDelegate, TodoTextViewDelegate {
-    private var note: Note
+@MainActor
+final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate, NoteDragZoneDelegate {
+    /// The note's text, labels and file. The window draws it and forwards
+    /// every change to it; none of the save rules live here.
+    let noteDocument: NoteDocument
+    private var note: Note { noteDocument.buffer }
     private let store: NoteStore
+    /// Where this Mac keeps the window: the note's file holds none of it.
+    private let layoutStore: DeviceLayoutStore
+    private var geometry: NoteLayout
+    private let clock: AppClock
+    private let scheduler: Scheduler
     private let onClosed: (UUID) -> Void
     /// Called when the user archives this note, with everything needed to put
     /// it back exactly where it was.
     var onArchived: ((Note) -> Void)?
+    /// Called when closing was refused because the text could not be saved.
+    /// The argument runs the close again.
+    var onCloseRefused: ((_ retry: @escaping () -> Void) -> Void)?
+    /// Called when the note has just been collapsed.
+    var onCollapsed: (() -> Void)?
+    /// Called when a label was removed with its chip, with what puts it back.
+    var onLabelRemoved: ((_ label: String, _ restore: @escaping () -> Void) -> Void)?
+    /// Called when the note left the active folder under typed text, and the text
+    /// was written where the note went.
+    var onTextKept: ((NoteDocument.KeptIn) -> Void)?
+
+    /// How long a motion of the given nominal length lasts. Reduce Motion makes
+    /// every one of them instant; a test replaces it to choose either case.
+    var motionDuration: (TimeInterval) -> TimeInterval = { Appearance.animationDuration($0) }
+
+    /// Where the menu-bar icon is, in screen coordinates, when it can be found.
+    /// An archived note fades toward it.
+    var archiveDestination: (() -> NSRect?)?
+
+    /// The two motions of a note's life: it fades in when it is made, and fades
+    /// out when it is archived.
+    static let appearDuration: TimeInterval = 0.12
+    static let archiveFadeDuration: TimeInterval = 0.12
+    static let appearScale: CGFloat = 0.98
+    static let appearAnimationKey = "noteAppear"
+
+    /// True from the moment an archived note starts fading until its window is
+    /// gone. The fade moves the window, which is not the person putting it
+    /// somewhere, so none of it is recorded as the note's place.
+    private(set) var isFadingOut = false
 
     /// Labels currently on this note. Read by the app delegate to decide
     /// whether the window belongs on screen under the label filter.
@@ -19,12 +58,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// task list shows its remaining count there. Every path that changes the
     /// title or the body routes through here so the two can't drift apart.
     private func refreshCollapsedTitle() {
+        let name = note.title.isEmpty ? "Untitled" : note.title
         guard let progress = MarkdownEditing.checkboxProgress(in: note.content) else {
             titleLabel.text = note.title
+            titleLabel.spokenTitle = name
             return
         }
         let count = "\(progress.done)/\(progress.total)"
         titleLabel.text = note.title.isEmpty ? count : "\(note.title)   \(count)"
+        titleLabel.spokenTitle = "\(name), \(progress.done) of \(progress.total) tasks done"
     }
 
     private let dragZone: NoteDragZone
@@ -37,87 +79,64 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private let footerView: NSView
     private let labelButton: NSButton
     private let labelStack: NSStackView
-    private let labelPanel = LabelCompletionPanel()
-    /// Character index of the `#` that triggered the active autocomplete
-    /// session, if any. Cleared when the panel is dismissed.
-    private var labelTriggerStart: Int?
     /// Container that holds titleField + scrollView + footer. We collapse the
     /// note by forcing this view's height to 0; otherwise its subviews'
     /// constraints would keep dictating the window's minimum content height.
     private let bodyContainer: NSView
     private var bodyHeightZeroConstraint: NSLayoutConstraint!
 
-    private static let titleExpandedFont = NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize + 7, weight: .bold)
+    /// The title is seven points above the body, so it follows the text size.
+    static var titleExpandedFont: NSFont {
+        NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize + 7, weight: .bold)
+    }
     private static let titleCollapsedFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
 
     private var dragZoneHeightConstraint: NSLayoutConstraint!
+    private var titleHeightConstraint: NSLayoutConstraint!
 
-    let textView: TodoTextView
-    private let textStorage: NSTextStorage
-    private let layoutManager: NSLayoutManager
+    /// The Markdown editor this window hosts.
+    let editor: MarkdownEditorController
+    var textView: TodoTextView { editor.textView }
     private let scrollView: NSScrollView
     private let backgroundView: HoverTrackingView
     private let resizeGrip = ResizeGripView()
 
-    private var saveWorkItem: DispatchWorkItem?
-    private var savingDisabled = false
     private var preCollapseHeight: CGFloat
     private var isHovering = false
-    /// An external edit that arrived while the user was mid-sentence. Held
-    /// back so the text doesn't jump under the caret, and merged — never
-    /// dropped — before the next save or on blur.
-    var pendingExternalNote: Note?
 
-    /// What this controller last wrote to disk. The file watcher reports our
-    /// own saves back to us, and a mid-typing echo carries the *previous*
-    /// text — treating that as someone else's edit merged the note with a
-    /// stale copy of itself.
-    private var lastPersistedContent: String?
-    private var lastPersistedTitle: String?
+    /// True when this note was never touched and holds nothing: the shape a
+    /// mis-pressed ⌘⇧S leaves behind.
+    var isAbandonedCapture: Bool { noteDocument.isAbandonedCapture }
 
-    /// True until the user types into this note. An untouched note left by a
-    /// misfired hotkey is swept up on blur; a note that was typed into is
-    /// never discarded automatically, even if it is empty now.
-    private(set) var wasNeverEdited = true
+    /// True once a file exists for this note. A new note has none until it is
+    /// typed into, and is not gone for lacking one.
+    var hasFile: Bool { noteDocument.hasFile }
 
-    /// A note is disposable when nothing was ever typed into it and it holds
-    /// nothing — the exact shape a mis-pressed ⌘⇧S leaves behind.
-    var isAbandonedCapture: Bool {
-        wasNeverEdited
-            && note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+    /// Try to write the note again, after the debounce.
+    func requestSave() { noteDocument.requestSave() }
+
+    /// The note's file is gone and its text could not be written anywhere.
+    var isStranded: Bool { noteDocument.isStranded }
+    var fileCannotBeRead: Bool { noteDocument.fileCannotBeRead }
+    var fileNotDownloaded: Bool { noteDocument.fileNotDownloaded }
 
     /// Discard without archiving. Used for abandoned captures, which should
-    /// leave no trace at all.
+    /// leave no trace at all. Text that arrived from outside since the window
+    /// was opened is on screen now, and the note stays.
     func discardAbandonedCapture() {
-        savingDisabled = true
-        saveWorkItem?.cancel()
-        saveWorkItem = nil
-        store.discardActive(note)
-        window?.close()
-        onClosed(note.id)
+        closeThroughDocument(.discard)
     }
 
     /// Height of the chrome strip when expanded.
     static let chromeHeight: CGFloat = 22
-    /// Height of the title row sitting below the chrome when expanded.
-    static let titleRowHeight: CGFloat = 28
+    /// Height of the title row sitting below the chrome when expanded: 28 at the
+    /// default text size, taller when a large title would not fit in it.
+    static func titleRowHeight(for font: NSFont) -> CGFloat {
+        max(28, ceil(font.ascender - font.descender + font.leading) + 4)
+    }
     /// Window height when collapsed (matches the chrome strip exactly).
     static let collapsedHeight: CGFloat = 22
 
-    private static let slashDateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f
-    }()
-    private static let slashTimeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f
-    }()
     private static let humanDateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "MMM d"
@@ -129,35 +148,53 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private static let activeAlpha: CGFloat = 1.0
     private static var chromeColor: NSColor { Appearance.chromeInk }
 
-    init(note: Note, store: NoteStore, onClosed: @escaping (UUID) -> Void) {
-        self.note = note
+    /// `layout` holds this Mac's window for every note. A note it has no entry
+    /// for is placed by `placing`, given the size the note was saved at, which
+    /// is where a note from another Mac or from Obsidian first appears.
+    init(
+        note: Note,
+        store: NoteStore,
+        layout layoutStore: DeviceLayoutStore = DeviceLayoutStore(),
+        placing: ((CGSize) -> CGRect)? = nil,
+        clock: AppClock = SystemClock(),
+        scheduler: Scheduler = MainScheduler(),
+        onClosed: @escaping (UUID) -> Void
+    ) {
         // Every caller hands over a note as just saved or as last read, so
         // the file watcher's echo of it is not an outside edit.
-        self.lastPersistedContent = note.content
-        self.lastPersistedTitle = note.title
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
+        document.createsFileOnFirstEdit = true
+        self.noteDocument = document
         self.store = store
+        self.layoutStore = layoutStore
+        self.clock = clock
+        self.scheduler = scheduler
         self.onClosed = onClosed
-        self.preCollapseHeight = CGFloat(note.height)
+        var layout = NoteWindowController.resolveLayout(
+            for: note, in: layoutStore, placing: placing ?? NoteWindowController.placeOnPointerScreen
+        )
+        self.geometry = layout
+        self.preCollapseHeight = CGFloat(layout.height)
 
-        let displayHeight: CGFloat = note.collapsed
+        let displayHeight: CGFloat = layout.collapsed
             ? NoteWindowController.collapsedHeight
-            : CGFloat(note.height)
-        let rawFrame = NSRect(x: note.positionX, y: note.positionY, width: note.width, height: displayHeight)
+            : CGFloat(layout.height)
+        let rawFrame = NSRect(x: layout.x, y: layout.y, width: layout.width, height: displayHeight)
         let frame = NoteWindow.clampToVisibleScreen(rawFrame)
         if frame.origin != rawFrame.origin || frame.size != rawFrame.size {
-            self.note.positionX = Double(frame.origin.x)
-            self.note.positionY = Double(frame.origin.y)
-            self.note.width = Double(frame.size.width)
-            if !note.collapsed {
-                self.note.height = Double(frame.size.height)
-                self.preCollapseHeight = frame.size.height
-            }
+            layout.x = Double(frame.origin.x)
+            layout.y = Double(frame.origin.y)
+            layout.width = Double(frame.size.width)
+            if !layout.collapsed { layout.height = Double(frame.size.height) }
+            self.geometry = layout
+            layoutStore.set(layout, for: note.id)
+            if !layout.collapsed { self.preCollapseHeight = frame.size.height }
         }
         let window = NoteWindow(contentRect: frame)
 
         backgroundView = HoverTrackingView(frame: .zero)
         backgroundView.wantsLayer = true
-        backgroundView.layer?.cornerRadius = note.collapsed ? 5 : 12
+        backgroundView.layer?.cornerRadius = layout.collapsed ? 5 : 12
         backgroundView.layer?.masksToBounds = true
         backgroundView.layer?.backgroundColor = NSColor(hex: note.color.bodyHex)?.cgColor
 
@@ -166,7 +203,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         dragZone.translatesAutoresizingMaskIntoConstraints = false
 
         expandButton = NoteWindowController.makeChromeButton(
-            symbol: note.collapsed ? "chevron.down" : "chevron.up",
+            symbol: layout.collapsed ? "chevron.down" : "chevron.up",
             tooltip: "Collapse / expand"
         )
         trashButton = NoteWindowController.makeChromeButton(
@@ -215,46 +252,16 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         titleLabel.font = NoteWindowController.titleCollapsedFont
         titleLabel.textColor = MarkdownStyler.bodyTextColor
         titleLabel.placeholder = "Untitled"
-        titleLabel.isHidden = !note.collapsed
-        dragZone.reportsSingleClick = note.collapsed
+        titleLabel.isHidden = !layout.collapsed
+        titleLabel.spokenTitle = note.title.isEmpty ? "Untitled" : note.title
+        dragZone.reportsSingleClick = layout.collapsed
 
         bodyContainer = NSView()
         bodyContainer.translatesAutoresizingMaskIntoConstraints = false
         bodyContainer.wantsLayer = true
         bodyContainer.layer?.masksToBounds = true
 
-        // Editor (TextKit 1 stack so we can hook glyph generation for hidden markers).
-        textStorage = NSTextStorage(string: note.content)
-        layoutManager = NSLayoutManager()
-        textStorage.addLayoutManager(layoutManager)
-        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
-        container.widthTracksTextView = true
-        container.heightTracksTextView = false
-        layoutManager.addTextContainer(container)
-
-        textView = TodoTextView(frame: .zero, textContainer: container)
-        textView.isRichText = false
-        textView.allowsUndo = true
-        textView.backgroundColor = .clear
-        textView.drawsBackground = false
-        // Inset 0 horizontally so the body text starts at the same x as the
-        // flush-left title field — they should appear visually left-aligned.
-        // Breathing room: text was flush against the window edge, and the
-        // last line sat on the bottom border. The horizontal inset stays 0
-        // because the checkbox gutter already provides the left margin.
-        textView.textContainerInset = NSSize(width: 0, height: 8)
-        textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize),
-            .foregroundColor: MarkdownStyler.bodyTextColor
-        ]
-        textView.insertionPointColor = MarkdownStyler.bodyTextColor
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor = MarkdownEditorController(text: note.content, store: store, clock: clock, options: .note)
 
         scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -262,7 +269,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         scrollView.drawsBackground = false
         scrollView.scrollerStyle = .overlay
         scrollView.autohidesScrollers = true
-        scrollView.documentView = textView
+        scrollView.documentView = editor.textView
 
         // Footer: relative date only — color is now changed via the t-shirt
         // button in the chrome row.
@@ -292,10 +299,14 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         dragZone.addSubview(expandButton)
         dragZone.addSubview(trashButton)
 
-        let initialChromeHeight: CGFloat = note.collapsed
+        let initialChromeHeight: CGFloat = layout.collapsed
             ? NoteWindowController.collapsedHeight
             : NoteWindowController.chromeHeight
         dragZoneHeightConstraint = dragZone.heightAnchor.constraint(equalToConstant: initialChromeHeight)
+
+        titleHeightConstraint = titleField.heightAnchor.constraint(
+            equalToConstant: NoteWindowController.titleRowHeight(for: NoteWindowController.titleExpandedFont)
+        )
 
         // 0-height constraint that we activate to collapse the body fully out
         // of the layout. Required priority so it wins over body internals.
@@ -346,7 +357,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             titleField.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor, constant: 14),
             titleField.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor, constant: -14),
             titleField.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
-            titleField.heightAnchor.constraint(equalToConstant: NoteWindowController.titleRowHeight),
+            titleHeightConstraint,
 
             // Editor.
             scrollView.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor, constant: 14),
@@ -374,7 +385,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         ])
 
         window.contentView = backgroundView
-        if note.collapsed {
+        if layout.collapsed {
             bodyContainer.isHidden = true
             bodyHeightZeroConstraint.isActive = true
         }
@@ -385,8 +396,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         window.initialFirstResponder = textView
         window.minSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         window.contentMinSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
-        textView.delegate = self
-        textView.todoDelegate = self
+        editor.onTextChange = { [weak self] text in
+            guard let self = self else { return }
+            self.noteDocument.setBody(text)
+            self.refreshCollapsedTitle()
+            self.updateDateLabel()
+        }
+        editor.onMoveUpFromFirstLine = { [weak self] in self?.focusTitle() }
+        editor.labelProvider = { [weak store] in store?.allLabels() ?? [] }
+        editor.onLabelTyped = { [weak self] name in self?.addLabel(name) }
         textView.onCommandDragEnded = { [weak self] in
             self?.dragZoneDidEndDrag(suppressSnapping: false)
         }
@@ -397,17 +415,26 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             name: Appearance.didChange,
             object: nil
         )
-        textView.attachmentHandler = { [weak self] pasteboard in
-            guard let self = self else { return nil }
-            return Attachments.handlePaste(pasteboard, for: self.store)
-        }
-        textView.attachmentResolver = { [weak self] reference in
-            guard let self = self else { return nil }
-            return Attachments.resolve(reference, for: self.store)
-        }
         titleField.delegate = self
-        layoutManager.delegate = self
         dragZone.delegate = self
+
+        noteDocument.isEditing = { [weak self] in
+            guard let self = self, let window = self.window, window.isKeyWindow else { return false }
+            return window.firstResponder === self.textView || self.titleField.currentEditor() != nil
+        }
+        noteDocument.isEditingTitle = { [weak self] in
+            self?.titleField.currentEditor() != nil
+        }
+        noteDocument.didApplyExternal = { [weak self] applied in
+            self?.showExternalChange(applied)
+        }
+        noteDocument.didKeepText = { [weak self] place in
+            self?.onTextKept?(place)
+        }
+
+        titleLabel.onPress = { [weak self] in self?.dragZoneDidClick() }
+        resizeGrip.onResize = { [weak self] dx, dy in self?.resizeByAccessibilityAction(dx: dx, dy: dy) }
+        updateButtonAccessibility()
 
         expandButton.target = self
         expandButton.action = #selector(toggleCollapse)
@@ -418,10 +445,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         labelButton.target = self
         labelButton.action = #selector(showLabelMenu)
 
-        labelPanel.onAccept = { [weak self] item in
-            self?.acceptLabelCompletion(item)
-        }
-
         backgroundView.onHoverChange = { [weak self] hovering in
             self?.isHovering = hovering
             self?.updateAlpha()
@@ -431,12 +454,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         updateDateLabel()
         updateChromeVisibility(animated: false)
         rebuildLabelChips()
-        MarkdownStyler.apply(to: textView)
-        refreshMarkerVisibility()
 
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(handleStoreChange),
+            selector: #selector(storeDidChange(_:)),
             name: NoteStore.didChange,
             object: nil
         )
@@ -447,6 +468,72 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The layout this Mac has for `note`. Without one, a note whose file still
+    /// has the keys an older build wrote takes its window from them, once; any
+    /// other note is placed by `placing` at the size it was saved at. Either way
+    /// the result is kept, so the note stays where it was put.
+    static func resolveLayout(
+        for note: Note, in store: DeviceLayoutStore, placing: (CGSize) -> CGRect
+    ) -> NoteLayout {
+        if let known = store.layout(for: note.id) { return known }
+        let layout: NoteLayout
+        if let legacy = note.legacyPlacement {
+            layout = NoteLayout(
+                x: legacy.x, y: legacy.y, width: note.width, height: note.height, collapsed: legacy.collapsed
+            )
+        } else {
+            layout = NoteLayout(frame: placing(CGSize(width: note.width, height: note.height)))
+        }
+        store.set(layout, for: note.id)
+        return layout
+    }
+
+    /// A first placement for a window made without a desk: on the screen the
+    /// pointer is on.
+    static func placeOnPointerScreen(size: CGSize) -> CGRect {
+        let screen = NotePlacement.screenUnderPointer(
+            mouse: NSEvent.mouseLocation,
+            screens: NSScreen.screens.map(\.visibleFrame),
+            main: NSScreen.main?.visibleFrame
+        ) ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        return NotePlacement.next(previous: nil, screen: screen, size: size)
+    }
+
+    /// Record where the window is now, and the size as the hint the next save
+    /// of the note writes. The note file is not touched.
+    private func recordFrame(_ frame: NSRect, resized: Bool) {
+        guard !isFadingOut else { return }
+        geometry.x = Double(frame.origin.x)
+        geometry.y = Double(frame.origin.y)
+        if resized {
+            geometry.width = Double(frame.size.width)
+            if !geometry.collapsed {
+                geometry.height = Double(frame.size.height)
+                preCollapseHeight = frame.size.height
+            }
+            let width = geometry.width, height = geometry.height
+            noteDocument.adjust(save: false) { $0.width = width; $0.height = height }
+        }
+        layoutStore.set(geometry, for: note.id)
+    }
+
+    /// Replace part of the body as the person's own edit: it goes through the
+    /// text view, so it is saved and restyled like typing. It is undone with its
+    /// own ⌘Z step, apart from whatever the person was typing. It opens no slash
+    /// menu or label list, and closes a label list that is open, whose position
+    /// the edit may have moved.
+    func replaceBody(range: NSRange, with text: String) {
+        guard NSMaxRange(range) <= textView.textStorage?.length ?? 0,
+              textView.shouldChangeText(in: range, replacementString: text) else { return }
+        editor.dismissLabelCompletion()
+        editor.isEditingProgrammatically = true
+        defer { editor.isEditingProgrammatically = false }
+        textView.breakUndoCoalescing()
+        textView.textStorage?.replaceCharacters(in: range, with: text)
+        textView.didChangeText()
+        textView.breakUndoCoalescing()
+    }
 
     func focusEditor() {
         guard let window = window else { return }
@@ -500,8 +587,38 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         return button
     }
 
+    /// What VoiceOver says for the chrome buttons that change with the note.
+    private func updateButtonAccessibility() {
+        expandButton.setAccessibilityLabel(geometry.collapsed ? "Expand note" : "Collapse note")
+        colorButton.setAccessibilityRole(.menuButton)
+        colorButton.setAccessibilityLabel("Color and float level")
+        colorButton.setAccessibilityValue(note.color.displayName)
+        labelButton.setAccessibilityRole(.menuButton)
+        labelButton.setAccessibilityLabel("Labels")
+        resizeGrip.isResizable = !geometry.collapsed
+    }
+
+    /// Change the size as the corner drag would, for VoiceOver. The top-left
+    /// corner stays where it is.
+    private func resizeByAccessibilityAction(dx: CGFloat, dy: CGFloat) {
+        guard let window = window, !geometry.collapsed else { return }
+        var frame = window.frame
+        var size = NSSize(
+            width: max(window.minSize.width, frame.width + dx),
+            height: max(window.minSize.height, frame.height + dy)
+        )
+        // Never move the note to make room: a corner that does not fit stops growing.
+        if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+            size.width = min(size.width, max(window.minSize.width, visible.maxX - frame.minX))
+            size.height = min(size.height, max(window.minSize.height, frame.maxY - visible.minY))
+        }
+        frame.origin.y += frame.height - size.height
+        frame.size = size
+        window.setFrame(frame, display: true, animate: false)
+    }
+
     private func updateExpandButtonIcon() {
-        let symbol = note.collapsed ? "chevron.down" : "chevron.up"
+        let symbol = geometry.collapsed ? "chevron.down" : "chevron.up"
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Collapse / expand")?
             .withSymbolConfiguration(NoteWindowController.chromeSymbolConfig)
         image?.isTemplate = true
@@ -512,8 +629,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// hovered) — like TickTick. Hidden the rest of the time so the unfocused
     /// note is just paper + content.
     private func updateChromeVisibility(animated: Bool = true) {
+        guard !isFadingOut else { return }
         let isKey = window?.isKeyWindow ?? false
-        let shouldShow = !note.collapsed && (isKey || isHovering)
+        let shouldShow = !geometry.collapsed && (isKey || isHovering)
         let target: CGFloat = shouldShow ? 1.0 : 0
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
@@ -535,36 +653,101 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     // MARK: - Actions
 
-    @objc private func toggleCollapse() {
+    @objc func toggleCollapse() {
         performToggleCollapse()
     }
 
+    var isCollapsed: Bool { geometry.collapsed }
+
+    /// Open the find bar over the body, for ⌘F. A collapsed note shows no body.
+    func showFindBar() {
+        guard !geometry.collapsed, let window = window else { return }
+        window.makeFirstResponder(textView)
+        let show = NSMenuItem()
+        show.tag = NSTextFinder.Action.showFindInterface.rawValue
+        textView.performTextFinderAction(show)
+    }
+
     @objc func closeNote() {
-        saveWorkItem?.cancel()
-        saveWorkItem = nil
-        let isEmpty = note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && note.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if isEmpty {
-            savingDisabled = true
-            store.discardActive(note)
-        } else {
-            // Capture the frame first: the window is about to close, and
-            // undo should restore the note where it actually sat.
-            if let frame = window?.frame {
-                note.positionX = Double(frame.origin.x)
-                note.positionY = Double(frame.origin.y)
-            }
-            // `archive` only moves the file on disk, so anything typed since
-            // the last debounced save has to land first — including any
-            // external edit we deferred while the user was typing.
-            mergePendingExternalNote()
-            persist()
-            savingDisabled = true
-            store.archive(note)
-            onArchived?(note)
+        // Capture the frame first: the window is about to close, and undo
+        // should restore the note where it actually sat.
+        if let frame = window?.frame { recordFrame(frame, resized: false) }
+        closeThroughDocument(.archive)
+    }
+
+    private func closeThroughDocument(_ reason: NoteDocument.CloseReason) {
+        switch noteDocument.close(reason) {
+        case .refused:
+            // A note to be discarded that turned out to hold text just stays.
+            guard reason == .archive else { return }
+            NSSound.beep()
+            onCloseRefused?({ [weak self] in self?.closeNote() })
+            return
+        case let .closed(archived):
+            if let archived = archived { onArchived?(archived) }
+            // The note is saved and gone from the desk's books by now; only the
+            // picture of it is still on screen for the length of the fade. A note
+            // that was only discarded leaves at once.
+            let id = note.id
+            closeWindow(fading: archived != nil)
+            onClosed(id)
         }
-        window?.close()
-        onClosed(note.id)
+    }
+
+    /// Close the window. An archived note that is on screen fades toward the
+    /// menu-bar icon first, unless the person asked for less motion.
+    private func closeWindow(fading: Bool) {
+        guard let window = window else { return }
+        let duration = fading && window.isVisible
+            ? motionDuration(NoteWindowController.archiveFadeDuration) : 0
+        guard duration > 0 else {
+            window.close()
+            return
+        }
+        isFadingOut = true
+        window.ignoresMouseEvents = true
+        // Typing during the fade would go into a note that is already archived.
+        window.makeFirstResponder(nil)
+        var target = window.frame
+        if let icon = archiveDestination?() {
+            target.origin.x += (icon.midX - target.midX) * 0.2
+            target.origin.y += (icon.midY - target.midY) * 0.2
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            window.animator().alphaValue = 0
+            window.animator().setFrame(target, display: true)
+        }
+        _ = scheduler.schedule(after: duration) { [self] in
+            self.window?.close()
+        }
+    }
+
+    /// A new note comes in: it fades up from 98 % of its size, growing from its
+    /// top-left corner, the corner the cascade of new notes is anchored to.
+    func animateIn() {
+        let duration = motionDuration(NoteWindowController.appearDuration)
+        guard duration > 0, let layer = backgroundView.layer else { return }
+        window?.contentView?.layoutSubtreeIfNeeded()
+        let size = layer.bounds.size
+        let scale = NoteWindowController.appearScale
+        let anchor = CGPoint(x: layer.anchorPoint.x * size.width, y: layer.anchorPoint.y * size.height)
+        let corner = CGPoint(x: 0, y: size.height)
+        let shift = CATransform3DMakeTranslation(
+            (corner.x - anchor.x) * (1 - scale), (corner.y - anchor.y) * (1 - scale), 0
+        )
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        let grow = CABasicAnimation(keyPath: "transform")
+        grow.fromValue = NSValue(caTransform3D: CATransform3DScale(shift, scale, scale, 1))
+        grow.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        let group = CAAnimationGroup()
+        group.animations = [fade, grow]
+        group.duration = duration
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(group, forKey: NoteWindowController.appearAnimationKey)
     }
 
     // MARK: - NoteDragZoneDelegate
@@ -609,10 +792,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     @objc private func pickFloatLevel(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let level = NoteFloatLevel(rawValue: raw) else { return }
-        note.floatLevel = level
-        wasNeverEdited = false
+        setFloatLevel(level)
+    }
+
+    var floatLevel: NoteFloatLevel { note.floatLevel }
+
+    func setFloatLevel(_ level: NoteFloatLevel) {
+        guard level != note.floatLevel else { return }
+        noteDocument.edit { $0.floatLevel = level }
         applyFloatLevel()
-        scheduleSave()
     }
 
     /// A desktop-level note sits below other apps but above the wallpaper, and
@@ -622,20 +810,25 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         switch note.floatLevel {
         case .floating:
             window.level = .floating
-            window.collectionBehavior = [.canJoinAllSpaces, .stationary]
         case .desktop:
             window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
-            window.collectionBehavior = [.stationary]
         }
+        window.collectionBehavior = NoteWindow.collectionBehavior(for: note.floatLevel)
     }
 
     @objc private func pickColor(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let color = NoteColor(rawValue: raw) else { return }
-        note.color = color
-        wasNeverEdited = false
+        setColor(color)
+    }
+
+    var color: NoteColor { note.color }
+
+    func setColor(_ color: NoteColor) {
+        guard color != note.color else { return }
+        noteDocument.edit { $0.color = color }
+        colorButton.setAccessibilityValue(color.displayName)
         applyAppearanceColors()
-        scheduleSave()
     }
 
     /// Repaint everything whose color depends on the note's color or the
@@ -645,8 +838,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         backgroundView.layer?.backgroundColor = NSColor(hex: note.color.bodyHex)?.cgColor
         titleField.textColor = MarkdownStyler.bodyTextColor
         titleLabel.textColor = MarkdownStyler.bodyTextColor
-        textView.insertionPointColor = MarkdownStyler.bodyTextColor
-        textView.typingAttributes[.foregroundColor] = MarkdownStyler.bodyTextColor
 
         // Chrome paints itself on the note's paper, so nothing here follows
         // the system appearance on its own.
@@ -657,12 +848,19 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         rebuildLabelChips()
         resizeGrip.needsDisplay = true
 
-        MarkdownStyler.apply(to: textView)
-        refreshMarkerVisibility()
-        textView.needsDisplay = true
+        editor.applyColors()
     }
 
-    private static func colorSwatch(for color: NoteColor) -> NSImage {
+    /// Re-apply styling after the shared text size changes.
+    func restyleForTextSize() {
+        let font = NoteWindowController.titleExpandedFont
+        titleField.font = font
+        titleField.currentEditor()?.font = font
+        titleHeightConstraint.constant = NoteWindowController.titleRowHeight(for: font)
+        editor.applyTextSize()
+    }
+
+    static func colorSwatch(for color: NoteColor) -> NSImage {
         return NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
             let path = NSBezierPath(
                 roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
@@ -683,7 +881,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// A collapsed note is an 18pt bar whose only affordance is knowing to
     /// double-click it. One click expands.
     func dragZoneDidClick() {
-        guard note.collapsed else { return }
+        guard geometry.collapsed else { return }
         dragZoneDidDoubleClick()
     }
 
@@ -721,20 +919,16 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     func setArrangedFrame(_ frame: NSRect, animated: Bool = true) {
         guard let window = window else { return }
         window.setFrame(frame, display: true, animate: animated)
-        note.positionX = Double(frame.origin.x)
-        note.positionY = Double(frame.origin.y)
-        scheduleSave()
+        recordFrame(frame, resized: false)
     }
 
     /// Current frame and whether the note is collapsed — the Arrange command
     /// needs both to lay notes out without resizing them.
-    var arrangementSize: NSSize { window?.frame.size ?? NSSize(width: note.width, height: note.height) }
+    var arrangementSize: NSSize { window?.frame.size ?? NSSize(width: geometry.width, height: geometry.height) }
 
     func windowDidMove(_ notification: Notification) {
         guard let frame = window?.frame else { return }
-        note.positionX = Double(frame.origin.x)
-        note.positionY = Double(frame.origin.y)
-        scheduleSave()
+        recordFrame(frame, resized: false)
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -754,11 +948,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         }
         updateAlpha()
         updateChromeVisibility()
-        hideLabelCompletion()
-        if pendingExternalNote != nil {
-            mergePendingExternalNote()
-            persist()
-        }
+        editor.dismissLabelCompletion()
+        noteDocument.blur()
     }
 
     /// Refresh the window's opacity from the outside, for a window that was
@@ -768,9 +959,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     private func updateAlpha() {
-        guard let window = window else { return }
+        guard let window = window, !isFadingOut else { return }
         let isKey = window.isKeyWindow
-        let active = !note.collapsed || isKey || isHovering
+        let active = !geometry.collapsed || isKey || isHovering
         let faded = !active && Appearance.allowsFadedNotes
         let target: CGFloat = faded ? NoteWindowController.blurAlpha : NoteWindowController.activeAlpha
         NSAnimationContext.runAnimationGroup { ctx in
@@ -781,12 +972,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     func windowDidResize(_ notification: Notification) {
         guard let frame = window?.frame else { return }
-        note.width = Double(frame.size.width)
-        if !note.collapsed {
-            note.height = Double(frame.size.height)
-            preCollapseHeight = frame.size.height
-        }
-        scheduleSave()
+        recordFrame(frame, resized: true)
     }
 
     /// macOS sometimes resizes borderless+resizable windows when the display
@@ -795,10 +981,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// blows up to the full screen width.
     func windowDidChangeScreen(_ notification: Notification) {
         guard let window = window else { return }
-        let storedWidth = CGFloat(note.width)
-        let storedHeight: CGFloat = note.collapsed
+        let storedWidth = CGFloat(geometry.width)
+        let storedHeight: CGFloat = geometry.collapsed
             ? NoteWindowController.collapsedHeight
-            : CGFloat(note.height)
+            : CGFloat(geometry.height)
         var frame = window.frame
         if abs(frame.size.width - storedWidth) < 0.5 &&
            abs(frame.size.height - storedHeight) < 0.5 { return }
@@ -810,40 +996,16 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         // unplugged. Clamping only at launch stranded the note until relaunch.
         frame = NoteWindow.clampToVisibleScreen(frame)
         window.setFrame(frame, display: true, animate: false)
-        note.positionX = Double(frame.origin.x)
-        note.positionY = Double(frame.origin.y)
-    }
-
-    // MARK: - NSTextViewDelegate
-
-    func textDidChange(_ notification: Notification) {
-        note.content = textView.string
-        wasNeverEdited = false
-        refreshCollapsedTitle()
-        MarkdownStyler.apply(to: textView)
-        refreshMarkerVisibility()
-        updateDateLabel()
-        scheduleSave()
-        detectSlashTrigger()
-        detectLabelTrigger()
-    }
-
-    func textViewDidChangeSelection(_ notification: Notification) {
-        refreshMarkerVisibility()
-        // Caret moved away from the active `#word` → kill the panel.
-        if labelTriggerStart != nil { detectLabelTrigger() }
+        recordFrame(frame, resized: false)
     }
 
     // MARK: - NSTextFieldDelegate (title)
 
     func controlTextDidChange(_ obj: Notification) {
         guard let field = obj.object as? NSTextField, field === titleField else { return }
-        note.title = titleField.stringValue
-        wasNeverEdited = false
+        noteDocument.setTitle(titleField.stringValue)
         refreshCollapsedTitle()
         updateDateLabel()
-        scheduleSave()
-        detectTitleSlashTrigger()
     }
 
     /// Title field key handling. Down arrow / Enter → jump to body editor.
@@ -858,316 +1020,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         return false
     }
 
-    /// Body editor key handling.
-    /// - Up arrow on the first line → jump to title.
-    /// - Enter inside a bullet/ordered/checkbox item → continue the list (or
-    ///   strip the marker if the current item is empty, exiting the list).
-    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard textView === self.textView else { return false }
-
-        // While the autocomplete panel is up, arrow/enter/escape drive the
-        // panel instead of the editor.
-        if labelPanel.isVisible {
-            if commandSelector == #selector(NSResponder.moveDown(_:)) {
-                labelPanel.selectNext()
-                return true
-            }
-            if commandSelector == #selector(NSResponder.moveUp(_:)) {
-                labelPanel.selectPrevious()
-                return true
-            }
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) ||
-               commandSelector == #selector(NSResponder.insertTab(_:)) {
-                if labelPanel.acceptSelection() { return true }
-            }
-            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-                hideLabelCompletion()
-                return true
-            }
-        }
-
-        if commandSelector == #selector(NSResponder.moveUp(_:)) {
-            let selection = textView.selectedRange()
-            let str = textView.string as NSString
-            let firstNewline = str.range(of: "\n")
-            let onFirstLine = firstNewline.location == NSNotFound || selection.location <= firstNewline.location
-            guard onFirstLine else { return false }
-            focusTitle()
-            return true
-        }
-
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            return handleListContinuation()
-        }
-
-        // Tab indents a list item; anywhere else it keeps its normal meaning.
-        if commandSelector == #selector(NSResponder.insertTab(_:)) {
-            return self.textView.indentSelection(outdent: false)
-        }
-        if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
-            return self.textView.indentSelection(outdent: true)
-        }
-
-        return false
-    }
-
-    /// On Enter: if the current line is a list/checkbox item, either continue
-    /// the list with the next marker or — if the item is empty — strip the
-    /// marker and let the regular newline through to exit the list.
-    private func handleListContinuation() -> Bool {
-        let str = textView.string as NSString
-        let selection = textView.selectedRange()
-        let lineRange = str.lineRange(for: NSRange(location: selection.location, length: 0))
-        var lineText = str.substring(with: lineRange)
-        if lineText.hasSuffix("\n") { lineText.removeLast() }
-        let lineNS = lineText as NSString
-
-        // Checkbox: "[indent]- [ ] " or "[indent]- [x] "
-        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)-[ \t]\[[ xX]\][ \t]?(.*)$"#),
-           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
-            let indent = lineNS.substring(with: m.range(at: 1))
-            let rest = lineNS.substring(with: m.range(at: 2))
-            let prefixLen = lineNS.length - (rest as NSString).length
-            return continueOrExitList(
-                lineRange: lineRange,
-                prefixLen: prefixLen,
-                rest: rest,
-                continuation: "\(indent)- [ ] "
-            )
-        }
-
-        // Bullet: "- " or "* " (with optional indent)
-        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)([-*])\s(.*)$"#),
-           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
-            let indent = lineNS.substring(with: m.range(at: 1))
-            let bullet = lineNS.substring(with: m.range(at: 2))
-            let rest = lineNS.substring(with: m.range(at: 3))
-            let prefixLen = lineNS.length - (rest as NSString).length
-            return continueOrExitList(
-                lineRange: lineRange,
-                prefixLen: prefixLen,
-                rest: rest,
-                continuation: "\(indent)\(bullet) "
-            )
-        }
-
-        // Ordered: "1. ", "23. " (with optional indent)
-        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)(\d+)\.\s(.*)$"#),
-           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
-            let indent = lineNS.substring(with: m.range(at: 1))
-            let numStr = lineNS.substring(with: m.range(at: 2))
-            let rest = lineNS.substring(with: m.range(at: 3))
-            let next = (Int(numStr) ?? 0) + 1
-            let prefixLen = lineNS.length - (rest as NSString).length
-            return continueOrExitList(
-                lineRange: lineRange,
-                prefixLen: prefixLen,
-                rest: rest,
-                continuation: "\(indent)\(next). "
-            )
-        }
-
-        return false
-    }
-
-    private func continueOrExitList(lineRange: NSRange,
-                                     prefixLen: Int,
-                                     rest: String,
-                                     continuation: String) -> Bool {
-        let restTrimmed = rest.trimmingCharacters(in: .whitespaces)
-        let selection = textView.selectedRange()
-
-        if restTrimmed.isEmpty {
-            // Empty item — strip the marker so this Enter starts a new line
-            // outside the list. Return false so NSTextView handles the Enter.
-            let prefixRange = NSRange(location: lineRange.location, length: prefixLen)
-            guard textView.shouldChangeText(in: prefixRange, replacementString: "") else { return false }
-            textStorage.replaceCharacters(in: prefixRange, with: "")
-            textView.didChangeText()
-            return false
-        } else {
-            // Continue the list.
-            let insertion = "\n" + continuation
-            let insertRange = NSRange(location: selection.location, length: 0)
-            guard textView.shouldChangeText(in: insertRange, replacementString: insertion) else { return false }
-            textStorage.replaceCharacters(in: insertRange, with: insertion)
-            textView.didChangeText()
-            return true
-        }
-    }
-
-    // MARK: - Slash commands
-
-    private final class SlashCommand: NSObject {
-        let slashLocation: Int
-        let replacement: String
-        init(slashLocation: Int, replacement: String) {
-            self.slashLocation = slashLocation
-            self.replacement = replacement
-        }
-    }
-
-    private func detectSlashTrigger() {
-        let selection = textView.selectedRange()
-        guard selection.length == 0, selection.location > 0 else { return }
-        let str = textView.string as NSString
-        guard selection.location <= str.length else { return }
-        let lastChar = str.substring(with: NSRange(location: selection.location - 1, length: 1))
-        guard lastChar == "/" else { return }
-
-        if selection.location > 1 {
-            let prev = str.substring(with: NSRange(location: selection.location - 2, length: 1))
-            let allowed: Set<String> = ["\n", " ", "\t"]
-            if !allowed.contains(prev) { return }
-        }
-
-        let slashLocation = selection.location - 1
-        DispatchQueue.main.async { [weak self] in
-            self?.showSlashMenu(at: slashLocation)
-        }
-    }
-
-    private func showSlashMenu(at slashLocation: Int) {
-        let now = Date()
-        let date = NoteWindowController.slashDateFormatter.string(from: now)
-        let time = NoteWindowController.slashTimeFormatter.string(from: now)
-        let dateTime = "\(date) \(time)"
-
-        let entries: [(String, String)] = [
-            ("Date  →  \(date)",            date),
-            ("Time  →  \(time)",            time),
-            ("Date + Time  →  \(dateTime)", dateTime),
-            ("To-do  →  - [ ] ",            "- [ ] "),
-            ("Divider  →  ---",             "---"),
-            ("Heading  →  # ",              "# "),
-            ("Subheading  →  ## ",          "## ")
-        ]
-
-        let menu = NSMenu()
-        menu.font = NSFont.systemFont(ofSize: 12)
-        for (title, replacement) in entries {
-            let item = NSMenuItem(
-                title: title,
-                action: #selector(insertSlashCommand(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = SlashCommand(slashLocation: slashLocation, replacement: replacement)
-            menu.addItem(item)
-        }
-
-        guard let container = textView.textContainer else { return }
-        let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: slashLocation, length: 1),
-            actualCharacterRange: nil
-        )
-        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
-        rect.origin.x += textView.textContainerOrigin.x
-        rect.origin.y += textView.textContainerOrigin.y
-        let popPoint = NSPoint(x: rect.minX, y: rect.maxY + 2)
-        menu.popUp(positioning: nil, at: popPoint, in: textView)
-    }
-
-    @objc private func insertSlashCommand(_ sender: NSMenuItem) {
-        guard let cmd = sender.representedObject as? SlashCommand else { return }
-        let len = textStorage.length
-        let loc = cmd.slashLocation
-        guard loc >= 0, loc < len else { return }
-        let existing = (textView.string as NSString).substring(with: NSRange(location: loc, length: 1))
-        guard existing == "/" else { return }
-
-        let range = NSRange(location: loc, length: 1)
-        guard textView.shouldChangeText(in: range, replacementString: cmd.replacement) else { return }
-        textStorage.replaceCharacters(in: range, with: cmd.replacement)
-        textView.didChangeText()
-        let inserted = (cmd.replacement as NSString).length
-        textView.setSelectedRange(NSRange(location: loc + inserted, length: 0))
-    }
-
-    // MARK: - Slash commands (title, date/time only)
-
-    private func detectTitleSlashTrigger() {
-        guard let editor = titleField.currentEditor() else { return }
-        let str = titleField.stringValue as NSString
-        let selection = editor.selectedRange
-        guard selection.length == 0, selection.location > 0 else { return }
-        let lastChar = str.substring(with: NSRange(location: selection.location - 1, length: 1))
-        guard lastChar == "/" else { return }
-
-        if selection.location > 1 {
-            let prev = str.substring(with: NSRange(location: selection.location - 2, length: 1))
-            let allowed: Set<String> = [" ", "\t"]
-            if !allowed.contains(prev) { return }
-        }
-
-        let slashLocation = selection.location - 1
-        DispatchQueue.main.async { [weak self] in
-            self?.showTitleSlashMenu(at: slashLocation)
-        }
-    }
-
-    private func showTitleSlashMenu(at slashLocation: Int) {
-        let now = Date()
-        let date = NoteWindowController.slashDateFormatter.string(from: now)
-        let time = NoteWindowController.slashTimeFormatter.string(from: now)
-        let dateTime = "\(date) \(time)"
-
-        let entries: [(String, String)] = [
-            ("Date  →  \(date)",            date),
-            ("Time  →  \(time)",            time),
-            ("Date + Time  →  \(dateTime)", dateTime)
-        ]
-
-        let menu = NSMenu()
-        menu.font = NSFont.systemFont(ofSize: 12)
-        for (title, replacement) in entries {
-            let item = NSMenuItem(
-                title: title,
-                action: #selector(insertTitleSlashCommand(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = SlashCommand(slashLocation: slashLocation, replacement: replacement)
-            menu.addItem(item)
-        }
-
-        let popPoint = NSPoint(x: 0, y: titleField.bounds.maxY + 2)
-        menu.popUp(positioning: nil, at: popPoint, in: titleField)
-    }
-
-    @objc private func insertTitleSlashCommand(_ sender: NSMenuItem) {
-        guard let cmd = sender.representedObject as? SlashCommand else { return }
-        let str = titleField.stringValue as NSString
-        let loc = cmd.slashLocation
-        guard loc >= 0, loc < str.length else { return }
-        let existing = str.substring(with: NSRange(location: loc, length: 1))
-        guard existing == "/" else { return }
-
-        let newValue = str.replacingCharacters(
-            in: NSRange(location: loc, length: 1),
-            with: cmd.replacement
-        )
-        titleField.stringValue = newValue
-        note.title = newValue
-        refreshCollapsedTitle()
-
-        if let editor = titleField.currentEditor() {
-            let newPos = loc + (cmd.replacement as NSString).length
-            editor.selectedRange = NSRange(location: newPos, length: 0)
-        }
-        scheduleSave()
-    }
-
-    private func refreshMarkerVisibility() {
-        let selection = textView.selectedRange()
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: selection)
-        let full = NSRange(location: 0, length: textStorage.length)
-        layoutManager.invalidateGlyphs(forCharacterRange: full, changeInLength: 0, actualCharacterRange: nil)
-        layoutManager.ensureLayout(for: layoutManager.textContainers[0])
-    }
-
     private func updateDateLabel() {
-        dateLabel.stringValue = relativeDateString(for: Date())
+        dateLabel.stringValue = relativeDateString(for: clock.now())
     }
 
     private func relativeDateString(for date: Date) -> String {
@@ -1182,59 +1036,23 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         }
     }
 
-    // MARK: - NSLayoutManagerDelegate
-
-    func layoutManager(
-        _ layoutManager: NSLayoutManager,
-        shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
-        properties props: UnsafePointer<NSLayoutManager.GlyphProperty>,
-        characterIndexes charIndexes: UnsafePointer<Int>,
-        font aFont: NSFont,
-        forGlyphRange glyphRange: NSRange
-    ) -> Int {
-        guard let storage = layoutManager.textStorage else { return 0 }
-
-        var modified = false
-        var newProps = [NSLayoutManager.GlyphProperty](repeating: .null, count: glyphRange.length)
-        for i in 0..<glyphRange.length {
-            var prop = props[i]
-            let charIdx = charIndexes[i]
-            if charIdx < storage.length {
-                let attrs = storage.attributes(at: charIdx, effectiveRange: nil)
-                if attrs[.mdHidden] != nil {
-                    prop = .null
-                    modified = true
-                }
-            }
-            newProps[i] = prop
-        }
-
-        guard modified else { return 0 }
-
-        newProps.withUnsafeBufferPointer { buffer in
-            layoutManager.setGlyphs(
-                glyphs,
-                properties: buffer.baseAddress!,
-                characterIndexes: charIndexes,
-                font: aFont,
-                forGlyphRange: glyphRange
-            )
-        }
-        return glyphRange.length
-    }
-
     // MARK: - Collapse
 
     private func performToggleCollapse() {
         guard let window = window else { return }
-        note.collapsed.toggle()
+        geometry.collapsed.toggle()
+        layoutStore.set(geometry, for: note.id)
         var frame = window.frame
-        if note.collapsed {
-            // Commit any in-flight title edit before collapsing.
-            if window.firstResponder === titleField || titleField.currentEditor() != nil {
-                window.makeFirstResponder(window)
+        if geometry.collapsed {
+            // Commit any in-flight title edit, and take focus out of the hidden
+            // body so typing and paste cannot reach text nobody can see.
+            if let responder = window.firstResponder as? NSView, responder.isDescendant(of: bodyContainer) {
+                window.makeFirstResponder(nil)
             }
             preCollapseHeight = frame.size.height
+            // Focus has left the body: an outside edit held back while the
+            // person typed is folded in now, as it is when the window loses key.
+            noteDocument.blur()
 
             refreshCollapsedTitle()
             titleLabel.isHidden = false
@@ -1265,148 +1083,57 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             // expand straight off the screen, leaving only its title bar.
             frame = NoteWindow.clampToVisibleScreen(frame)
             window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
-            note.positionX = Double(frame.origin.x)
-            note.positionY = Double(frame.origin.y)
-            note.height = Double(frame.size.height)
-            preCollapseHeight = frame.size.height
+            recordFrame(frame, resized: true)
+            window.makeFirstResponder(textView)
         }
         updateExpandButtonIcon()
+        updateButtonAccessibility()
         updateChromeVisibility()
         updateAlpha()
-        scheduleSave()
-    }
-
-    // MARK: - TodoTextViewDelegate
-
-    /// Flip the bracket character (`[ ]` ↔ `[x]`) inside the markdown source
-    /// for the checkbox at the given character index. The checkbox visual is
-    /// re-rendered automatically when MarkdownStyler runs in textDidChange.
-    func textViewDidToggleCheckbox(at charIndex: Int) {
-        let str = textStorage.string as NSString
-        guard charIndex < str.length else { return }
-
-        let lineRange = str.lineRange(for: NSRange(location: charIndex, length: 0))
-        let lineNS = str.substring(with: lineRange) as NSString
-        let bracketInLine = lineNS.range(of: "[")
-        guard bracketInLine.location != NSNotFound,
-              bracketInLine.location + 1 < lineNS.length else { return }
-
-        let bracketCharIdx = lineRange.location + bracketInLine.location + 1
-        let current = str.substring(with: NSRange(location: bracketCharIdx, length: 1))
-        let replacement = current.lowercased() == "x" ? " " : "x"
-
-        let range = NSRange(location: bracketCharIdx, length: 1)
-        guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
-        textStorage.replaceCharacters(in: range, with: replacement)
-        textView.didChangeText()
+        if geometry.collapsed { onCollapsed?() }
     }
 
     // MARK: - External change sync
 
-    @objc func handleStoreChange() {
-        guard let updated = store.loadNote(id: note.id) else { return }
-        // Our own write, echoed back by the watcher. Mid-burst this is the
-        // text as of the last debounce, which is not an external edit.
-        if updated.content == lastPersistedContent, updated.title == lastPersistedTitle { return }
-        let contentChanged = updated.content != note.content
-        let titleChanged = updated.title != note.title
-        if !contentChanged && !titleChanged { return }
-
-        // Anything typed since the last write only exists in this buffer, so
-        // applying the incoming version over the top would discard it. Defer
-        // instead and let the merge decide — the same rule every other save
-        // path follows. Relying on the window being key was not enough:
-        // clicking the note's own title bar mid-sentence drops first
-        // responder, and the next store change would take the text with it.
-        if hasUnsavedEdits {
-            pendingExternalNote = updated
-            return
-        }
-
-        // No unsaved work, but still don't yank the text out from under a
-        // caret that is sitting in it.
-        if let win = window, win.isKeyWindow {
-            let editing = win.firstResponder === textView ||
-                titleField.currentEditor() != nil
-            if editing {
-                pendingExternalNote = updated
-                return
+    @objc private func storeDidChange(_ notification: Notification) {
+        // A save by this store is already in memory, and another note's save
+        // is not about this file: neither is worth a disk read.
+        if case let .saved(id) = NoteStore.change(in: notification) {
+            if id == note.id, notification.object as AnyObject !== store,
+               let written = store.snapshot(id: id) {
+                // Another store wrote this note. This store's cache cannot
+                // hold that write, so the file itself is the only place to look.
+                noteDocument.externalChange(written.note, fingerprint: written.fingerprint)
             }
-        }
-        applyExternalNote(updated)
-    }
-
-    /// True when the buffer holds text that has not reached disk — either a
-    /// save is still armed, or what we last wrote no longer matches.
-    private var hasUnsavedEdits: Bool {
-        if saveWorkItem != nil { return true }
-        guard let persistedContent = lastPersistedContent,
-              let persistedTitle = lastPersistedTitle else { return false }
-        return textView.string != persistedContent || titleField.stringValue != persistedTitle
-    }
-
-    /// Fold a deferred external edit into what the user has been typing. The
-    /// local buffer hasn't necessarily been saved yet, so writing either side
-    /// over the other loses text; `ConflictResolver` keeps both.
-    private func mergePendingExternalNote() {
-        guard let external = pendingExternalNote else { return }
-        pendingExternalNote = nil
-
-        var local = note
-        local.content = textView.string
-        local.title = titleField.stringValue
-        local.updatedAt = Date()
-
-        // The title is edited in its own field, and `needsMerge` only weighs
-        // bodies and labels — so a title-only difference used to fall through
-        // to "apply theirs" and wipe a rename the user was still typing.
-        let localTitleWins = local.title != external.title && titleField.currentEditor() != nil
-
-        guard ConflictResolver.needsMerge([local, external]),
-              var merged = ConflictResolver.merge([local, external])
-        else {
-            if localTitleWins { return }
-            applyExternalNote(external)
             return
         }
-        if localTitleWins { merged.title = local.title }
-        applyExternalNote(merged)
-        note.labels = merged.labels
+        // A change that names the notes it touched is not about this file unless
+        // this note is one of them.
+        if case let .external(ids) = NoteStore.change(in: notification), !ids.contains(note.id) { return }
+        handleStoreChange()
     }
 
-    private func applyExternalNote(_ updated: Note) {
-        // The window now shows this version, so it is what the buffer is
-        // compared against. A stale record made every later outside edit look
-        // like it landed on unsaved work and get deferred. A merged note that
-        // is not on disk yet is safe here: every caller saves right after.
-        lastPersistedContent = updated.content
-        lastPersistedTitle = updated.title
-        if updated.title != note.title {
-            note.title = updated.title
-            titleField.stringValue = updated.title
+    @objc func handleStoreChange() {
+        noteDocument.storeDidChange()
+    }
+
+    /// Draw the parts of the buffer that an outside version just replaced.
+    /// Setting the field and the storage directly does not call back into the
+    /// delegate methods, so this never counts as an edit.
+    private func showExternalChange(_ applied: NoteDocument.Applied) {
+        if applied.title {
+            titleField.stringValue = note.title
             refreshCollapsedTitle()
         }
-        if updated.labels != note.labels {
-            note.labels = updated.labels
+        if applied.labels {
             rebuildLabelChips()
         }
-        if updated.content != note.content {
-            note.content = updated.content
+        if applied.content {
             // The collapsed bar shows a checkbox count drawn from the body,
             // so a content-only edit has to refresh it too.
             refreshCollapsedTitle()
-            let oldSelection = textView.selectedRange()
-            let fullRange = NSRange(location: 0, length: textStorage.length)
-            textStorage.replaceCharacters(in: fullRange, with: updated.content)
-            // The recorded undo operations refer to ranges in the text we just
-            // threw away; replaying them against the new string garbles it.
-            textView.undoManager?.removeAllActions()
-            MarkdownStyler.apply(to: textView)
-            refreshMarkerVisibility()
+            editor.replaceText(note.content)
             updateDateLabel()
-            let len = textStorage.length
-            let clamped = NSRange(location: min(oldSelection.location, len), length: 0)
-            textView.setSelectedRange(clamped)
         }
     }
 
@@ -1420,7 +1147,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         for label in note.labels {
             let chip = LabelChipView(labelName: label)
             chip.onRemove = { [weak self] in
-                self?.removeLabel(label)
+                self?.removeLabelOfferingUndo(label)
             }
             labelStack.addArrangedSubview(chip)
         }
@@ -1429,20 +1156,38 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private func addLabel(_ raw: String) {
         let normalized = NoteLabel.normalize(raw)
         guard !normalized.isEmpty, !note.labels.contains(normalized) else { return }
-        note.labels.append(normalized)
-        wasNeverEdited = false
+        noteDocument.edit { $0.labels.append(normalized) }
         rebuildLabelChips()
-        scheduleSave()
     }
 
     private func removeLabel(_ name: String) {
         guard let idx = note.labels.firstIndex(of: name) else { return }
-        note.labels.remove(at: idx)
+        noteDocument.adjust { $0.labels.remove(at: idx) }
         rebuildLabelChips()
-        scheduleSave()
     }
 
-    @objc private func showLabelMenu() {
+    /// A chip is one click or key press, so removing a label that way can be
+    /// taken back: the label returns to the place it had.
+    func removeLabelOfferingUndo(_ name: String) {
+        guard let idx = note.labels.firstIndex(of: name) else { return }
+        removeLabel(name)
+        onLabelRemoved?(name) { [weak self] in
+            guard let self = self, !self.note.labels.contains(name) else { return }
+            self.noteDocument.adjust { $0.labels.insert(name, at: min(idx, $0.labels.count)) }
+            self.rebuildLabelChips()
+        }
+    }
+
+    @objc func showLabelMenu() {
+        guard !geometry.collapsed else { return }
+        let menu = makeLabelMenu()
+        let p = NSPoint(x: labelButton.bounds.minX, y: labelButton.bounds.maxY + 4)
+        menu.popUp(positioning: nil, at: p, in: labelButton)
+    }
+
+    /// The labels to toggle on this note. A new one is made by typing `#name`
+    /// in the body, so the menu offers no way to type one.
+    func makeLabelMenu() -> NSMenu {
         let menu = NSMenu()
         menu.font = NSFont.systemFont(ofSize: 12)
 
@@ -1450,7 +1195,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         let union = Array(Set(known).union(note.labels)).sorted()
 
         if union.isEmpty {
-            let empty = NSMenuItem(title: "No labels yet", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: "No labels yet. Type #name in the note.", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
@@ -1466,17 +1211,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
                 menu.addItem(item)
             }
         }
-        menu.addItem(.separator())
-        let createItem = NSMenuItem(
-            title: "New Label…",
-            action: #selector(createLabelFromMenu),
-            keyEquivalent: ""
-        )
-        createItem.target = self
-        menu.addItem(createItem)
-
-        let p = NSPoint(x: labelButton.bounds.minX, y: labelButton.bounds.maxY + 4)
-        menu.popUp(positioning: nil, at: p, in: labelButton)
+        return menu
     }
 
     @objc private func toggleLabelFromMenu(_ sender: NSMenuItem) {
@@ -1488,186 +1223,37 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         }
     }
 
-    @objc private func createLabelFromMenu() {
-        let alert = NSAlert()
-        alert.messageText = "New Label"
-        alert.informativeText = "Lowercase, no spaces. Other characters are stripped."
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
-        field.placeholderString = "label-name"
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            addLabel(field.stringValue)
-        }
-    }
-
-    // MARK: - Label autocomplete
-
-    /// Look back from the caret for an active `#word` token and either show
-    /// or update the autocomplete panel. Dismiss it when the cursor leaves
-    /// the token's span.
-    private func detectLabelTrigger() {
-        let selection = textView.selectedRange()
-        guard selection.length == 0 else { hideLabelCompletion(); return }
-        let str = textView.string as NSString
-        let cursor = selection.location
-
-        var i = cursor - 1
-        while i >= 0 {
-            let ch = str.substring(with: NSRange(location: i, length: 1))
-            if ch == "#" {
-                let prevOK: Bool
-                if i == 0 {
-                    prevOK = true
-                } else {
-                    let prev = str.substring(with: NSRange(location: i - 1, length: 1))
-                    prevOK = (prev == " " || prev == "\t" || prev == "\n")
-                }
-                if prevOK {
-                    let typedLen = cursor - i - 1
-                    let typed = typedLen > 0
-                        ? str.substring(with: NSRange(location: i + 1, length: typedLen))
-                        : ""
-                    showLabelCompletion(at: i, typed: typed)
-                    return
-                }
-                hideLabelCompletion()
-                return
-            }
-            // Spaces / newlines end the token.
-            if ch == " " || ch == "\t" || ch == "\n" {
-                hideLabelCompletion()
-                return
-            }
-            i -= 1
-        }
-        hideLabelCompletion()
-    }
-
-    private func showLabelCompletion(at hashLocation: Int, typed: String) {
-        let normalizedQuery = NoteLabel.normalize(typed)
-        let known = store.allLabels()
-        let filtered: [String]
-        if normalizedQuery.isEmpty {
-            filtered = known
-        } else {
-            filtered = known.filter { $0.contains(normalizedQuery) }
-        }
-
-        var items: [LabelCompletionPanel.Item] = filtered.map { .existing($0) }
-        if !normalizedQuery.isEmpty && !known.contains(normalizedQuery) {
-            items.append(.create(normalizedQuery))
-        }
-        if items.isEmpty {
-            hideLabelCompletion()
-            return
-        }
-
-        labelTriggerStart = hashLocation
-        labelPanel.setItems(items)
-        positionLabelPanel(below: hashLocation)
-        if !labelPanel.isVisible {
-            labelPanel.orderFront(nil)
-        }
-    }
-
-    private func hideLabelCompletion() {
-        if labelPanel.isVisible { labelPanel.orderOut(nil) }
-        labelTriggerStart = nil
-    }
-
-    private func positionLabelPanel(below charIndex: Int) {
-        guard let win = textView.window, let container = textView.textContainer else { return }
-        let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: charIndex, length: 1),
-            actualCharacterRange: nil
-        )
-        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
-        rect.origin.x += textView.textContainerOrigin.x
-        rect.origin.y += textView.textContainerOrigin.y
-        // Convert from textView (flipped) → window → screen.
-        let belowInTextView = NSPoint(x: rect.minX, y: rect.maxY + 2)
-        let inWindow = textView.convert(belowInTextView, to: nil)
-        let screenPoint = win.convertPoint(toScreen: inWindow)
-        var frame = labelPanel.frame
-        // Place panel so its TOP edge sits at the caret line.
-        frame.origin = NSPoint(x: screenPoint.x, y: screenPoint.y - frame.size.height)
-        labelPanel.setFrame(frame, display: false)
-    }
-
-    private func acceptLabelCompletion(_ item: LabelCompletionPanel.Item) {
-        guard let start = labelTriggerStart else { return }
-        let cursor = textView.selectedRange().location
-        let length = max(0, cursor - start)
-        guard start + length <= textStorage.length else {
-            hideLabelCompletion()
-            return
-        }
-        let range = NSRange(location: start, length: length)
-        if textView.shouldChangeText(in: range, replacementString: "") {
-            textStorage.replaceCharacters(in: range, with: "")
-            textView.didChangeText()
-            note.content = textView.string
-        }
-        addLabel(item.labelName)
-        hideLabelCompletion()
-    }
-
     // MARK: - Persistence
 
-    private func scheduleSave() {
-        guard !savingDisabled else { return }
-        saveWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            // Clear first: leaving it set made `flushPendingSave` believe a
-            // save was still owed, so quitting rewrote every open note.
-            self.saveWorkItem = nil
-            guard !self.savingDisabled else { return }
-            // A deferred external edit has to be folded in first, or this
-            // write silently overwrites it.
-            self.mergePendingExternalNote()
-            self.persist()
-        }
-        saveWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+    /// Write any debounced edit immediately. Quitting (or archiving) mid-sentence
+    /// would otherwise drop everything typed since the last pause.
+    ///
+    /// Returns false when the text did not reach disk, so a caller that is
+    /// about to end the process can save it somewhere else.
+    @discardableResult
+    func flushPendingSave() -> Bool {
+        noteDocument.flush()
     }
 
-    /// Write the note and remember exactly what went to disk. Our own writes
-    /// come back through the file watcher as `didChange`, and without this
-    /// record there is no way to tell that echo apart from someone else
-    /// editing the file.
-    private func persist() {
-        note.updatedAt = Date()
-        lastPersistedContent = note.content
-        lastPersistedTitle = note.title
-        store.save(note)
-    }
-
-    /// Write any debounced edit immediately. Saves are debounced by half a
-    /// second, so quitting (or archiving) mid-sentence would otherwise drop
-    /// everything typed since the last pause.
-    func flushPendingSave() {
-        guard saveWorkItem != nil, !savingDisabled else { return }
-        saveWorkItem?.cancel()
-        saveWorkItem = nil
-        mergePendingExternalNote()
-        persist()
-    }
+    /// The note as the window shows it now, which may be ahead of the file.
+    var bufferedNote: Note { note }
 
     /// Tear down without persisting anything else. Used when the underlying
     /// file disappeared externally (e.g. an agent processed and removed the
     /// note) — without this guard, an in-flight debounced save would
     /// resurrect the file right after `reconcileOpenWindows` closed the
     /// window.
-    func closeAfterExternalDeletion() {
-        savingDisabled = true
-        saveWorkItem?.cancel()
-        saveWorkItem = nil
+    ///
+    /// Text typed since the last save is written where the note went first. When
+    /// that cannot be done the window stays open, a retry is armed, and this
+    /// returns false. `textKeptElsewhere` is for a caller that has put the text
+    /// in a recovery file itself.
+    @discardableResult
+    func closeAfterExternalDeletion(textKeptElsewhere: Bool = false) -> Bool {
+        guard case .closed = noteDocument.close(textKeptElsewhere ? .externalDeletionTextKept : .externalDeletion) else {
+            return false
+        }
         window?.close()
+        return true
     }
 }

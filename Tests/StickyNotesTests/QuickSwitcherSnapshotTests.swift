@@ -10,21 +10,21 @@ import XCTest
 /// is deliberately not asserted: whether text rasterizes offscreen depends on
 /// the window server, which differs between a developer's machine and a CI
 /// runner, and a flaky pixel heuristic is worse than no assertion.
-final class QuickSwitcherSnapshotTests: XCTestCase {
+@MainActor final class QuickSwitcherSnapshotTests: XCTestCase {
     private var root: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("QuickSwitcherSnapshot-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: root)
     }
 
     private func seededStore() -> NoteStore {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let samples: [(String, String, [String], NoteColor)] = [
             ("Groceries", "- [ ] oat milk\n- [x] eggs\n- [ ] sourdough", ["home"], .yellow),
             ("Q3 planning", "Ship the search release.\nThen the editor work.", ["work"], .blue),
@@ -35,8 +35,7 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
         for (index, sample) in samples.enumerated() {
             store.save(Note(
                 id: UUID(), title: sample.0, content: sample.1,
-                positionX: 0, positionY: 0, width: 240, height: 200,
-                collapsed: false, color: sample.3, labels: sample.2,
+                width: 240, height: 200, color: sample.3, labels: sample.2,
                 createdAt: Date(timeIntervalSince1970: 1_700_000_000),
                 updatedAt: Date().addingTimeInterval(Double(-index) * 3600)
             ))
@@ -274,8 +273,7 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
         XCTAssertEqual(controller.resultCount, 5)
 
         store.save(Note(
-            id: UUID(), title: "Brand new", content: "", positionX: 0, positionY: 0,
-            width: 240, height: 200, collapsed: false, color: .yellow, labels: [],
+            id: UUID(), title: "Brand new", content: "", width: 240, height: 200, color: .yellow, labels: [],
             createdAt: Date(), updatedAt: Date()
         ))
         controller.prepare()

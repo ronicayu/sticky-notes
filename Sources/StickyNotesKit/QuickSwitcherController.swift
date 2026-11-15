@@ -4,6 +4,7 @@ import KeyboardShortcuts
 /// Spotlight-style palette for jumping to any note — active or archived — by
 /// typing. The notes panel is a browser; this is the keyboard path for when you
 /// already know what you're looking for.
+@MainActor
 final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
 
     /// What the caller should do with the chosen note. Archived notes are
@@ -12,19 +13,18 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     enum Outcome {
         /// Open an existing note, restoring it first when it was archived.
         case open(id: UUID, wasArchived: Bool)
+        /// Open today's daily note, which is a vault file rather than a stored
+        /// note, so it has no id the store knows.
+        case openDaily
         /// Nothing matched (or the user asked for a new note anyway) — make
         /// one titled with what they typed. Searching for something that
         /// isn't there is itself a capture intent.
         case create(title: String)
     }
 
-    /// Kept for the archived-restore path; `Outcome` is what callers act on.
-    struct Selection {
-        let id: UUID
-        let wasArchived: Bool
-    }
-
     private let store: NoteStore
+    /// Today's daily note as a candidate, or nil when no daily note is set up.
+    private let dailyNote: () -> Note?
     private let onChoose: (Outcome) -> Void
 
     private let searchField = QuickSwitcherSearchField()
@@ -46,8 +46,9 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
     private var archivedIds: Set<UUID> = []
     private var results: [NoteMatch] = []
 
-    init(store: NoteStore, onChoose: @escaping (Outcome) -> Void) {
+    init(store: NoteStore, dailyNote: @escaping () -> Note? = { nil }, onChoose: @escaping (Outcome) -> Void) {
         self.store = store
+        self.dailyNote = dailyNote
         self.onChoose = onChoose
 
         let panel = QuickSwitcherPanel(
@@ -120,7 +121,7 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
         let active = store.loadActive()
         let archived = store.loadArchived()
         archivedIds = Set(archived.map(\.id))
-        candidates = active + archived
+        candidates = active + archived + (dailyNote().map { [$0] } ?? [])
     }
 
     // MARK: - UI
@@ -333,6 +334,10 @@ final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, 
 
     private func choose(_ match: NoteMatch) {
         dismiss()
+        if match.note.id == DailyNote.candidateID {
+            onChoose(.openDaily)
+            return
+        }
         onChoose(.open(id: match.note.id, wasArchived: archivedIds.contains(match.note.id)))
     }
 
@@ -439,7 +444,7 @@ private final class QuickSwitcherSearchField: NSTextField {
 
 // MARK: - Row
 
-private final class QuickSwitcherCell: NSView {
+final class QuickSwitcherCell: NSView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("quickSwitcherCell")
 
     private let dot = NSView()
@@ -511,6 +516,18 @@ private final class QuickSwitcherCell: NSView {
         // Only repeat the excerpt when it says something the heading doesn't.
         let excerpt = match.excerpt
         detailLabel.stringValue = (excerpt == heading) ? relativeDate(match.note) : excerpt
+        defer {
+            NoteRowAccessibility.apply(
+                to: self, heading: heading, progress: MarkdownEditing.checkboxProgress(in: match.note.content),
+                detail: detailLabel.stringValue,
+                trailing: match.note.id == DailyNote.candidateID ? "daily note" : (archived ? "archived" : "")
+            )
+        }
+
+        if match.note.id == DailyNote.candidateID {
+            badge.stringValue = DailyNote.shortDate(match.note.createdAt)
+            return
+        }
 
         // Task progress earns the badge slot over the archived marker — it
         // changes, and it's the thing you're deciding on.

@@ -24,16 +24,22 @@ final class WelcomeNoteTests: XCTestCase {
     }
 
     private func makeStore() -> NoteStore {
-        NoteStore(rootURL: root, format: .json)
+        NoteStore(rootURL: root)
     }
 
     private func makeNote() -> Note {
         Note(
             id: UUID(), title: "existing", content: "x",
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: [],
+            width: 240, height: 200, color: .yellow, labels: [],
             createdAt: Date(), updatedAt: Date()
         )
+    }
+
+    /// What is on disk and what the store last failed at, for the message of a
+    /// failed assertion, so a failure on another machine names its cause.
+    private func diagnostics(_ store: NoteStore) -> String {
+        let paths = (FileManager.default.enumerator(atPath: root.path)?.allObjects as? [String]) ?? []
+        return "files: \(paths.sorted()); last failure: \(String(describing: store.lastFailure))"
     }
 
     func testAFreshInstallGetsAWelcomeNote() throws {
@@ -43,12 +49,24 @@ final class WelcomeNoteTests: XCTestCase {
         XCTAssertEqual(store.loadActive().count, 1, "the note should be saved, not just returned")
     }
 
+    func testTheWelcomeNoteIdIsKeptForItsChecklistOnlyWhenOneWasMade() throws {
+        let note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: makeStore(), defaults: defaults))
+        XCTAssertEqual(defaults.string(forKey: WelcomeNote.noteIDKey), note.id.uuidString)
+
+        let other = try XCTUnwrap(UserDefaults(suiteName: suiteName + "-other"))
+        defer { other.removePersistentDomain(forName: suiteName + "-other") }
+        let store = makeStore()
+        store.save(makeNote())
+        XCTAssertNil(WelcomeNote.makeIfNeeded(store: store, defaults: other))
+        XCTAssertNil(other.string(forKey: WelcomeNote.noteIDKey))
+    }
+
     func testTheWelcomeNoteIsOnlyEverCreatedOnce() {
         let store = makeStore()
         XCTAssertNotNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
         XCTAssertNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults),
                      "a second launch should not create another")
-        XCTAssertEqual(store.loadActive().count, 1)
+        XCTAssertEqual(store.loadActive().count, 1, diagnostics(store))
     }
 
     /// Deleting it is a normal thing to do; it must not come back.
@@ -66,8 +84,8 @@ final class WelcomeNoteTests: XCTestCase {
     func testAnExistingLibraryGetsNoWelcomeNote() {
         let store = makeStore()
         store.save(makeNote())
-        XCTAssertNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
-        XCTAssertEqual(store.loadActive().count, 1)
+        XCTAssertNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults), diagnostics(store))
+        XCTAssertEqual(store.loadActive().count, 1, diagnostics(store))
     }
 
     func testAnArchiveOnlyLibraryAlsoCountsAsExisting() {
@@ -84,7 +102,7 @@ final class WelcomeNoteTests: XCTestCase {
         let store = makeStore()
         let note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
 
-        var edited = try XCTUnwrap(store.loadActive().first)
+        var edited = try XCTUnwrap(store.loadActive().first, diagnostics(store))
         edited.content = "I made this mine"
         store.save(edited)
 
@@ -115,7 +133,6 @@ final class WelcomeNoteTests: XCTestCase {
     func testTheWelcomeNoteOpensOnScreen() throws {
         let store = makeStore()
         let note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
-        XCTAssertFalse(note.collapsed, "it explains things; it should not start collapsed")
         XCTAssertGreaterThan(note.width, 0)
         XCTAssertGreaterThan(note.height, 0)
     }

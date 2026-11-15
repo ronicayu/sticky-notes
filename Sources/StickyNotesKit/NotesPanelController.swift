@@ -4,6 +4,7 @@ import KeyboardShortcuts
 /// Single panel that lists every sticky note (active + archived). Toggle with a
 /// segmented control. Active rows focus their on-desktop note window when
 /// clicked; archived rows can be restored or permanently deleted.
+@MainActor
 final class NotesPanelController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
 
     enum Mode: Int { case active = 0, archived = 1, trash = 2 }
@@ -25,6 +26,11 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
     private let store: NoteStore
     private let onActivate: (UUID) -> Void
+    /// Archives an active note. The desk closes the note's window, which writes
+    /// what was typed first; the default moves the file and nothing else.
+    private let onArchive: (Note) -> Void
+    /// Today's daily note as a read-only row, or nil when none is set up.
+    private let dailyNote: () -> Note?
 
     private var mode: Mode = .active
     private var sortOrder: SortOrder = .updated
@@ -42,9 +48,14 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     private let restoreButton = NSButton(title: "Restore", target: nil, action: nil)
     private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
 
-    init(store: NoteStore, onActivate: @escaping (UUID) -> Void) {
+    init(
+        store: NoteStore, dailyNote: @escaping () -> Note? = { nil },
+        onActivate: @escaping (UUID) -> Void, onArchive: ((Note) -> Void)? = nil
+    ) {
         self.store = store
+        self.dailyNote = dailyNote
         self.onActivate = onActivate
+        self.onArchive = onArchive ?? { store.archive($0) }
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 460),
@@ -67,6 +78,11 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
             name: NoteStore.didChange,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(becameVisible), name: NSApplication.didUnhideNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(becameVisible),
+            name: NSWindow.didChangeOcclusionStateNotification, object: window)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -75,10 +91,34 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// A change in the store was skipped while the panel could not be seen.
+    private var needsReload = false
+
+    /// A hidden panel does no work for a change in the store: it has nobody to
+    /// show the answer to. It notes that it is stale instead, and reloads when it
+    /// is shown, when the app is unhidden, or when its window becomes visible.
     @objc private func handleStoreChange() {
-        DispatchQueue.main.async { [weak self] in
-            self?.reload()
+        guard window?.isVisible == true else {
+            needsReload = true
+            return
         }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.window?.isVisible == true { self.reload() } else { self.needsReload = true }
+        }
+    }
+
+    /// Reloads first: whatever changed while the panel was hidden, and today's
+    /// note, are only read now.
+    override func showWindow(_ sender: Any?) {
+        reload()
+        super.showWindow(sender)
+    }
+
+    /// The panel became visible by some way other than `showWindow`: the app was
+    /// unhidden, or the window came out from behind others.
+    @objc private func becameVisible() {
+        if needsReload && window?.isVisible == true { reload() }
     }
 
     private func setupUI() {
@@ -249,13 +289,18 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
     // MARK: - Data
 
+    /// How many times the list was rebuilt. Read by tests.
+    private(set) var reloadCount = 0
+
     func reload() {
+        reloadCount += 1
+        needsReload = false
         let previousSelection = selectedNote()?.id
         rebuildLabelMenu()
 
         let source: [Note]
         switch mode {
-        case .active:   source = store.loadActive()
+        case .active:   source = store.loadActive() + (labelFilter == nil ? dailyNote().map { [$0] } ?? [] : [])
         case .archived: source = store.loadArchived()
         case .trash:    source = store.loadTrashed()
         }
@@ -266,6 +311,10 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         // Relevance order is the point of a search; only impose the chosen
         // sort when the user isn't searching.
         rows = query.isEmpty ? sorted(ranked) : ranked
+        // Today's note is the one row that is always the same, so it stays on top.
+        if query.isEmpty, let index = rows.firstIndex(where: { $0.note.id == DailyNote.candidateID }) {
+            rows.insert(rows.remove(at: index), at: 0)
+        }
 
         tableView.reloadData()
         restoreSelection(previousSelection)
@@ -383,8 +432,8 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
     /// ⌘⌫ archives an active note, matching the note window's close button.
     private func archiveSelectedRow() {
-        guard mode == .active, let note = selectedNote() else { return }
-        store.archive(note)
+        guard mode == .active, let note = selectedNote(), note.id != DailyNote.candidateID else { return }
+        onArchive(note)
     }
 
     @objc private func restoreSelected() {
@@ -465,6 +514,13 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         guard mode == .trash, let note = rows.first?.note else { return }
         store.restoreFromTrash(note)
         reload()
+    }
+
+    /// ⌘⌫ on the first listed row, callable directly.
+    func archiveFirstRow() {
+        guard !rows.isEmpty else { return }
+        tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        archiveSelectedRow()
     }
 
     func showMode(_ newMode: Mode) {
@@ -576,13 +632,19 @@ final class NotesPanelCell: NSView {
         }
 
         // Show why this row matched, unless that just repeats the heading.
-        let reason = match.excerpt == heading ? labelSummary(note) : match.excerpt
+        let own = note.id == DailyNote.candidateID ? DailyNote.shortDate(note.createdAt) : labelSummary(note)
+        let reason = match.excerpt == heading ? own : match.excerpt
         detail.stringValue = [taskProgress(note), reason]
             .filter { !$0.isEmpty }
             .joined(separator: "   ")
         detail.isHidden = detail.stringValue.isEmpty
 
         timeLabel.stringValue = NotesPanelCell.relativeFormatter.localizedString(for: note.updatedAt, relativeTo: Date())
+
+        NoteRowAccessibility.apply(
+            to: self, heading: heading, progress: MarkdownEditing.checkboxProgress(in: note.content),
+            detail: reason, trailing: timeLabel.stringValue
+        )
     }
 
     private func labelSummary(_ note: Note) -> String {

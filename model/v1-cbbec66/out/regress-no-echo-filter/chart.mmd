@@ -1,0 +1,99 @@
+---
+title: "One sticky note: typing, saving, outside edits, archive and Trash"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: editing
+    lg1: syncing
+    lg2: stored
+    lg3: Breaks NoSpuriousConflictBlock in some cases
+    lg4: Path to the NoSpuriousConflictBlock bug
+    state "Terms" as terms {
+      direction TB
+      state " " as tc0 {
+        direction LR
+        tm0: person = The owner, using Sticky Notes on this Mac.
+        tm1: save timer = The half-second pause after typing before the note is written to its file.
+        tm2: file watcher = The part of the app that notices the note's file changed on disk.
+        tm3: outside edit = A change to the note's file made by Obsidian, the other Mac or iCloud.
+      }
+      state " " as tc1 {
+        direction LR
+        tm4: conflict version = A second copy of the file that iCloud keeps when two saves disagree.
+        tm5: conflict sweep = The app step that merges conflict versions back into the file and appends a 'Conflicted copy' section.
+        tm6: other Mac = The owner's second Mac, running Sticky Notes on the same vault.
+        tm7: Obsidian = The notes app that shares the vault folder.
+      }
+      state " " as tc2 {
+        direction LR
+        tm8: iCloud = iCloud Drive, which syncs the vault between the Macs.
+        tm9: archive = Closed notes, still listed in the notes panel.
+        tm10: Trash = Notes deleted from the archive, kept 30 days.
+      }
+    }
+  }
+  class lg0 blue
+  class lg1 orange
+  class lg2 teal
+  class lg3 mayBreak
+  class lg4 bugPath
+  s0: File changed, window not told yet
+  s1: App quit, note on disk
+  s2: Note file deleted
+  s3: Typing, save pending
+  s4: Note open, nothing pending
+  s5: Note in the archive
+  s6: Save pending, person in another window
+  s7: Typing, save pending, caret out of the text
+  s8: Outside edit held back
+  [*] --> s0
+  s0 --> s1: the person quits the app
+  s0 --> s2: the person leaves an empty note by closing it or switching away
+  s0 --> s3: the person types in the note
+  s0 --> s4: the file watcher reports the change [the window shows it]
+  s2 --> s1: the person quits the app
+  s3 --> s1: the person quits the app
+  s3 --> s5: the person clicks the note's close button [the note has text]
+  s3 --> s0: the half-second save timer writes the note
+  s3 --> s6: the person switches to another window
+  s3 --> s7: the person grabs the note's title bar
+  s3 --> s8: the file watcher reports the change [the window holds it back]
+  s4 --> s1: the person quits the app
+  s4 --> s2: the person leaves an empty note by closing it or switching away
+  s4 --> s3: the person types in the note
+  s5 --> s1: the person quits the app
+  s0 --> s5: the person clicks the note's close button [the note has text]
+  s6 --> s3: the person clicks into the text
+  s6 --> s1: the person quits the app
+  s6 --> s5: the person clicks the note's close button [the note has text]
+  s6 --> s0: the half-second save timer writes the note
+  s6 --> s8: the file watcher reports the change [the window holds it back]
+  s7 --> s3: the person clicks into the text
+  s7 --> s1: the person quits the app
+  s7 --> s5: the person clicks the note's close button [the note has text]
+  s7 --> s6: the person switches to another window
+  s7 --> s0: the half-second save timer writes the note
+  s7 --> s8: the file watcher reports the change [the window holds it back]
+  s8 --> s1: the person quits the app
+  s8 --> s5: the person clicks the note's close button [the note has text]
+  s8 --> s0: the half-second save timer writes the note
+  s8 --> s6: the person switches to another window
+  s4 --> s5: the person clicks the note's close button [the note has text]
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 orange
+  class s0 mayBreak
+  class s0 bugPath
+  class s1 teal
+  class s1 mayBreak
+  class s2 teal
+  class s3 mayBreak
+  class s3 bugPath
+  class s4 blue
+  class s4 mayBreak
+  class s5 teal
+  class s5 mayBreak
+  class s6 mayBreak
+  class s6 bugPath
+  class s7 mayBreak
+  class s8 orange
+  class s8 bugPath

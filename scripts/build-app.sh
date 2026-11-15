@@ -34,6 +34,22 @@ APP_VERSION="${VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v
 APP_VERSION="${APP_VERSION:-0.0.0-dev}"
 sed -i '' "s|__APP_VERSION__|${APP_VERSION}|g" "${APP_DIR}/Contents/Info.plist"
 
+# CFBundleVersion is the build number updaters compare, so it has to grow with
+# every commit: the commit count. Override with BUILD_NUMBER, as with VERSION.
+# It must stay numeric, so a missing git history stamps 0 rather than text.
+# A shallow clone counts only the commits it fetched, which would look like a
+# downgrade to an updater, so say so.
+BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || true)}"
+BUILD_NUMBER="${BUILD_NUMBER:-0}"
+case "${BUILD_NUMBER}" in
+    ''|*[!0-9]*) echo "BUILD_NUMBER must be a number, got '${BUILD_NUMBER}'" >&2; exit 1 ;;
+esac
+if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" = "true" ]; then
+    echo "warning: shallow clone; build number ${BUILD_NUMBER} undercounts the history" >&2
+fi
+sed -i '' "s|__BUILD_NUMBER__|${BUILD_NUMBER}|g" "${APP_DIR}/Contents/Info.plist"
+echo "==> version ${APP_VERSION}, build ${BUILD_NUMBER}"
+
 # Generate icons on demand if missing.
 if [ ! -f Resources/AppIcon.icns ]; then
     ./scripts/generate-icon.sh

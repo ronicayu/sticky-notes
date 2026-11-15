@@ -2,14 +2,24 @@ import AppKit
 import Markdown
 
 extension NSAttributedString.Key {
-    /// Marks a range as a markdown marker. Value is `NSValue(range:)` of the
-    /// element's full scope (e.g. for `**bold**`, the value is the range covering
-    /// both `**`s and the inner text). When the cursor / selection is inside the
-    /// scope the markers stay visible; otherwise they get the `mdHidden` flag.
+    /// Marks a range as a markdown marker. Value is a `MarkerScope` holding the
+    /// element's full scope (e.g. for `**bold**`, the range covering both `**`s
+    /// and the inner text). When the cursor / selection is inside the scope the
+    /// markers stay visible; otherwise they get the `mdHidden` flag.
     static let mdMarkerScope = NSAttributedString.Key("mdMarkerScope")
 
     /// Set on glyph ranges that the layout manager should collapse to zero width.
     static let mdHidden = NSAttributedString.Key("mdHidden")
+}
+
+/// The range of the element a marker belongs to. A class so that restyling one
+/// paragraph can move the scopes of everything after it, when text was typed
+/// before them, without writing attributes into those runs: a write would make
+/// the layout manager redo the layout of all that text. Equality is identity,
+/// so changing `range` never changes how the storage files the value.
+final class MarkerScope: NSObject {
+    var range: NSRange
+    init(_ range: NSRange) { self.range = range }
 }
 
 /// Colors and metrics shared by the styler and the views that host it.
@@ -28,10 +38,12 @@ extension MarkdownStyler {
 /// Parsing is done by Apple's `swift-markdown` (CommonMark + GFM AST). The
 /// regex-based approach this replaced mis-handled nested emphasis (`***x***`),
 /// escaped markers (`\*x\*`), and markers inside code spans.
+@MainActor
 enum MarkdownStyler {
     /// Body text size. Follows the user's ⌘+ / ⌘- choice; heading sizes and
     /// the code font are derived from it so the whole note scales together.
-    static var baseFontSize: CGFloat { Settings.shared.bodyFontSize }
+    /// `AppDelegate` sets it from its `Settings` at launch and on every change.
+    static var baseFontSize: CGFloat = Settings.defaultBodyFontSize
 
     /// Spacing that keeps multi-line notes from reading as a wall of text.
     static let lineHeightMultiple: CGFloat = 1.14
@@ -92,7 +104,12 @@ enum MarkdownStyler {
         let source = storage.string
         let document = Document(parsing: source)
         let table = LineOffsetTable(source)
-        var visitor = StylingVisitor(storage: storage, source: source as NSString, table: table)
+        var visitor = StylingVisitor(
+            storage: storage, source: source as NSString, table: table,
+            baseFontSize: baseFontSize, baseFont: baseFont(),
+            markerColor: markerColor, bodyColor: bodyTextColor,
+            linkColor: linkColor, codeColor: codeColor
+        )
         visitor.visit(document)
 
         // Checkbox lines: tag the "- [ ] " / "- [x] " prefix so the editor can
@@ -108,12 +125,22 @@ enum MarkdownStyler {
         applyWikiLinks(in: storage, full: full)
     }
 
+    // Compiled once: building them per keystroke was a large share of a restyle.
+    private static let wikiLinkRegex = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+)\]\]"#)
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    private static let checkboxRegex = try? NSRegularExpression(
+        // `\s` also matches a newline, which let a match span two
+        // lines and paint the user\'s text invisible.
+        pattern: #"^[ \t]*-[ \t]\[([ xX])\](?:[ \t]|$)"#,
+        options: [.anchorsMatchLines]
+    )
+
     /// `[[Some Note]]` — Obsidian's link syntax, which CommonMark sees as
     /// nested bracket text. Encoded as a `stickynotes-wiki:` URL so the click
     /// handler can decide between opening one of our notes and handing off to
     /// Obsidian.
     private static func applyWikiLinks(in storage: NSTextStorage, full: NSRange) {
-        guard let regex = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+)\]\]"#) else { return }
+        guard let regex = wikiLinkRegex else { return }
         let ns = storage.string as NSString
 
         for match in regex.matches(in: storage.string, range: full) {
@@ -126,7 +153,7 @@ enum MarkdownStyler {
             let target = ns.substring(with: inner)
             guard let url = WikiLink.url(for: target) else { continue }
 
-            let scope = NSValue(range: whole)
+            let scope = MarkerScope(whole)
             for marker in [NSRange(location: whole.location, length: 2),
                            NSRange(location: whole.location + whole.length - 2, length: 2)] {
                 storage.addAttributes([
@@ -142,38 +169,46 @@ enum MarkdownStyler {
         }
     }
 
+    /// Looked for one paragraph at a time. Run over the whole text, the detector
+    /// can answer differently depending on what else is in it: one odd address
+    /// with a backtick in it made it report no links at all. A paragraph on its own
+    /// gives the same answer in a full restyle and in a restyle of a few paragraphs.
     private static func applyBareURLs(in storage: NSTextStorage, full: NSRange) {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
-            return
-        }
-        for match in detector.matches(in: storage.string, range: full) {
-            guard let url = match.url else { continue }
-            if storage.attribute(.link, at: match.range.location, effectiveRange: nil) != nil { continue }
-            // Inside a code span the text is deliberately literal.
-            if let font = storage.attribute(.font, at: match.range.location, effectiveRange: nil) as? NSFont,
-               font.fontDescriptor.symbolicTraits.contains(.monoSpace) { continue }
-            storage.addAttributes([
-                .link: url,
-                .foregroundColor: linkColor,
-                .underlineStyle: NSUnderlineStyle.single.rawValue
-            ], range: match.range)
+        guard let detector = linkDetector else { return }
+        let text = storage.string as NSString
+        for paragraph in MarkdownRestyler.paragraphRanges(in: text) {
+            let chunk = text.substring(with: paragraph)
+            for match in detector.matches(in: chunk, range: NSRange(location: 0, length: (chunk as NSString).length)) {
+                guard let url = match.url else { continue }
+                let range = NSRange(location: paragraph.location + match.range.location, length: match.range.length)
+                if storage.attribute(.link, at: range.location, effectiveRange: nil) != nil { continue }
+                // Inside a code span the text is deliberately literal.
+                if let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont,
+                   font.fontDescriptor.symbolicTraits.contains(.monoSpace) { continue }
+                storage.addAttributes([
+                    .link: url,
+                    .foregroundColor: linkColor,
+                    .underlineStyle: NSUnderlineStyle.single.rawValue
+                ], range: range)
+            }
         }
     }
 
-    /// Sets/removes `mdHidden` on every tagged marker range based on whether the
-    /// caret/selection currently sits inside the marker's scope.
-    static func updateMarkerVisibility(in storage: NSTextStorage, selection: NSRange) {
+    /// Sets/removes `mdHidden` on the tagged marker ranges based on whether the
+    /// caret/selection currently sits inside the marker's scope. `range` limits
+    /// the work to the text whose answer may have changed; nil means all of it.
+    static func updateMarkerVisibility(in storage: NSTextStorage, selection: NSRange, within range: NSRange? = nil) {
         let full = NSRange(location: 0, length: storage.length)
-        guard full.length > 0 else { return }
+        let scanned = range.map { NSIntersectionRange($0, full) } ?? full
+        guard scanned.length > 0 else { return }
 
         storage.beginEditing()
         defer { storage.endEditing() }
 
-        storage.removeAttribute(.mdHidden, range: full)
+        storage.removeAttribute(.mdHidden, range: scanned)
 
-        storage.enumerateAttribute(.mdMarkerScope, in: full, options: []) { value, markerRange, _ in
-            guard let scopeValue = value as? NSValue else { return }
-            let scope = scopeValue.rangeValue
+        storage.enumerateAttribute(.mdMarkerScope, in: scanned, options: []) { value, markerRange, _ in
+            guard let scope = (value as? MarkerScope)?.range else { return }
             if !selectionTouches(scope: scope, selection: selection) {
                 storage.addAttribute(.mdHidden, value: true, range: markerRange)
             }
@@ -190,12 +225,7 @@ enum MarkdownStyler {
     // MARK: - Checkboxes
 
     private static func applyCheckboxes(in storage: NSTextStorage, full: NSRange) {
-        guard let regex = try? NSRegularExpression(
-            // `\s` also matches a newline, which let a match span two
-            // lines and paint the user\'s text invisible.
-            pattern: #"^[ \t]*-[ \t]\[([ xX])\](?:[ \t]|$)"#,
-            options: [.anchorsMatchLines]
-        ) else { return }
+        guard let regex = checkboxRegex else { return }
 
         let plain = storage.string
         let nsstring = plain as NSString
@@ -215,7 +245,9 @@ enum MarkdownStyler {
             let bracket = nsstring.substring(with: bracketRange)
             let isChecked = bracket.lowercased() == "x"
 
-            storage.addAttribute(.checkboxRange, value: NSValue(range: match.range), range: match.range)
+            // Only the run matters to readers; the length keeps the value free of
+            // positions, which move when text is typed before it.
+            storage.addAttribute(.checkboxRange, value: NSValue(range: NSRange(location: 0, length: match.range.length)), range: match.range)
             storage.addAttribute(.checkboxChecked, value: isChecked, range: match.range)
             // Make the markdown source itself invisible (still counted in
             // layout for natural width). The TodoTextView paints a real
@@ -265,6 +297,10 @@ private struct LineOffsetTable {
     /// scalars from the start of the document every single time — which, once
     /// per AST node, made styling quadratic in the note's length.
     private let scalarLineStarts: [String.UnicodeScalarView.Index]
+    /// Where the paragraph (the lines between blank lines) holding each line
+    /// starts and ends, in UTF-16 units, parallel to the tables above. A blank
+    /// line's bounds are empty.
+    private let paragraphBounds: [Range<Int>]
 
     init(_ source: String) {
         self.source = source
@@ -272,6 +308,8 @@ private struct LineOffsetTable {
         var u8: [Int] = [0, 0]
         var u16: [Int] = [0, 0]
         var starts: [String.UnicodeScalarView.Index] = [scalars.startIndex, scalars.startIndex]
+        var blankLines: [Bool] = [true]
+        var lineIsBlank = true
         var u8Cursor = 0
         var u16Cursor = 0
         var i = scalars.startIndex
@@ -284,11 +322,51 @@ private struct LineOffsetTable {
                 u8.append(u8Cursor)
                 u16.append(u16Cursor)
                 starts.append(i)
+                blankLines.append(lineIsBlank)
+                lineIsBlank = true
+            } else if scalar != " " && scalar != "\t" && scalar != "\r" {
+                lineIsBlank = false
             }
         }
+        blankLines.append(lineIsBlank)
         self.utf8LineStarts = u8
         self.utf16LineStarts = u16
         self.scalarLineStarts = starts
+
+        var bounds = [Range<Int>](repeating: 0..<0, count: u16.count)
+        var line = 1
+        while line < u16.count {
+            guard !blankLines[line] else {
+                bounds[line] = u16[line]..<u16[line]
+                line += 1
+                continue
+            }
+            var last = line
+            while last + 1 < u16.count && !blankLines[last + 1] { last += 1 }
+            let end = last + 1 < u16.count ? u16[last + 1] : u16Cursor
+            for member in line...last { bounds[member] = u16[line]..<end }
+            line = last + 1
+        }
+        self.paragraphBounds = bounds
+    }
+
+    func paragraphBounds(ofLine line: Int) -> Range<Int>? {
+        guard line >= 1 && line < paragraphBounds.count else { return nil }
+        return paragraphBounds[line]
+    }
+
+    /// Like `nsRange`, but nil when the range does not lie within the paragraph its
+    /// first line is in. swift-markdown puts inline nodes on the continuation
+    /// lines of a list item or quote too far right by the width of the item's
+    /// marker, so the range of the last words of a line can land in the next
+    /// paragraph. Styling it would colour text that has nothing to do with it.
+    func nsRangeWithinParagraph(_ range: SourceRange) -> NSRange? {
+        guard let found = nsRange(range) else { return nil }
+        let line = range.lowerBound.line
+        guard line >= 1 && line < paragraphBounds.count else { return nil }
+        let bounds = paragraphBounds[line]
+        guard found.location >= bounds.lowerBound, NSMaxRange(found) <= bounds.upperBound else { return nil }
+        return found
     }
 
     func nsRange(_ range: SourceRange) -> NSRange? {
@@ -297,6 +375,15 @@ private struct LineOffsetTable {
             return nil
         }
         return NSRange(location: start, length: max(0, end - start))
+    }
+
+    /// `nsRange` with the start and end columns moved left by the given numbers of
+    /// bytes, for ranges swift-markdown placed too far right.
+    func nsRange(_ range: SourceRange, startShift: Int, endShift: Int) -> NSRange? {
+        guard let start = utf16Offset(line: range.lowerBound.line, column: range.lowerBound.column - startShift),
+              let end = utf16Offset(line: range.upperBound.line, column: range.upperBound.column - endShift),
+              end >= start else { return nil }
+        return NSRange(location: start, length: end - start)
     }
 
     private func utf16Offset(line: Int, column: Int) -> Int? {
@@ -331,10 +418,19 @@ private struct LineOffsetTable {
 /// from the source line because their AST `range` includes child paragraphs
 /// that we don't want to repaint. Inline nodes (Strong, Emphasis, Strikethrough,
 /// InlineCode) get their full marker-and-content range from the AST.
+///
+/// Holds no main-actor state: the sizes and colours it needs are read by the
+/// caller and passed in, so the visitor conforms to `MarkupWalker` as it is.
 private struct StylingVisitor: MarkupWalker {
     let storage: NSTextStorage
     let source: NSString
     let table: LineOffsetTable
+    let baseFontSize: CGFloat
+    let baseFont: NSFont
+    let markerColor: NSColor
+    let bodyColor: NSColor
+    let linkColor: NSColor
+    let codeColor: NSColor
 
     // MARK: Block
 
@@ -355,11 +451,11 @@ private struct StylingVisitor: MarkupWalker {
         let fontSize: CGFloat
         let weight: NSFont.Weight
         if line.hasPrefix("# ") {
-            markerLen = 2; fontSize = MarkdownStyler.baseFontSize + 7; weight = .bold
+            markerLen = 2; fontSize = baseFontSize + 7; weight = .bold
         } else if line.hasPrefix("## ") {
-            markerLen = 3; fontSize = MarkdownStyler.baseFontSize + 4; weight = .semibold
+            markerLen = 3; fontSize = baseFontSize + 4; weight = .semibold
         } else if line.hasPrefix("### ") {
-            markerLen = 4; fontSize = MarkdownStyler.baseFontSize + 1; weight = .semibold
+            markerLen = 4; fontSize = baseFontSize + 1; weight = .semibold
         } else {
             descendInto(heading)
             return
@@ -367,9 +463,9 @@ private struct StylingVisitor: MarkupWalker {
 
         let markerRange = NSRange(location: lineRange.location, length: min(markerLen, lineRange.length))
         storage.addAttributes([
-            .foregroundColor: MarkdownStyler.markerColor,
-            .font: MarkdownStyler.baseFont(),
-            .mdMarkerScope: NSValue(range: lineRange)
+            .foregroundColor: markerColor,
+            .font: baseFont,
+            .mdMarkerScope: MarkerScope(lineRange)
         ], range: markerRange)
 
         let textStart = lineRange.location + markerLen
@@ -425,7 +521,7 @@ private struct StylingVisitor: MarkupWalker {
 
     private func applyListMarker(lineRange: NSRange, markerStart: Int, markerLength: Int, headIndent: CGFloat) {
         let markerRange = NSRange(location: markerStart, length: markerLength)
-        storage.addAttribute(.foregroundColor, value: MarkdownStyler.markerColor, range: markerRange)
+        storage.addAttribute(.foregroundColor, value: markerColor, range: markerRange)
 
         let para = NSMutableParagraphStyle()
         para.headIndent = headIndent
@@ -461,7 +557,7 @@ private struct StylingVisitor: MarkupWalker {
     mutating func visitStrikethrough(_ strike: Strikethrough) {
         applyInlineMarker(node: strike, markerLen: 2, innerAttrs: [
             .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-            .strikethroughColor: MarkdownStyler.bodyTextColor
+            .strikethroughColor: bodyColor
         ])
         descendInto(strike)
     }
@@ -470,7 +566,7 @@ private struct StylingVisitor: MarkupWalker {
     /// and the destination hide together when the caret is elsewhere, so a
     /// note reads as prose until you go to edit the link.
     mutating func visitLink(_ link: Markdown.Link) {
-        guard let range = link.range, let nsr = table.nsRange(range) else {
+        guard let range = link.range, let nsr = table.nsRangeWithinParagraph(range) else {
             descendInto(link)
             return
         }
@@ -492,14 +588,14 @@ private struct StylingVisitor: MarkupWalker {
             return
         }
 
-        let scope = NSValue(range: nsr)
+        let scope = MarkerScope(nsr)
         markMarker(NSRange(location: nsr.location, length: leadLength), scope: scope)
         markMarker(NSRange(location: nsr.location + trailStart, length: trailLength), scope: scope)
 
         let inner = NSRange(location: nsr.location + leadLength, length: trailStart - leadLength)
         if inner.length > 0 {
             var attrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: MarkdownStyler.linkColor,
+                .foregroundColor: linkColor,
                 .underlineStyle: NSUnderlineStyle.single.rawValue
             ]
             if let destination = link.destination, let url = URL(string: destination) {
@@ -510,9 +606,9 @@ private struct StylingVisitor: MarkupWalker {
         descendInto(link)
     }
 
-    private func markMarker(_ range: NSRange, scope: NSValue) {
+    private func markMarker(_ range: NSRange, scope: MarkerScope) {
         storage.addAttributes([
-            .foregroundColor: MarkdownStyler.markerColor,
+            .foregroundColor: markerColor,
             .mdMarkerScope: scope
         ], range: range)
     }
@@ -520,18 +616,60 @@ private struct StylingVisitor: MarkupWalker {
     mutating func visitInlineCode(_ code: InlineCode) {
         // Backtick spans can be opened with ``one``, ``two``, etc. Recover
         // marker length from the source rather than assuming 1.
-        guard let range = code.range, let nsr = table.nsRange(range) else { return }
-        let text = source.substring(with: nsr)
-        let backticks = text.prefix(while: { $0 == "`" }).count
-        guard backticks > 0, nsr.length >= backticks * 2 else { return }
+        guard let nsr = locateInline(code, isValid: { backtickRunLength(in: $0) != nil }),
+              let backticks = backtickRunLength(in: nsr) else { return }
         applyInlineMarkerRange(
             nsr,
             markerLen: backticks,
             innerAttrs: [
-                .font: NSFont.monospacedSystemFont(ofSize: MarkdownStyler.baseFontSize - 1, weight: .regular),
-                .foregroundColor: MarkdownStyler.codeColor
+                .font: NSFont.monospacedSystemFont(ofSize: baseFontSize - 1, weight: .regular),
+                .foregroundColor: codeColor
             ]
         )
+    }
+
+    /// The length of the backtick run that opens and closes a code span at `range`,
+    /// or nil when the source there is not such a span.
+    private func backtickRunLength(in range: NSRange) -> Int? {
+        var length = 0
+        while length < range.length, source.character(at: range.location + length) == 0x60 { length += 1 }
+        guard length > 0, range.length >= length * 2 else { return nil }
+        for offset in 1...length where source.character(at: NSMaxRange(range) - offset) != 0x60 { return nil }
+        return length
+    }
+
+    /// Whether `range` begins and ends with the same run of `length` emphasis
+    /// characters (`*`, `_` or `~`).
+    private func hasMatchingDelimiters(_ range: NSRange, length: Int) -> Bool {
+        guard range.length >= length * 2 else { return false }
+        let first = source.character(at: range.location)
+        guard first == 0x2A || first == 0x5F || first == 0x7E else { return false }
+        for offset in 0..<length {
+            if source.character(at: range.location + offset) != first { return false }
+            if source.character(at: NSMaxRange(range) - length + offset) != first { return false }
+        }
+        return true
+    }
+
+    /// Where an inline node really is. swift-markdown places a node on a
+    /// continuation line of a list item or quote too far right, by the width in
+    /// bytes of the item's marker; the start and the end are each moved left until
+    /// the source there looks like the node's delimiters. A node whose delimiters
+    /// are nowhere is left alone, so that no letter of the text is ever taken for
+    /// a marker.
+    private func locateInline(_ node: Markup, isValid: (NSRange) -> Bool) -> NSRange? {
+        guard let range = node.range,
+              let bounds = table.paragraphBounds(ofLine: range.lowerBound.line) else { return nil }
+        let widest = 16
+        for startShift in 0...min(widest, max(0, range.lowerBound.column - 1)) {
+            for endShift in 0...min(widest, max(0, range.upperBound.column - 1)) {
+                guard let candidate = table.nsRange(range, startShift: startShift, endShift: endShift),
+                      candidate.location >= bounds.lowerBound, NSMaxRange(candidate) <= bounds.upperBound,
+                      NSMaxRange(candidate) <= source.length, isValid(candidate) else { continue }
+                return candidate
+            }
+        }
+        return nil
     }
 
     private func applyInlineMarker(
@@ -540,8 +678,7 @@ private struct StylingVisitor: MarkupWalker {
         innerAttrs: [NSAttributedString.Key: Any] = [:],
         fontTraits: NSFontDescriptor.SymbolicTraits = []
     ) {
-        guard let range = node.range, let nsr = table.nsRange(range) else { return }
-        guard nsr.length >= markerLen * 2 else { return }
+        guard let nsr = locateInline(node, isValid: { hasMatchingDelimiters($0, length: markerLen) }) else { return }
         applyInlineMarkerRange(nsr, markerLen: markerLen, innerAttrs: innerAttrs, fontTraits: fontTraits)
     }
 
@@ -551,15 +688,15 @@ private struct StylingVisitor: MarkupWalker {
         innerAttrs: [NSAttributedString.Key: Any] = [:],
         fontTraits: NSFontDescriptor.SymbolicTraits = []
     ) {
-        let scope = NSValue(range: nsr)
+        let scope = MarkerScope(nsr)
         let lead  = NSRange(location: nsr.location, length: markerLen)
         let trail = NSRange(location: nsr.location + nsr.length - markerLen, length: markerLen)
         storage.addAttributes([
-            .foregroundColor: MarkdownStyler.markerColor,
+            .foregroundColor: markerColor,
             .mdMarkerScope: scope
         ], range: lead)
         storage.addAttributes([
-            .foregroundColor: MarkdownStyler.markerColor,
+            .foregroundColor: markerColor,
             .mdMarkerScope: scope
         ], range: trail)
 
@@ -580,7 +717,7 @@ private struct StylingVisitor: MarkupWalker {
     /// outer trait and render bold-italic as italic.
     private func addFontTraits(_ traits: NSFontDescriptor.SymbolicTraits, in range: NSRange) {
         storage.enumerateAttribute(.font, in: range, options: []) { value, subrange, _ in
-            let current = (value as? NSFont) ?? MarkdownStyler.baseFont()
+            let current = (value as? NSFont) ?? baseFont
             var merged = current.fontDescriptor.symbolicTraits
             merged.formUnion(traits)
             let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
@@ -615,10 +752,9 @@ private struct StylingVisitor: MarkupWalker {
 /// Collapses glyphs tagged `mdHidden` to nothing.
 ///
 /// The `mdHidden` attribute only marks text; something has to act on it, and
-/// that is a layout manager delegate. `NoteWindowController` implements this
-/// itself for the editor; this standalone version is for read-only surfaces —
-/// like the quick switcher's preview — that should show a note the way it
-/// reads, not the way its markdown is written.
+/// that is a layout manager delegate. `MarkdownEditorController` installs one
+/// on every editor; read-only surfaces, like the quick switcher's preview, use
+/// it too, so a note reads the same everywhere instead of showing its markdown.
 final class HiddenMarkerLayoutDelegate: NSObject, NSLayoutManagerDelegate {
     func layoutManager(
         _ layoutManager: NSLayoutManager,
