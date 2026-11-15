@@ -26,6 +26,9 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
     private let store: NoteStore
     private let onActivate: (UUID) -> Void
+    /// Archives an active note. The desk closes the note's window, which writes
+    /// what was typed first; the default moves the file and nothing else.
+    private let onArchive: (Note) -> Void
 
     private var mode: Mode = .active
     private var sortOrder: SortOrder = .updated
@@ -43,9 +46,10 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     private let restoreButton = NSButton(title: "Restore", target: nil, action: nil)
     private let deleteButton = NSButton(title: "Delete…", target: nil, action: nil)
 
-    init(store: NoteStore, onActivate: @escaping (UUID) -> Void) {
+    init(store: NoteStore, onActivate: @escaping (UUID) -> Void, onArchive: ((Note) -> Void)? = nil) {
         self.store = store
         self.onActivate = onActivate
+        self.onArchive = onArchive ?? { store.archive($0) }
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 460),
@@ -385,7 +389,7 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
     /// ⌘⌫ archives an active note, matching the note window's close button.
     private func archiveSelectedRow() {
         guard mode == .active, let note = selectedNote() else { return }
-        store.archive(note)
+        onArchive(note)
     }
 
     @objc private func restoreSelected() {
@@ -466,6 +470,13 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         guard mode == .trash, let note = rows.first?.note else { return }
         store.restoreFromTrash(note)
         reload()
+    }
+
+    /// ⌘⌫ on the first listed row, callable directly.
+    func archiveFirstRow() {
+        guard !rows.isEmpty else { return }
+        tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        archiveSelectedRow()
     }
 
     func showMode(_ newMode: Mode) {

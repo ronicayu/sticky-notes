@@ -15,6 +15,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Called when closing was refused because the text could not be saved.
     /// The argument runs the close again.
     var onCloseRefused: ((_ retry: @escaping () -> Void) -> Void)?
+    /// Called when the note left the active folder under typed text, and the text
+    /// was written where the note went.
+    var onTextKept: ((NoteDocument.KeptIn) -> Void)?
 
     /// Labels currently on this note. Read by the app delegate to decide
     /// whether the window belongs on screen under the label filter.
@@ -70,14 +73,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// mis-pressed ⌘⇧S leaves behind.
     var isAbandonedCapture: Bool { noteDocument.isAbandonedCapture }
 
+    /// True once a file exists for this note. A new note has none until it is
+    /// typed into, and is not gone for lacking one.
+    var hasFile: Bool { noteDocument.hasFile }
+
     /// Discard without archiving. Used for abandoned captures, which should
-    /// leave no trace at all.
+    /// leave no trace at all. Text that arrived from outside since the window
+    /// was opened is on screen now, and the note stays.
     func discardAbandonedCapture() {
-        // Text arrived from outside since the window was opened: it is on
-        // screen now, and the note stays.
-        guard case .closed = noteDocument.close(.discard) else { return }
-        window?.close()
-        onClosed(note.id)
+        closeThroughDocument(.discard)
     }
 
     /// Height of the chrome strip when expanded.
@@ -108,6 +112,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         // Every caller hands over a note as just saved or as last read, so
         // the file watcher's echo of it is not an outside edit.
         let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
+        document.createsFileOnFirstEdit = true
         self.noteDocument = document
         self.store = store
         self.clock = clock
@@ -361,6 +366,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         noteDocument.didApplyExternal = { [weak self] applied in
             self?.showExternalChange(applied)
         }
+        noteDocument.didKeepText = { [weak self] place in
+            self?.onTextKept?(place)
+        }
 
         expandButton.target = self
         expandButton.action = #selector(toggleCollapse)
@@ -495,8 +503,14 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
                 moved.positionY = Double(frame.origin.y)
             }
         }
-        switch noteDocument.close(.archive) {
+        closeThroughDocument(.archive)
+    }
+
+    private func closeThroughDocument(_ reason: NoteDocument.CloseReason) {
+        switch noteDocument.close(reason) {
         case .refused:
+            // A note to be discarded that turned out to hold text just stays.
+            guard reason == .archive else { return }
             NSSound.beep()
             onCloseRefused?({ [weak self] in self?.closeNote() })
             return
@@ -1061,8 +1075,17 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// note) — without this guard, an in-flight debounced save would
     /// resurrect the file right after `reconcileOpenWindows` closed the
     /// window.
-    func closeAfterExternalDeletion() {
-        _ = noteDocument.close(.externalDeletion)
+    ///
+    /// Text typed since the last save is written where the note went first. When
+    /// that cannot be done the window stays open, a retry is armed, and this
+    /// returns false. `textKeptElsewhere` is for a caller that has put the text
+    /// in a recovery file itself.
+    @discardableResult
+    func closeAfterExternalDeletion(textKeptElsewhere: Bool = false) -> Bool {
+        guard case .closed = noteDocument.close(textKeptElsewhere ? .externalDeletionTextKept : .externalDeletion) else {
+            return false
+        }
         window?.close()
+        return true
     }
 }

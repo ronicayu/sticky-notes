@@ -11,6 +11,7 @@ import XCTest
     private var isolated: IsolatedSettings!
     private var clock: ManualClock!
     private var desk: DeskController!
+    private var undo: UndoCenter!
     private var originalTextSize: CGFloat = MarkdownStyler.baseFontSize
 
     override func setUp() async throws {
@@ -26,6 +27,9 @@ import XCTest
     }
 
     override func tearDown() async throws {
+        for folder in [store.activeURL, store.archiveURL] {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+        }
         desk.windowControllers.values.forEach { $0.window?.close() }
         desk.dailyNote?.window?.close()
         desk = nil
@@ -35,11 +39,12 @@ import XCTest
     }
 
     private func makeDesk() -> DeskController {
-        DeskController(
+        undo = UndoCenter(clock: clock)
+        return DeskController(
             store: store,
             settings: isolated.settings,
             clock: clock,
-            undo: UndoCenter(clock: clock),
+            undo: undo,
             recovery: RecoveryFiles(settings: isolated.settings, store: store, clock: clock)
         )
     }
@@ -334,6 +339,196 @@ import XCTest
         desk.tearDownDailyNote()
 
         XCTAssertNil(desk.dailyNote)
+    }
+
+    // MARK: - Notes that leave the active folder under typing, and new notes
+
+    private func type(_ text: String, into controller: NoteWindowController) {
+        controller.textView.string = text
+        controller.editor.textDidChange(
+            Notification(name: NSText.didChangeNotification, object: controller.textView)
+        )
+    }
+
+    private func files(in folder: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "md" }
+    }
+
+    private func setPermissions(_ mode: Int, on folder: URL) throws {
+        try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: folder.path)
+    }
+
+    /// ⌘⌫ in the notes panel within the debounce of typing used to move a file
+    /// that lacked the typing, and the window's save was then dropped.
+    /// (Model finding F5, plan R9.)
+    func testArchivingFromThePanelKeepsTextTypedJustBefore() throws {
+        let note = seed("Groceries")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        type("body of Groceries plus a late thought", into: controller)
+
+        desk.showNotesPanel()
+        try XCTUnwrap(desk.notesPanel).archiveFirstRow()
+
+        XCTAssertEqual(store.loadArchived().first { $0.id == note.id }?.content, "body of Groceries plus a late thought")
+        XCTAssertNil(desk.windowControllers[note.id], "the window of an archived note stayed")
+        XCTAssertNil(store.loadNote(id: note.id))
+        XCTAssertTrue(undo.hasPendingOffer, "the panel's archive offered no undo")
+    }
+
+    func testArchivingFromThePanelAnUnopenedNoteOffersTheUndoToo() throws {
+        let note = seed("No window")
+
+        desk.archiveNote(note)
+
+        XCTAssertEqual(store.loadArchived().map(\.id), [note.id])
+        XCTAssertTrue(undo.hasPendingOffer)
+    }
+
+    /// (Model finding F5, trace a-removal-r3: the watcher closes the window.)
+    func testReconcileKeepsTheTypingOfANoteArchivedElsewhere() throws {
+        let note = seed("Shared")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        type("body of Shared and typed after the other Mac archived it", into: controller)
+        store.archive(note)
+
+        desk.reconcileOpenWindows()
+
+        XCTAssertNil(desk.windowControllers[note.id])
+        XCTAssertEqual(
+            store.loadArchived().first { $0.id == note.id }?.content,
+            "body of Shared and typed after the other Mac archived it"
+        )
+    }
+
+    func testReconcileKeepsTheTypingOfANoteThatWasRemovedInARecoveredCopyAndSaysSo() throws {
+        let note = seed("Removed")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        type("body of Removed plus more", into: controller)
+        try FileManager.default.removeItem(at: XCTUnwrap(files(in: store.activeURL).first))
+        store.handleFileSystemEvent()
+
+        desk.reconcileOpenWindows()
+
+        XCTAssertNil(desk.windowControllers[note.id])
+        XCTAssertEqual(store.loadTrashed().first?.content, "body of Removed plus more")
+        XCTAssertNil(store.loadNote(id: note.id))
+        XCTAssertTrue(undo.hasPendingOffer, "the person was not told where the text went")
+    }
+
+    /// Where the store cannot take the text, a recovery file beside the storage does.
+    func testReconcileFallsBackToARecoveryFileWhenTheStoreCannotTakeTheText() throws {
+        let note = seed("Locked")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        type("body of Locked and more", into: controller)
+        store.archive(note)
+        try setPermissions(0o555, on: store.archiveURL)
+
+        desk.reconcileOpenWindows()
+
+        XCTAssertNil(desk.windowControllers[note.id])
+        let recovered = try files(in: RecoveryFiles(settings: isolated.settings, store: store, clock: clock).folder)
+        XCTAssertEqual(recovered.count, 1)
+        XCTAssertTrue(try String(contentsOf: XCTUnwrap(recovered.first)).contains("body of Locked and more"))
+    }
+
+    func testReconcileKeepsTheWindowWhenNothingCanTakeTheText() throws {
+        let note = seed("Stuck")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        type("body of Stuck and more", into: controller)
+        store.archive(note)
+        try setPermissions(0o555, on: store.archiveURL)
+        try setPermissions(0o555, on: isolated.localRoot)
+        addTeardownBlock { [root = isolated.localRoot] in
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        }
+
+        desk.reconcileOpenWindows()
+
+        XCTAssertNotNil(desk.windowControllers[note.id], "the window closed with its text nowhere")
+        XCTAssertEqual(controller.bufferedNote.content, "body of Stuck and more")
+    }
+
+    /// A folder that cannot be listed reads as a vault with no notes in it.
+    /// (Plan R3.)
+    func testReconcileClosesNothingWhenTheNotesFolderCannotBeListed() throws {
+        let first = seed("First")
+        let second = seed("Second")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[first.id])
+        type("body of First plus typing", into: controller)
+        try setPermissions(0o000, on: store.activeURL)
+        store.handleFileSystemEvent()
+
+        desk.reconcileOpenWindows()
+
+        XCTAssertEqual(Set(desk.windowControllers.keys), [first.id, second.id])
+        XCTAssertFalse(controller.flushPendingSave(), "the text was marked saved while the folder was unreachable")
+        try setPermissions(0o755, on: store.activeURL)
+        XCTAssertTrue(controller.flushPendingSave())
+        XCTAssertEqual(store.loadNote(id: first.id)?.content, "body of First plus typing")
+    }
+
+    func testReconcileKeepsTheWindowOfANoteWhoseFileIsStillInICloud() throws {
+        let note = seed("Downloading")
+        desk.restoreActiveNotes()
+        let file = try XCTUnwrap(files(in: store.activeURL).first)
+        try FileManager.default.moveItem(
+            at: file, to: file.deletingLastPathComponent().appendingPathComponent(".\(file.lastPathComponent).icloud")
+        )
+        store.handleFileSystemEvent()
+
+        desk.reconcileOpenWindows()
+
+        XCTAssertNotNil(desk.windowControllers[note.id], "a file that is not downloaded yet closed its window")
+    }
+
+    // MARK: A new note starts unsaved
+
+    func testAMisfiredNewNoteTouchesNoFile() throws {
+        let id = desk.makeNote()
+        let controller = try XCTUnwrap(desk.windowControllers[id])
+        XCTAssertTrue(try files(in: store.activeURL).isEmpty, "a blank new note was written at once")
+        XCTAssertFalse(controller.hasFile)
+
+        desk.reconcileOpenWindows()
+        XCTAssertNotNil(desk.windowControllers[id], "a new note has no file yet and is not gone")
+
+        controller.discardAbandonedCapture()
+
+        XCTAssertNil(desk.windowControllers[id])
+        for folder in [store.activeURL, store.archiveURL, store.trashURL] {
+            XCTAssertTrue(try files(in: folder).isEmpty, "\(folder.lastPathComponent) holds a file for an untouched note")
+        }
+    }
+
+    func testTheFirstEditOfANewNoteWritesIt() throws {
+        let id = desk.makeNote()
+        let controller = try XCTUnwrap(desk.windowControllers[id])
+
+        type("a thought", into: controller)
+        desk.reconcileOpenWindows()
+        XCTAssertNotNil(desk.windowControllers[id], "reconcile closed a note being typed into before its first save")
+        XCTAssertTrue(controller.flushPendingSave())
+
+        XCTAssertEqual(store.loadNote(id: id)?.content, "a thought")
+        XCTAssertTrue(controller.hasFile)
+    }
+
+    func testACapturedNoteIsWrittenAtOnceBecauseItArrivedWithContent() throws {
+        let withText = desk.makeNote(text: "from the clipboard")
+        let withTitle = desk.makeNote(title: "From a URL")
+        let withLabel = desk.makeNote(labels: ["inbox"])
+
+        for id in [withText, withTitle, withLabel] {
+            XCTAssertNotNil(store.loadNote(id: id))
+            XCTAssertEqual(desk.windowControllers[id]?.hasFile, true)
+        }
     }
 
     // MARK: - Quitting

@@ -15,6 +15,7 @@ import AppKit
     private(set) var notesHidden = false
     private var dailyNoteController: DailyNoteWindowController?
     private var notesPanelController: NotesPanelController?
+    var notesPanel: NotesPanelController? { notesPanelController }
     private var quickSwitcher: QuickSwitcherController?
     /// Anchor for the new-note cascade. Reset when the last note is closed so
     /// a fresh desk starts from the top again.
@@ -100,12 +101,10 @@ import AppKit
             if self.windowControllers.isEmpty { self.lastNewNoteFrame = nil }
         }
         controller.onArchived = { [weak self] archived in
-            guard let self = self else { return }
-            self.undo.offerUndoForArchive(of: archived) { [weak self] in
-                guard let self = self else { return }
-                self.store.restore(archived)
-                self.focusNote(id: archived.id)
-            }
+            self?.offerUndoForArchive(of: archived)
+        }
+        controller.onTextKept = { [weak self] place in
+            if place == .recoveredCopy { self?.undo.tellRecoveredCopy(in: "Trash") }
         }
         controller.onCloseRefused = { [weak self] retry in
             self?.undo.offerRetryAfterRefusedClose(retry)
@@ -122,6 +121,26 @@ import AppKit
             controller.window?.orderFront(nil)
             controller.refreshAlpha()
         }
+    }
+
+    private func offerUndoForArchive(of archived: Note) {
+        undo.offerUndoForArchive(of: archived) { [weak self] in
+            guard let self = self else { return }
+            self.store.restore(archived)
+            self.focusNote(id: archived.id)
+        }
+    }
+
+    /// Archive a note from somewhere that is not its window, such as the notes
+    /// panel. A note with a window goes through the window's own close, which
+    /// writes what was typed first and offers the undo.
+    func archiveNote(_ note: Note) {
+        if let controller = windowControllers[note.id] {
+            controller.closeNote()
+            return
+        }
+        store.archive(note)
+        offerUndoForArchive(of: note)
     }
 
     func focusNote(id: UUID) {
@@ -172,7 +191,11 @@ import AppKit
         if let color = color { note.color = color }
         note.content = text
         note.labels = labels
-        store.save(note)
+        // A note the caller gave something to is edited content and is written
+        // now. An empty one gets its file with the first edit, so a misfired
+        // hotkey touches no file.
+        let isBlank = text.isEmpty && (title ?? "").isEmpty && color == nil && labels.isEmpty
+        if !isBlank { store.save(note) }
         presentWindow(for: note)
 
         // An empty note starts in the title — that's where the user should be
@@ -329,15 +352,17 @@ import AppKit
     }
 
     func reconcileOpenWindows() {
-        let active = store.loadActive()
+        // A folder that cannot be listed says nothing about any note.
+        guard let active = store.listActive() else { return }
         let activeIds = Set(active.map { $0.id })
 
         // Close windows whose underlying note is no longer active (archived
         // or deleted on another machine). Cancel pending debounced saves so
         // an in-flight save can't resurrect a file that was just deleted.
         for id in Array(windowControllers.keys) where !activeIds.contains(id) {
-            if let controller = windowControllers.removeValue(forKey: id) {
-                controller.closeAfterExternalDeletion()
+            guard let controller = windowControllers[id], isGone(controller) else { continue }
+            if closeKeepingText(of: controller) {
+                windowControllers.removeValue(forKey: id)
             }
         }
 
@@ -352,13 +377,37 @@ import AppKit
         applyVisibility()
     }
 
+    /// A window is closed for a missing note only when the note is known to be
+    /// gone: it had a file, and the folders were listed and no longer hold it. A
+    /// listing that is missing the note proves nothing, because a file that is
+    /// still downloading or unreadable is missing from it too.
+    private func isGone(_ controller: NoteWindowController) -> Bool {
+        guard controller.hasFile else { return false }
+        switch store.whereIs(id: controller.noteId) {
+        case .archived, .trashed, .missing: return true
+        case .active, .unknown: return false
+        }
+    }
+
+    /// Close a window whose note is gone. Text typed into it is written where the
+    /// note went; if the store cannot take it, to a recovery file. Only when
+    /// neither works does the window stay open, with a retry armed.
+    private func closeKeepingText(of controller: NoteWindowController) -> Bool {
+        if controller.closeAfterExternalDeletion() { return true }
+        guard recovery.write(controller.bufferedNote) else { return false }
+        undo.tellRecoveredCopy(in: "the Recovered folder")
+        return controller.closeAfterExternalDeletion(textKeptElsewhere: true)
+    }
+
     // MARK: - Panel and switcher
 
     @objc func showNotesPanel() {
         if notesPanelController == nil {
-            notesPanelController = NotesPanelController(store: store, onActivate: { [weak self] id in
-                self?.focusNote(id: id)
-            })
+            notesPanelController = NotesPanelController(
+                store: store,
+                onActivate: { [weak self] id in self?.focusNote(id: id) },
+                onArchive: { [weak self] note in self?.archiveNote(note) }
+            )
         } else {
             notesPanelController?.reload()
         }

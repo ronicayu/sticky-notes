@@ -73,12 +73,16 @@ import XCTest
 
     func testANewNoteUsesTheInjectedColourAndClock() throws {
         isolated.settings.defaultNoteColor = .blue
-        _ = seed("Existing")
+        let existing = seed("Existing")
         let app = makeDelegate()
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
 
         clock.advance(by: 3_600)
         app.desk.newNote()
+        let controller = try XCTUnwrap(app.desk.windowControllers.values.first { $0.noteId != existing.id })
+        controller.textView.string = "first words"
+        controller.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
+        XCTAssertTrue(controller.flushPendingSave())
 
         let created = try XCTUnwrap(store.loadActive().first { $0.title != "Existing" })
         XCTAssertEqual(created.color, .blue)

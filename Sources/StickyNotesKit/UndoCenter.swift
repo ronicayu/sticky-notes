@@ -37,6 +37,11 @@ import AppKit
         ))
     }
 
+    /// Text typed into a note that vanished was kept; say where.
+    func tellRecoveredCopy(in place: String) {
+        toasts.show(Toast(message: "Note disappeared — recovered copy in \(place)", undoTitle: "OK", now: clock.now(), undo: {}))
+    }
+
     /// Whether a toast is waiting for an answer.
     var hasPendingOffer: Bool { toasts.visibleToast != nil }
 
