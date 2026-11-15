@@ -286,9 +286,8 @@ import KeyboardShortcuts
                 button.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
                                        accessibilityDescription: "Sticky Notes — can't save")
                 button.image?.isTemplate = true
-                let action = failure.kind == .migration ? "convert" : "save"
-                button.toolTip = "Sticky Notes can't \(action) \(failure.fileName)"
-                self.storageWarningItem.title = "⚠︎ Couldn't \(action) \(failure.fileName)"
+                button.toolTip = failure.menuToolTip
+                self.storageWarningItem.title = "⚠︎ " + failure.menuTitle
                 self.storageWarningItem.isHidden = false
             } else {
                 self.applyNormalMenuBarIcon(to: button)
@@ -336,6 +335,16 @@ import KeyboardShortcuts
 
             Location: \(failure.url.deletingLastPathComponent().path)
             """
+        case .olderVersion:
+            alert.messageText = "Notes from an older version are waiting"
+            alert.informativeText = """
+            Another Mac that shares this folder is still running an older \
+            version of Sticky Notes and has written notes the new version has \
+            not converted. Nothing is lost. Update Sticky Notes on your other \
+            Macs, then relaunch this one and the notes will appear.
+
+            Location: \(failure.url.deletingLastPathComponent().path)
+            """
         }
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Show Storage Folder")
@@ -343,6 +352,26 @@ import KeyboardShortcuts
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             storage.revealStorage()
+        }
+    }
+}
+
+extension StorageFailure {
+    /// The warning line in the menu bar menu, without the leading symbol.
+    var menuTitle: String {
+        switch kind {
+        case .write: return "Couldn't save \(fileName)"
+        case .migration: return "Couldn't convert \(fileName)"
+        case .olderVersion: return "Notes from an older version are waiting"
+        }
+    }
+
+    var menuToolTip: String {
+        switch kind {
+        case .write: return "Sticky Notes can't save to \(fileName)"
+        case .migration: return "Sticky Notes can't convert \(fileName)"
+        case .olderVersion:
+            return "Notes from an older version are waiting — update your other Macs, then relaunch"
         }
     }
 }

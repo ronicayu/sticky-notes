@@ -107,17 +107,19 @@ Hotkeys are registered through `KeyboardShortcuts` and persisted to `UserDefault
 ```
 ~/Library/Application Support/StickyNotes/      (or iCloud Drive root, or <vault>/StickyNotes/)
 ├── notes/
-│   └── {yyyy-MM-dd HHmmss}-{id}.md   # one file per active note
+│   └── {yyyy-MM-dd HHmmss}-{id6}.md   # one file per active note
 ├── archive/
-│   └── {yyyy-MM-dd HHmmss}-{id}.md   # archived notes (closed via the × button)
+│   └── {yyyy-MM-dd HHmmss}-{id6}.md   # archived notes (closed via the × button)
 ├── attachments/             # images and files pasted into notes
 └── .trash/
-    └── {yyyy-MM-dd HHmmss}-{id}.md   # deleted notes, purged after 30 days
+    └── {yyyy-MM-dd HHmmss}-{id6}.md   # deleted notes, purged after 30 days
 ```
 
-Each file holds the note's metadata (position, size, color, labels, collapsed flag, timestamps) in YAML frontmatter and its text as plain Markdown, so Obsidian can open the folder as a vault. Files are written atomically and per-note, and edits made outside the app are picked up live.
+`{id6}` is the first six hex characters of the note's id; the full id is in the frontmatter. Each file holds the note's metadata (position, size, color, labels, collapsed flag, timestamps) in YAML frontmatter and its text as plain Markdown, so Obsidian can open the folder as a vault. Files are written atomically and per-note, and edits made outside the app are picked up live.
 
-Earlier versions stored notes as `{uuid}.json` outside a vault. On first launch the app converts those files in `notes/`, `archive/` and `.trash/` to Markdown in place: it writes the `.md`, checks that it reads back as the same note, and only then deletes the JSON. A file that cannot be converted is left where it is and reported from the menu bar.
+Earlier versions stored notes as `{uuid}.json` outside a vault. On first launch the app converts those files in `notes/`, `archive/` and `.trash/` to Markdown in place: it writes the `.md`, checks that it reads back as the same note, and only then deletes the JSON. The JSON files are never deleted: they move to `.converted-json/` in the storage folder, which neither version loads. A file that cannot be converted is left where it is and reported from the menu bar. Two `.md` files for one note (two Macs converting the same note before they synced) are merged into one, and the extra goes to `.converted-json/duplicates/`.
+
+**Update Sticky Notes on every Mac that shares the iCloud folder before launching the new version on any of them.** A Mac still on the old version keeps writing `.json` notes; the new version does not convert those while it runs, shows "Notes from an older version are waiting" in the menu bar, and converts them at the next launch.
 
 ## License
 

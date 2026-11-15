@@ -287,9 +287,9 @@ private final class ChangeLog: @unchecked Sendable {
 
     // MARK: - Duplicate ids
 
-    /// Two files carrying one id: a directory scan lets the last win the path
-    /// index, so that is the file a save writes and the entry `loadNote` returns.
-    func testASaveReplacesTheSameCacheEntryLoadNoteAnswersWith() throws {
+    /// Two files carrying one id would let a save write one of them and a
+    /// reload read the other, so they are merged into one file when found.
+    func testAFileCarryingAnIdAnotherFileHasIsMergedIntoIt() throws {
         let note = makeNote("first")
         NoteStore(rootURL: root).save(note)
         let active = root.appendingPathComponent("notes")
@@ -301,13 +301,14 @@ private final class ChangeLog: @unchecked Sendable {
             .replacingOccurrences(of: "first", with: "stale copy")
             .write(to: copy, atomically: true, encoding: .utf8)
         let store = NoteStore(rootURL: root)
-        XCTAssertEqual(store.loadActive().count, 2)
+        XCTAssertEqual(store.loadActive().count, 1)
 
-        var edited = note
+        var edited = try XCTUnwrap(store.loadNote(id: note.id))
         edited.content = "edited"
         store.save(edited)
 
         XCTAssertEqual(store.loadNote(id: note.id)?.content, "edited")
+        XCTAssertEqual(store.loadActive().count, 1)
     }
 
     // MARK: - The sweep

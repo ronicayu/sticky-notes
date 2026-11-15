@@ -9,9 +9,14 @@ struct StorageFailure {
     enum Kind {
         /// A write or move did not land. A later write that lands clears it.
         case write
-        /// A `.json` note could not be converted and was left in place. It stays
-        /// reported until a later conversion run finds nothing wrong.
+        /// A `.json` note could not be converted, or was converted without a
+        /// sync copy that had not downloaded. It stays reported until a later
+        /// conversion run finds nothing wrong.
         case migration
+        /// A `.json` note appeared after launch, from a Mac still on an older
+        /// version. It is left alone: converting it would take the file away
+        /// from the Mac that is editing it.
+        case olderVersion
     }
 
     let url: URL
@@ -29,7 +34,8 @@ enum MigrationError: LocalizedError {
     case unreadableConflictVersion
     case couldNotWrite(String)
     case readBackDiffers
-    case couldNotDeleteOriginal
+    case couldNotSetAside
+    case olderVersionFilesWaiting
 
     var errorDescription: String? {
         switch self {
@@ -38,13 +44,15 @@ enum MigrationError: LocalizedError {
         case .malformed(let detail):
             return "The file is not a valid note (\(detail)). It was left where it is."
         case .unreadableConflictVersion:
-            return "A sync conflict copy of this note has not downloaded yet. It will be converted once it has."
+            return "A sync conflict copy of this note had not downloaded when the note was converted. The note is shown without it; the old file and a list of the missing copies are in the .converted-json folder."
         case .couldNotWrite(let detail):
             return detail
         case .readBackDiffers:
             return "The Markdown file did not read back the same as the note. The original was kept."
-        case .couldNotDeleteOriginal:
-            return "The note was converted, but the old .json file could not be removed."
+        case .couldNotSetAside:
+            return "The note was converted, but the old .json file could not be moved out of the notes folder."
+        case .olderVersionFilesWaiting:
+            return "Notes from an older version are waiting. Update Sticky Notes on your other Macs, then relaunch this one."
         }
     }
 }
@@ -53,6 +61,8 @@ enum MigrationError: LocalizedError {
 struct MigrationReport {
     var migrated = 0
     var failures: [StorageFailure] = []
+    /// Notes that shared an id with another file in the same folder, merged into one.
+    var mergedDuplicates = 0
 }
 
 /// The body hashes this process wrote to each file, oldest first, shared by
@@ -399,6 +409,12 @@ final class NoteStore {
 
     var trashURL: URL { rootURL.appendingPathComponent(".trash", isDirectory: true) }
 
+    /// Where a converted `.json` note, and a `.md` file merged into another, is
+    /// set aside. Outside `notes/`, `archive/` and `.trash/`, so no version of
+    /// the app loads it, and never deleted: a Mac still on the old version may
+    /// have edited the file after it was read, and nothing else holds that edit.
+    var convertedJSONURL: URL { rootURL.appendingPathComponent(".converted-json", isDirectory: true) }
+
     /// Notes sitting in the trash, newest first.
     func loadTrashed() -> [Note] {
         loadAll(from: trashURL).sorted { $0.updatedAt > $1.updatedAt }
@@ -481,23 +497,39 @@ final class NoteStore {
         watcher?.stop()
         rootURL = newRoot
         pathIndex.removeAll()
+        // What was known about the folders of the root just left, and of this one
+        // when it was last used, says nothing about what is in them now.
+        invalidateCache()
         ensureDirectories()
         migrateJSONNotes()
 
-        for note in active {
-            let url = generateURL(for: note, in: activeURL)
-            write(note, to: url)
-            pathIndex[note.id] = url
-        }
-        for note in archived {
-            let url = generateURL(for: note, in: archiveURL)
-            write(note, to: url)
-            pathIndex[note.id] = url
-        }
+        for note in active { copyIn(note, to: activeURL) }
+        for note in archived { copyIn(note, to: archiveURL) }
 
         startWatching()
         notifyChange(.reset)
         return true
+    }
+
+    /// Put `note` in `dir` of the root just switched to. A note that is already
+    /// there, from an earlier time on this root or from another Mac, is merged
+    /// with and written over only if the file is still what was read.
+    private func copyIn(_ note: Note, to dir: URL) {
+        guard let existing = existingURL(for: note.id, in: dir) else {
+            let url = generateURL(for: note, in: dir)
+            write(note, to: url)
+            pathIndex[note.id] = url
+            return
+        }
+        // Sync conflict versions of the file hold text it lacks.
+        _ = resolveConflict(at: existing)
+        for _ in 0..<2 {
+            guard let onDisk = readSnapshot(existing) else { return }
+            let merged = ConflictResolver.merge([onDisk.note, note], now: clock.now()) ?? note
+            guard renderMarkdown(merged) != renderMarkdown(onDisk.note) else { break }
+            if case .saved = writeIfUnchanged(merged, to: existing, expecting: .fingerprint(onDisk.fingerprint)) { break }
+        }
+        pathIndex[note.id] = existing
     }
 
     // MARK: - Internal
@@ -561,7 +593,30 @@ final class NoteStore {
     /// the watcher without waiting for FSEvents.
     func handleFileSystemEvent() {
         resolveConflictsIfDue()
+        noticeOlderVersionFiles()
         notifyChange(.reset)
+    }
+
+    /// A `.json` note that shows up after launch was written by a Mac still on an
+    /// older version, or finished downloading late. It is not converted here: the
+    /// Mac that wrote it may be editing it right now. Say so, so it is not a note
+    /// that is silently missing.
+    private func noticeOlderVersionFiles() {
+        let fm = FileManager.default
+        for dir in [activeURL, archiveURL, trashURL] {
+            guard let name = (try? fm.contentsOfDirectory(atPath: dir.path))?
+                .sorted().first(where: { $0.hasSuffix(".json") }) else { continue }
+            if lastFailure?.kind == .olderVersion { return }
+            guard lastFailure == nil || lastFailure?.kind == .migration else { return }
+            lastFailure = StorageFailure(
+                url: dir.appendingPathComponent(name), error: MigrationError.olderVersionFilesWaiting,
+                date: clock.now(), kind: .olderVersion)
+            NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
+            return
+        }
+        guard lastFailure?.kind == .olderVersion else { return }
+        lastFailure = lastMigration.failures.last
+        NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
     }
 
     private func startWatching() {
@@ -789,11 +844,24 @@ final class NoteStore {
             return []
         }
         var notes: [Note] = []
+        var seen = Set<UUID>()
+        var sawDuplicate = false
         for url in files where url.pathExtension == NoteStore.fileExtension {
             guard let note = readMain(url) else { continue }
+            if !seen.insert(note.id).inserted { sawDuplicate = true }
             pathIndex[note.id] = url
             knownIds.insert(note.id)
             notes.append(note)
+        }
+        // Two files with one id, as two Macs converting the same note leave: only
+        // one of them would take edits, archiving or deleting.
+        if sawDuplicate {
+            let healed = mergeDuplicates(in: dir)
+            if !healed.isEmpty {
+                let fresh = loadAll(from: dir)
+                notifyObservers(.external(healed))
+                return fresh
+            }
         }
         cache[dirKey(dir)] = notes
         indexedDirs.insert(dirKey(dir))
@@ -894,6 +962,7 @@ final class NoteStore {
     }
 
     private func migrateJSONNotes(in dir: URL, into report: inout MigrationReport) {
+        report.mergedDuplicates += mergeDuplicates(in: dir).count
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return
         }
@@ -916,10 +985,15 @@ final class NoteStore {
                 try? FileManager.default.removeItem(at: url)
                 continue
             }
-            if let error = migrateJSONNote(at: url, in: dir, markdown: &markdown) {
-                report.failures.append(StorageFailure(url: url, error: error, date: clock.now(), kind: .migration))
-            } else {
+            switch migrateJSONNote(at: url, in: dir, markdown: &markdown) {
+            case .converted:
                 report.migrated += 1
+            case .convertedWithoutSomeCopies:
+                report.migrated += 1
+                report.failures.append(StorageFailure(
+                    url: url, error: MigrationError.unreadableConflictVersion, date: clock.now(), kind: .migration))
+            case .failed(let error):
+                report.failures.append(StorageFailure(url: url, error: error, date: clock.now(), kind: .migration))
             }
         }
     }
@@ -929,45 +1003,57 @@ final class NoteStore {
         return clock.now().timeIntervalSince(deleted) > NoteStore.trashRetention
     }
 
-    /// Returns why the note was left alone, or nil once it is converted.
+    private enum Conversion {
+        case converted
+        /// Converted, but a sync copy of the JSON had not downloaded, so its text
+        /// is not in the note.
+        case convertedWithoutSomeCopies
+        case failed(MigrationError)
+    }
+
     private func migrateJSONNote(
         at url: URL,
         in dir: URL,
         markdown: inout [UUID: (url: URL, snapshot: NoteSnapshot)]
-    ) -> MigrationError? {
-        guard let data = try? Data(contentsOf: url) else { return .unreadable }
+    ) -> Conversion {
+        guard let data = try? Data(contentsOf: url) else { return .failed(.unreadable) }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let note: Note
         do {
             note = try decoder.decode(Note.self, from: data)
         } catch {
-            return .malformed(error.localizedDescription)
+            return .failed(.malformed(error.localizedDescription))
         }
 
-        // A sync conflict on the JSON file holds text this Mac does not have.
-        // Deleting the file would delete it, so fold it in, or wait for it.
+        // A sync conflict on the JSON file holds text this Mac does not have, so
+        // fold it in. One that has not downloaded cannot hold the note back: the
+        // note is shown without it, and the file and the missing copy are set
+        // aside where they can be found.
         var versions = [note]
-        let conflicts = conflictVersionsProvider(url)
-        for conflict in conflicts {
-            guard let conflictData = try? Data(contentsOf: conflict.url),
-                  let conflictNote = try? decoder.decode(Note.self, from: conflictData)
-            else { return .unreadableConflictVersion }
-            versions.append(conflictNote)
+        var folded: [ConflictVersionHandle] = []
+        var missing: [ConflictVersionHandle] = []
+        for conflict in conflictVersionsProvider(url) {
+            if let conflictData = try? Data(contentsOf: conflict.url),
+               let conflictNote = try? decoder.decode(Note.self, from: conflictData) {
+                versions.append(conflictNote)
+                folded.append(conflict)
+            } else {
+                missing.append(conflict)
+            }
         }
 
         let existing = markdown[note.id]
         if let existing { versions.insert(existing.snapshot.note, at: 0) }
 
-        var merged = versions[0]
-        if ConflictResolver.needsMerge(versions), let combined = ConflictResolver.merge(versions, now: clock.now()) {
-            merged = combined
-        }
+        // The newest version keeps the metadata and the title; text and labels
+        // from the others are kept as `ConflictResolver` always does.
+        var merged = ConflictResolver.merge(versions, now: clock.now()) ?? versions[0]
         if merged.title.isEmpty, let title = versions.first(where: { !$0.title.isEmpty })?.title {
             merged.title = title
         }
 
-        if let existing, !NoteStore.differs(merged, from: existing.snapshot.note) {
+        if let existing, renderMarkdown(merged) == renderMarkdown(existing.snapshot.note) {
             // The Markdown file already holds everything the JSON does.
         } else {
             let destination = existing?.url ?? NoteStore.unusedURL(generateURL(for: merged, in: dir))
@@ -981,12 +1067,12 @@ final class NoteStore {
                 }
             }
             guard case let .saved(fingerprint) = result else {
-                return .couldNotWrite(existing == nil ? "The Markdown file could not be written." : "The Markdown file for this note changed while it was being updated.")
+                return .failed(.couldNotWrite(existing == nil ? "The Markdown file could not be written." : "The Markdown file for this note changed while it was being updated."))
             }
             guard let back = readSnapshot(destination), back.fingerprint == fingerprint,
                   NoteStore.readsBackAs(merged, back.note) else {
                 if existing == nil { try? FileManager.default.removeItem(at: destination) }
-                return .readBackDiffers
+                return .failed(.readBackDiffers)
             }
             markdown[merged.id] = (destination, back)
 
@@ -1000,18 +1086,75 @@ final class NoteStore {
             }
         }
 
-        do {
-            try FileManager.default.removeItem(at: url)
-        } catch {
-            return .couldNotDeleteOriginal
+        guard let asideURL = setAside(url, under: dir.lastPathComponent) else { return .failed(.couldNotSetAside) }
+        for conflict in folded { conflict.markResolved() }
+        if !missing.isEmpty {
+            let list = missing.map(\.url.path).joined(separator: "\n")
+            let text = "These sync conflict copies of \(url.lastPathComponent) had not downloaded when it was converted:\n\(list)\n"
+            try? Data(text.utf8).write(to: asideURL.appendingPathExtension("unread-conflict-copies.txt"))
+            return .convertedWithoutSomeCopies
         }
-        for conflict in conflicts { conflict.markResolved() }
-        return nil
+        return .converted
     }
 
-    /// True when `a` holds text, a title or labels that `b` lacks.
-    private static func differs(_ a: Note, from b: Note) -> Bool {
-        ConflictResolver.needsMerge([a, b]) || a.title != b.title || a.labels != b.labels
+    /// Move `url` into `.converted-json/<subfolder>/` under a name that is free.
+    private func setAside(_ url: URL, under subfolder: String) -> URL? {
+        let fm = FileManager.default
+        let folder = convertedJSONURL.appendingPathComponent(subfolder, isDirectory: true)
+        do {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            let destination = NoteStore.unusedURL(folder.appendingPathComponent(url.lastPathComponent))
+            try fm.moveItem(at: url, to: destination)
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
+    /// Merge `.md` files that share an id in `dir` into one. Returns the ids it
+    /// merged. Two Macs that convert the same note before they sync each write
+    /// their own file, and iCloud can keep both. The first file by the name a
+    /// fresh save would give it, else the first by name, keeps the note; the
+    /// merged text is written to it, read back, and only then are the others
+    /// moved to `.converted-json/duplicates/`.
+    @discardableResult
+    private func mergeDuplicates(in dir: URL) -> Set<UUID> {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        var groups: [UUID: [(url: URL, snapshot: NoteSnapshot)]] = [:]
+        for url in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+        where url.pathExtension == NoteStore.fileExtension {
+            if let snapshot = readSnapshot(url) { groups[snapshot.note.id, default: []].append((url, snapshot)) }
+        }
+
+        var healed = Set<UUID>()
+        for (id, group) in groups where group.count > 1 {
+            let primaryIndex = group.firstIndex { $0.url.lastPathComponent == generateURL(for: $0.snapshot.note, in: dir).lastPathComponent } ?? 0
+            let primary = group[primaryIndex]
+            let others = group.enumerated().filter { $0.offset != primaryIndex }.map(\.element)
+            let versions = [primary.snapshot.note] + others.map(\.snapshot.note)
+            var merged = ConflictResolver.merge(versions, now: clock.now()) ?? primary.snapshot.note
+            if merged.title.isEmpty, let title = versions.first(where: { !$0.title.isEmpty })?.title {
+                merged.title = title
+            }
+
+            if renderMarkdown(merged) != renderMarkdown(primary.snapshot.note) {
+                guard case let .saved(fingerprint) = writeIfUnchanged(
+                    merged, to: primary.url, expecting: .fingerprint(primary.snapshot.fingerprint)),
+                      let back = readSnapshot(primary.url), back.fingerprint == fingerprint,
+                      NoteStore.readsBackAs(merged, back.note)
+                else { continue }
+            }
+            var allMoved = true
+            for other in others where setAside(other.url, under: "duplicates") == nil { allMoved = false }
+            if allMoved { healed.insert(id) }
+        }
+        if !healed.isEmpty {
+            pathIndex.removeAll()
+            indexedDirs.remove(dirKey(dir))
+        }
+        return healed
     }
 
     /// Whether `back`, read from the Markdown file written for `note`, is the
@@ -1057,10 +1200,11 @@ final class NoteStore {
     }
 
     /// A landed write clears a write failure. A note that could not be converted
-    /// is still unconverted, so only a later conversion run clears that one.
+    /// is still unconverted, so the failure to convert it comes back into view,
+    /// and only a later conversion run clears that one.
     private func recordSuccess() {
         guard let failure = lastFailure, failure.kind == .write else { return }
-        lastFailure = nil
+        lastFailure = lastMigration.failures.last
         NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
     }
 

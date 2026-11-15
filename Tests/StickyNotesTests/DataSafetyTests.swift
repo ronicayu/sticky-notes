@@ -183,6 +183,50 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertEqual(merged.id, id)
     }
 
+    // MARK: - Titles
+
+    func testWhenOnlyTheTitleDiffersTheNewestVersionIsReturnedAsItIs() throws {
+        var older = note("same", updated: 100)
+        older.title = "Old name"
+        var newer = note("same", updated: 200)
+        newer.title = "New name"
+        let merged = try XCTUnwrap(ConflictResolver.merge([newer, older], now: now))
+        XCTAssertEqual(merged.title, "New name")
+        XCTAssertEqual(merged.content, "same")
+        XCTAssertEqual(merged.updatedAt, newer.updatedAt, "nothing was merged, so nothing is restamped")
+    }
+
+    func testATitleThatLosesAMergeIsKeptAsAnAlsoTitledLine() throws {
+        var older = note("shared\nonly older", updated: 100)
+        older.title = "Old name"
+        var newer = note("shared\nonly newer", updated: 200)
+        newer.title = "New name"
+        let merged = try XCTUnwrap(ConflictResolver.merge([older, newer], now: now))
+        XCTAssertEqual(merged.title, "New name")
+        XCTAssertTrue(merged.content.contains("only older"))
+        XCTAssertTrue(merged.content.hasSuffix("Also titled: Old name"), merged.content)
+    }
+
+    func testAMergeGivesAnUntitledWinnerTheOtherTitleInsteadOfAnAlsoTitledLine() throws {
+        var older = note("shared\nonly older", updated: 100)
+        older.title = "Old name"
+        var newer = note("shared\nonly newer", updated: 200)
+        newer.title = ""
+        let merged = try XCTUnwrap(ConflictResolver.merge([older, newer], now: now))
+        XCTAssertEqual(merged.title, "Old name")
+        XCTAssertFalse(merged.content.contains("Also titled"))
+    }
+
+    func testMergingTheSameVersionsAgainDoesNotStackAlsoTitledLines() throws {
+        var older = note("shared\nonly older", updated: 100)
+        older.title = "Old name"
+        var newer = note("shared\nonly newer", updated: 200)
+        newer.title = "New name"
+        let once = try XCTUnwrap(ConflictResolver.merge([older, newer], now: now))
+        let twice = try XCTUnwrap(ConflictResolver.merge([once, older], now: now.addingTimeInterval(60)))
+        XCTAssertEqual(twice.content, once.content)
+    }
+
     // MARK: - Line-based merge rule
 
     func testAConflictVersionWithNothingNewLeavesTheNoteAlone() throws {

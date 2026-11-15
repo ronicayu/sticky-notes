@@ -11,7 +11,10 @@ import Foundation
 enum ConflictResolver {
 
     /// Merge `versions` (the current file plus its conflict copies) into one
-    /// note. Returns nil when there's nothing to merge.
+    /// note. Returns nil when there's nothing to merge. When the text is the
+    /// same, the newest version is returned as it is, title included; when a
+    /// merge does change the note, any title it loses is kept as an "Also titled"
+    /// line at the end.
     ///
     /// Versions are compared by line, not as one string. An older copy of the
     /// user's own text stops being a substring of the newer one after a single
@@ -48,7 +51,17 @@ enum ConflictResolver {
         let labels = mergedLabels(versions)
         guard base != winner.content || !appended.isEmpty || labels != winner.labels else { return winner }
         var merged = winner
-        merged.content = ([base] + appended).joined(separator: "\n\n")
+        var sections = [base] + appended
+        // A title is text the person typed. The winner keeps its own; one that
+        // has none takes the first other title, and the rest stay in the note.
+        var otherTitles: [String] = []
+        for version in versions.sorted(by: { $0.updatedAt > $1.updatedAt })
+        where !version.title.isEmpty && version.title != winner.title && !otherTitles.contains(version.title) {
+            otherTitles.append(version.title)
+        }
+        if merged.title.isEmpty, !otherTitles.isEmpty { merged.title = otherTitles.removeFirst() }
+        if !otherTitles.isEmpty { sections.append("Also titled: " + otherTitles.joined(separator: ", ")) }
+        merged.content = sections.joined(separator: "\n\n")
         merged.updatedAt = now
         merged.labels = labels
         return merged

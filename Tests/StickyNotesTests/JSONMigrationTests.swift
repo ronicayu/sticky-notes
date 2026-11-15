@@ -452,9 +452,10 @@ final class JSONMigrationTests: XCTestCase {
         XCTAssertTrue(content.contains("on this Mac"))
     }
 
-    func testAConflictVersionThatHasNotDownloadedKeepsTheJSONForALaterRun() throws {
+    func testAConflictVersionThatNeverDownloadsDoesNotHideTheNote() throws {
         let store = NoteStore(rootURL: root)
-        let json = try writeLegacy(makeNote("waiting"), in: "notes")
+        let note = makeNote("waiting")
+        let json = try writeLegacy(note, in: "notes")
         let missing = root.appendingPathComponent("not-downloaded.json")
         store.conflictVersionsProvider = { _ in
             [NoteStore.ConflictVersionHandle(url: missing, markResolved: {})]
@@ -462,10 +463,209 @@ final class JSONMigrationTests: XCTestCase {
 
         let report = store.migrateJSONNotes()
 
-        XCTAssertEqual(report.migrated, 0)
-        XCTAssertEqual(report.failures.count, 1)
-        XCTAssertTrue(fm.fileExists(atPath: json.path))
-        XCTAssertEqual(try files("notes", ext: "md").count, 0)
+        XCTAssertEqual(report.migrated, 1)
+        XCTAssertEqual(report.failures.count, 1, "the missing copy is still reported")
+        XCTAssertEqual(store.loadActive().map(\.content), ["waiting"], "the note shows")
+        XCTAssertFalse(fm.fileExists(atPath: json.path))
+        let aside = root.appendingPathComponent(".converted-json/notes", isDirectory: true)
+        let kept = try fm.contentsOfDirectory(atPath: aside.path).sorted()
+        XCTAssertEqual(kept, [json.lastPathComponent, json.lastPathComponent + ".unread-conflict-copies.txt"])
+        let listing = try String(contentsOf: aside.appendingPathComponent(kept[1]), encoding: .utf8)
+        XCTAssertTrue(listing.contains("not-downloaded.json"))
+    }
+
+    // MARK: - The original is kept
+
+    func testAConvertedJSONIsMovedOutOfTheNoteFoldersNotDeleted() throws {
+        let note = makeNote("keep a copy")
+        let archived = makeNote("archived copy")
+        let trashed = makeNote("trashed copy")
+        let jsonURLs = [
+            try writeLegacy(note, in: "notes"),
+            try writeLegacy(archived, in: "archive"),
+            try writeLegacy(trashed, in: ".trash"),
+        ]
+        let originals = try jsonURLs.map { try Data(contentsOf: $0) }
+
+        _ = NoteStore(rootURL: root)
+
+        for (index, folder) in ["notes", "archive", ".trash"].enumerated() {
+            let aside = root.appendingPathComponent(".converted-json/\(folder)/\(jsonURLs[index].lastPathComponent)")
+            XCTAssertEqual(try Data(contentsOf: aside), originals[index], folder)
+            XCTAssertEqual(try files(folder, ext: "json").count, 0, folder)
+        }
+    }
+
+    func testAJSONWhoseNameIsAlreadyTakenInTheSetAsideFolderKeepsBoth() throws {
+        let note = makeNote("again")
+        let aside = try folder(".converted-json/notes")
+        try Data("earlier".utf8).write(to: aside.appendingPathComponent("\(note.id.uuidString).json"))
+        try writeLegacy(note, in: "notes")
+
+        _ = NoteStore(rootURL: root)
+
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: aside.path).count, 2)
+    }
+
+    func testASetAsideFolderIsNotLoadedAsNotes() throws {
+        let note = makeNote("only once")
+        try writeLegacy(note, in: "notes")
+
+        let store = NoteStore(rootURL: root)
+
+        XCTAssertEqual(store.loadActive().count, 1)
+        XCTAssertTrue(store.loadArchived().isEmpty)
+        XCTAssertTrue(store.loadTrashed().isEmpty)
+    }
+
+    // MARK: - Titles
+
+    func testWhenOnlyTheTitleDiffersTheNewerVersionWinsWhicheverFileItIsIn() throws {
+        let id = UUID()
+        var markdownNote = makeNote("same", title: "Old title", id: id)
+        markdownNote.updatedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        _ = NoteStore(rootURL: root).save(markdownNote)
+        var renamedOnTheOldMac = makeNote("same", title: "Renamed on the old Mac", id: id)
+        renamedOnTheOldMac.updatedAt = Date(timeIntervalSince1970: 1_700_000_900)
+        try writeLegacy(renamedOnTheOldMac, in: "notes")
+
+        let store = NoteStore(rootURL: root)
+
+        XCTAssertEqual(try XCTUnwrap(store.loadActive().first).title, "Renamed on the old Mac")
+        XCTAssertEqual(try XCTUnwrap(store.loadActive().first).content, "same")
+    }
+
+    func testANewerMarkdownTitleSurvivesAnOlderJSONWithTheSameText() throws {
+        let id = UUID()
+        var markdownNote = makeNote("same", title: "Newer title", id: id)
+        markdownNote.updatedAt = Date(timeIntervalSince1970: 1_700_000_900)
+        _ = NoteStore(rootURL: root).save(markdownNote)
+        try writeLegacy(makeNote("same", title: "Older title", id: id), in: "notes")
+
+        let store = NoteStore(rootURL: root)
+
+        XCTAssertEqual(try XCTUnwrap(store.loadActive().first).title, "Newer title")
+    }
+
+    func testATitleThatLosesAMergeIsKeptInTheNote() throws {
+        let id = UUID()
+        var markdownNote = makeNote("shared\nonly markdown", title: "Markdown title", id: id)
+        markdownNote.updatedAt = Date(timeIntervalSince1970: 1_700_000_900)
+        _ = NoteStore(rootURL: root).save(markdownNote)
+        try writeLegacy(makeNote("shared\nonly json", title: "JSON title", id: id), in: "notes")
+
+        let loaded = try XCTUnwrap(NoteStore(rootURL: root).loadActive().first)
+
+        XCTAssertEqual(loaded.title, "Markdown title")
+        XCTAssertTrue(loaded.content.contains("only json"))
+        XCTAssertTrue(loaded.content.contains("Also titled: JSON title"), loaded.content)
+    }
+
+    // MARK: - Two files with one id
+
+    func testTwoMarkdownFilesWithOneIdAreMergedIntoOneAtLaunch() throws {
+        let id = UUID()
+        let store = NoteStore(rootURL: root)
+        var first = makeNote("shared\nonly in the first", id: id)
+        first.updatedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        store.save(first)
+        let original = try XCTUnwrap(files("notes", ext: "md").first)
+        var second = makeNote("shared\nonly in the second", id: id)
+        second.updatedAt = Date(timeIntervalSince1970: 1_700_000_900)
+        let twin = original.deletingLastPathComponent()
+            .appendingPathComponent(original.deletingPathExtension().lastPathComponent + " 2.md")
+        try store.recoveryText(for: second).write(to: twin, atomically: true, encoding: .utf8)
+
+        let relaunched = NoteStore(rootURL: root)
+
+        XCTAssertEqual(relaunched.lastMigration.mergedDuplicates, 1)
+        XCTAssertEqual(try files("notes", ext: "md"), [original], "the name a save would give it keeps the note")
+        let content = try XCTUnwrap(relaunched.loadActive().first).content
+        XCTAssertTrue(content.contains("only in the first"), content)
+        XCTAssertTrue(content.contains("only in the second"), content)
+        let aside = root.appendingPathComponent(".converted-json/duplicates", isDirectory: true)
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: aside.path), [twin.lastPathComponent],
+                       "the extra file is set aside, not deleted")
+        XCTAssertEqual(NoteStore(rootURL: root).lastMigration.mergedDuplicates, 0, "and a relaunch finds nothing")
+    }
+
+    func testDuplicatesThatAppearWhileTheAppRunsAreMergedWhenTheFolderIsRead() throws {
+        let id = UUID()
+        let store = NoteStore(rootURL: root)
+        store.save(makeNote("one", id: id))
+        XCTAssertEqual(store.loadActive().count, 1)
+        let original = try XCTUnwrap(files("notes", ext: "md").first)
+        let twin = original.deletingLastPathComponent().appendingPathComponent("elsewhere.md")
+        try store.recoveryText(for: makeNote("two", id: id)).write(to: twin, atomically: true, encoding: .utf8)
+        store.handleFileSystemEvent()
+
+        let loaded = store.loadActive()
+
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertTrue(try XCTUnwrap(loaded.first).content.contains("two"))
+        XCTAssertEqual(try files("notes", ext: "md").count, 1)
+    }
+
+    // MARK: - Reporting
+
+    func testTheConversionWarningSurvivesAWriteFailureAndTheNextSuccess() throws {
+        try Data("nope".utf8).write(to: folder("notes").appendingPathComponent("bad.json"))
+        let store = NoteStore(rootURL: root)
+        XCTAssertEqual(store.lastFailure?.kind, .migration)
+        let notes = root.appendingPathComponent("notes")
+        try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: notes.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: notes.path) }
+
+        store.save(makeNote("cannot be written"))
+        XCTAssertEqual(store.lastFailure?.kind, .write)
+
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: notes.path)
+        store.save(makeNote("can be written"))
+
+        XCTAssertEqual(store.lastFailure?.kind, .migration)
+        XCTAssertEqual(store.lastFailure?.fileName, "bad.json")
+    }
+
+    func testAJSONFileThatArrivesAfterLaunchIsReportedAndLeftAlone() throws {
+        let store = NoteStore(rootURL: root)
+        XCTAssertNil(store.lastFailure)
+        var posted = 0
+        let observer = NotificationCenter.default.addObserver(
+            forName: NoteStore.healthDidChange, object: store, queue: nil
+        ) { _ in posted += 1 }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let late = try writeLegacy(makeNote("from the old Mac"), in: "notes")
+        let bytes = try Data(contentsOf: late)
+
+        store.handleFileSystemEvent()
+
+        XCTAssertEqual(store.lastFailure?.kind, .olderVersion)
+        XCTAssertEqual(store.lastFailure?.fileName, late.lastPathComponent)
+        XCTAssertEqual(store.lastFailure?.menuTitle, "Notes from an older version are waiting")
+        XCTAssertEqual(posted, 1)
+        XCTAssertEqual(try Data(contentsOf: late), bytes, "the file is not touched")
+        XCTAssertEqual(try files("notes", ext: "md").count, 0, "and not converted while the other Mac may be editing it")
+
+        store.handleFileSystemEvent()
+        XCTAssertEqual(posted, 1, "the same notice is not posted again")
+
+        try fm.removeItem(at: late)
+        store.handleFileSystemEvent()
+        XCTAssertNil(store.lastFailure)
+    }
+
+    func testTheOlderVersionNoticeDoesNotReplaceAWriteFailure() throws {
+        let store = NoteStore(rootURL: root)
+        let notes = root.appendingPathComponent("notes")
+        try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: notes.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: notes.path) }
+        store.save(makeNote("fails"))
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: notes.path)
+        try writeLegacy(makeNote("late"), in: "archive")
+
+        store.handleFileSystemEvent()
+
+        XCTAssertEqual(store.lastFailure?.kind, .write)
     }
 
     // MARK: - Storage switching
@@ -507,5 +707,72 @@ final class JSONMigrationTests: XCTestCase {
         XCTAssertEqual(loaded.content, "travels")
         XCTAssertEqual(loaded.title, "Trip")
         XCTAssertEqual(loaded.labels, ["x"])
+    }
+
+    func testSwitchingToARootThatHasTheSameNoteMergesInsteadOfOverwriting() throws {
+        let id = UUID()
+        let store = NoteStore(rootURL: root.appendingPathComponent("local", isDirectory: true))
+        store.save(makeNote("shared\nonly in the local copy", id: id))
+        let icloud = NoteStore(rootURL: root.appendingPathComponent("icloud", isDirectory: true))
+        var theirs = makeNote("shared\nonly in the iCloud copy", id: id)
+        theirs.updatedAt = Date(timeIntervalSince1970: 1_700_000_900)
+        icloud.save(theirs)
+
+        store.reconfigure(rootURL: root.appendingPathComponent("icloud", isDirectory: true))
+
+        XCTAssertEqual(try files("icloud/notes", ext: "md").count, 1)
+        let content = try XCTUnwrap(store.loadActive().first).content
+        XCTAssertTrue(content.contains("only in the local copy"), content)
+        XCTAssertTrue(content.contains("only in the iCloud copy"), content)
+    }
+
+    func testSwitchingToARootWhoseCopyHasAConflictVersionKeepsAllThreeTexts() throws {
+        let id = UUID()
+        let store = NoteStore(rootURL: root.appendingPathComponent("local", isDirectory: true))
+        store.save(makeNote("shared\nonly in the local copy", id: id))
+        let icloudRoot = root.appendingPathComponent("icloud", isDirectory: true)
+        let icloud = NoteStore(rootURL: icloudRoot)
+        var theirs = makeNote("shared\nonly in the iCloud copy", id: id)
+        theirs.updatedAt = Date(timeIntervalSince1970: 1_700_000_900)
+        icloud.save(theirs)
+        let destination = try XCTUnwrap(files("icloud/notes", ext: "md").first)
+        var conflict = theirs
+        conflict.content = "shared\nonly in the conflict version"
+        conflict.updatedAt = Date(timeIntervalSince1970: 1_700_000_950)
+        let copy = root.appendingPathComponent("conflict.md")
+        try store.recoveryText(for: conflict).write(to: copy, atomically: true, encoding: .utf8)
+        var resolved = false
+        store.conflictVersionsProvider = { url in
+            url.resolvingSymlinksInPath() == destination.resolvingSymlinksInPath()
+                ? [NoteStore.ConflictVersionHandle(url: copy, markResolved: { resolved = true })] : []
+        }
+
+        store.reconfigure(rootURL: icloudRoot)
+
+        let content = try XCTUnwrap(store.loadActive().first).content
+        XCTAssertTrue(content.contains("only in the local copy"), content)
+        XCTAssertTrue(content.contains("only in the iCloud copy"), content)
+        XCTAssertTrue(content.contains("only in the conflict version"), content)
+        XCTAssertTrue(resolved)
+        XCTAssertEqual(try files("icloud/notes", ext: "md").count, 1)
+    }
+
+    func testSwitchingBackToARootVisitedBeforeStillFindsItsNotes() throws {
+        let id = UUID()
+        let localRoot = root.appendingPathComponent("local", isDirectory: true)
+        let store = NoteStore(rootURL: localRoot)
+        store.save(makeNote("v1", id: id))
+        _ = store.loadActive()
+        store.reconfigure(rootURL: root.appendingPathComponent("other", isDirectory: true))
+        _ = store.loadActive()
+
+        var changed = try XCTUnwrap(store.loadNote(id: id))
+        changed.content = "v1\nplus more"
+        changed.updatedAt = Date(timeIntervalSince1970: 1_700_009_000)
+        store.save(changed)
+        store.reconfigure(rootURL: localRoot)
+
+        XCTAssertEqual(try files("local/notes", ext: "md").count, 1, "no second file for one note")
+        XCTAssertEqual(store.loadActive().map(\.content), ["v1\nplus more"])
     }
 }
