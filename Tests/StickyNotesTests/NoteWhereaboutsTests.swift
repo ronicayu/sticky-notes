@@ -153,6 +153,28 @@ final class NoteWhereaboutsTests: XCTestCase {
         XCTAssertTrue(store.loadActive().isEmpty)
     }
 
+    /// Retention runs from the deletion date, and a write into a trashed file is
+    /// the person's latest touch of it: it must not depend on what an atomic
+    /// replace does to the file's "date added".
+    func testTheTrashKeepsANoteFor30DaysFromTheLastWriteIntoIt() throws {
+        let note = makeNote("first")
+        store.save(note)
+        store.archive(note)
+        store.deleteForever(note)
+        clock.advance(by: 20 * 24 * 3600)
+        guard case let .trashed(snapshot) = store.whereIs(id: note.id) else { return XCTFail("not trashed") }
+        var typed = note
+        typed.content = "first and a late thought"
+        guard case .saved = store.save(typed, in: .trash, expecting: snapshot.fingerprint) else {
+            return XCTFail("not saved")
+        }
+        let written = clock.now()
+
+        XCTAssertEqual(store.purgeExpiredTrash(now: written.addingTimeInterval(NoteStore.trashRetention - 60)), 0)
+        XCTAssertEqual(store.loadTrashed().first?.content, "first and a late thought")
+        XCTAssertEqual(store.purgeExpiredTrash(now: written.addingTimeInterval(NoteStore.trashRetention + 60)), 1)
+    }
+
     // MARK: - Discarding
 
     func testDiscardingANoteMovesItsFileToTheTrash() throws {

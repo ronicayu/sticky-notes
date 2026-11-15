@@ -362,7 +362,17 @@ final class NoteStore {
                 break
             }
         }
-        return unknown ? .unknown : .missing
+        // A note renamed on another Mac and still downloading is listed under a
+        // name that carries nothing of this note, so it can only be told from a
+        // deleted one by a placeholder being there at all.
+        return unknown || holdsICloudPlaceholder() ? .unknown : .missing
+    }
+
+    private func holdsICloudPlaceholder() -> Bool {
+        [activeURL, archiveURL, trashURL].contains { dir in
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+            return names.contains { $0.hasPrefix(".") && $0.hasSuffix(".icloud") }
+        }
     }
 
     private func directory(of folder: Folder) -> URL {
@@ -380,7 +390,12 @@ final class NoteStore {
         guard folder != .active else { return save(note, expecting: fingerprint) }
         guard let url = existingURL(for: note.id, in: directory(of: folder)) else { return .gone }
         let result = writeIfUnchanged(note, to: url, expecting: .fingerprint(fingerprint))
-        if case .saved = result { notifyChange(.reset) }
+        if case .saved = result {
+            // The trash keeps a file for 30 days from its deletion date. An atomic
+            // write may or may not give the file a new "date added", so say it.
+            if folder == .trash { stampDeletionDate(on: url) }
+            notifyChange(.reset)
+        }
         return result
     }
 
@@ -583,7 +598,9 @@ final class NoteStore {
     /// fallback for filesystems that don't report it.
     private static func deletionDate(of url: URL) -> Date? {
         guard let values = try? url.resourceValues(forKeys: Set(retentionKeys)) else { return nil }
-        return values.addedToDirectoryDate ?? values.contentModificationDate
+        // The later of the two: the move into the trash sets the first, and a
+        // write into a trashed file stamps the second.
+        return [values.addedToDirectoryDate, values.contentModificationDate].compactMap { $0 }.max()
     }
 
     /// Trash filenames can collide with an earlier deletion of a note created

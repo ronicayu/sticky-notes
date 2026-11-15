@@ -10,6 +10,7 @@ import AppKit
     private let clock: AppClock
     private let undo: UndoCenter
     private let recovery: RecoveryFiles
+    private let scheduler: Scheduler
 
     private(set) var windowControllers: [UUID: NoteWindowController] = [:]
     private(set) var notesHidden = false
@@ -21,7 +22,11 @@ import AppKit
     /// a fresh desk starts from the top again.
     private var lastNewNoteFrame: NSRect?
 
-    init(store: NoteStore, settings: Settings, clock: AppClock, undo: UndoCenter, recovery: RecoveryFiles) {
+    init(
+        store: NoteStore, settings: Settings, clock: AppClock, undo: UndoCenter, recovery: RecoveryFiles,
+        scheduler: Scheduler = MainScheduler()
+    ) {
+        self.scheduler = scheduler
         self.store = store
         self.settings = settings
         self.clock = clock
@@ -94,7 +99,7 @@ import AppKit
             }
             return
         }
-        let controller = NoteWindowController(note: note, store: store, clock: clock) { [weak self] id in
+        let controller = NoteWindowController(note: note, store: store, clock: clock, scheduler: scheduler) { [weak self] id in
             guard let self = self else { return }
             self.windowControllers.removeValue(forKey: id)
             // An emptied desk should start the cascade from the top again.
@@ -110,8 +115,16 @@ import AppKit
             case .archive: break
             }
         }
-        controller.onCloseRefused = { [weak self] retry in
-            self?.undo.offerRetryAfterRefusedClose(retry)
+        controller.onCloseRefused = { [weak self, weak controller] retry in
+            guard let self = self, let controller = controller else { return }
+            // The note is gone and nothing can take its text: a retry would only
+            // fail again, so the person's close takes the way out that reconcile
+            // and quit use.
+            if controller.isStranded, self.closeKeepingText(of: controller) {
+                self.windowControllers.removeValue(forKey: controller.noteId)
+                return
+            }
+            self.undo.offerRetryAfterRefusedClose(retry)
         }
         windowControllers[note.id] = controller
         controller.showWindow(nil)
@@ -198,9 +211,17 @@ import AppKit
         // A note the caller gave something to is edited content and is written
         // now. An empty one gets its file with the first edit, so a misfired
         // hotkey touches no file.
-        let isBlank = text.isEmpty && (title ?? "").isEmpty && color == nil && labels.isEmpty
-        if !isBlank { store.save(note) }
+        // Blank as `NoteDocument` judges it, so the blur sweep and this agree:
+        // colour and labels are already in the buffer and go out with a first edit.
+        let isBlank = (text + (title ?? "")).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        var written = true
+        if !isBlank {
+            if case .failed = store.save(note) { written = false }
+        }
         presentWindow(for: note)
+        // A capture that could not be written is held by the window alone. Arm a
+        // save, so a quit flush tries again and, failing that, makes a recovery file.
+        if !written { windowControllers[note.id]?.requestSave() }
 
         // An empty note starts in the title — that's where the user should be
         // naming the thing. One that arrived with text starts in the body,
@@ -512,7 +533,7 @@ import AppKit
     }
 
     private func makeDailyNoteController() -> DailyNoteWindowController {
-        let controller = DailyNoteWindowController(settings: settings, store: store, clock: clock)
+        let controller = DailyNoteWindowController(settings: settings, store: store, clock: clock, scheduler: scheduler)
         controller.dailyDocument.saveRecovery = { [recovery] body, day in
             recovery.writeDaily(body: body, day: day)
         }

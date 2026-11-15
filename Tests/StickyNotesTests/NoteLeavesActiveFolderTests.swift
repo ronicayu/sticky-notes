@@ -220,6 +220,127 @@ final class NoteLeavesActiveFolderTests: XCTestCase {
         XCTAssertEqual(document.buffer.content, "first and more")
     }
 
+    // MARK: - A retry that keeps failing backs off
+
+    /// Counts how often the document looks for where a note went, which reads
+    /// every file in three folders.
+    private final class CountingRepository: NoteRepository {
+        let store: NoteStore
+        private(set) var lookups = 0
+        init(store: NoteStore) { self.store = store }
+        var canKeepTextElsewhere: Bool { true }
+        func whereIs(id: UUID) -> NoteStore.Whereabouts { lookups += 1; return store.whereIs(id: id) }
+        func save(_ note: Note, expecting fingerprint: Fingerprint?) -> SaveResult { store.save(note, expecting: fingerprint) }
+        func save(_ note: Note, in folder: NoteStore.Folder, expecting fingerprint: Fingerprint) -> SaveResult {
+            store.save(note, in: folder, expecting: fingerprint)
+        }
+        func saveRecoveredCopy(of note: Note) -> Bool { store.saveRecoveredCopy(of: note) }
+        func loadNote(id: UUID, archived: Bool) -> Note? { store.loadNote(id: id, archived: archived) }
+        func snapshot(id: UUID, archived: Bool) -> NoteSnapshot? { store.snapshot(id: id, archived: archived) }
+        func archive(_ note: Note) { store.archive(note) }
+        func discardActive(_ note: Note) { store.discardActive(note) }
+    }
+
+    func testARetryForANoteWithNowhereToGoBacksOffAndStartsOverOnAFileSystemEvent() throws {
+        let note = makeNote("first")
+        store.save(note)
+        let repository = CountingRepository(store: store)
+        let document = NoteDocument(note: note, repository: repository, scheduler: scheduler, clock: clock)
+        document.setBody("first and more")
+        store.archive(note)
+        try setPermissions(0o000, on: store.archiveURL)
+        store.handleFileSystemEvent()
+
+        scheduler.advance(by: NoteDocument.debounce + 0.01)
+        XCTAssertEqual(repository.lookups, 1)
+        XCTAssertTrue(document.isStranded)
+
+        // Retries at 5 s, then 10 s, then 20 s after the failure before.
+        for (index, wait) in [5.0, 10, 20].enumerated() {
+            scheduler.advance(by: wait - 0.5)
+            XCTAssertEqual(repository.lookups, index + 1, "retried before \(wait) s")
+            scheduler.advance(by: 0.6)
+            XCTAssertEqual(repository.lookups, index + 2)
+        }
+
+        // The delay stops growing at the cap.
+        for _ in 0..<10 { scheduler.advance(by: NoteDocument.maxRetryDelay + 1) }
+        let before = repository.lookups
+        scheduler.advance(by: NoteDocument.maxRetryDelay + 1)
+        XCTAssertEqual(repository.lookups, before + 1)
+
+        // Something changed on disk: the next try comes after the first delay.
+        document.storeDidChange()
+        scheduler.advance(by: NoteDocument.retryDelay + 0.1)
+        XCTAssertEqual(repository.lookups, before + 2)
+
+        try setPermissions(0o755, on: store.archiveURL)
+        scheduler.advance(by: NoteDocument.maxRetryDelay + 1)
+        XCTAssertFalse(document.isStranded)
+        XCTAssertEqual(try archivedText(document), "first and more")
+    }
+
+    // MARK: - Labels are decided like the body
+
+    private func outsideWrite(_ document: NoteDocument, labels: [String], body: String? = nil) throws {
+        var other = try XCTUnwrap(store.snapshot(id: document.id)?.note)
+        other.labels = labels
+        if let body { other.content = body }
+        other.updatedAt = clock.now().addingTimeInterval(1)
+        store.save(other)
+        let snapshot = try XCTUnwrap(store.snapshot(id: document.id))
+        document.externalChange(snapshot.note, fingerprint: snapshot.fingerprint)
+    }
+
+    private func openLabelled(_ labels: [String]) -> NoteDocument {
+        var note = makeNote("text")
+        note.labels = labels
+        store.save(note)
+        return NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
+    }
+
+    func testALabelRemovedInObsidianStaysRemovedAfterTheNextSave() throws {
+        let document = openLabelled(["a", "b"])
+        try outsideWrite(document, labels: ["b"])
+        XCTAssertEqual(document.buffer.labels, ["b"], "an idle note did not follow the outside labels")
+
+        document.setBody("text and more")
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(store.loadNote(id: document.id)?.labels, ["b"])
+    }
+
+    func testALabelRemovedInObsidianWhileTheBodyHasUnsavedTypingStaysRemoved() throws {
+        let document = openLabelled(["a", "b"])
+        document.setBody("text and more")
+        try outsideWrite(document, labels: ["b"])
+
+        document.flush()
+
+        XCTAssertEqual(store.loadNote(id: document.id)?.labels, ["b"])
+        XCTAssertEqual(store.loadNote(id: document.id)?.content, "text and more")
+    }
+
+    func testALabelTheUserAddedAndOneObsidianAddedBothSurvive() throws {
+        let document = openLabelled(["a"])
+        document.edit { $0.labels = ["a", "mine"] }
+        try outsideWrite(document, labels: ["a", "theirs"])
+
+        document.flush()
+
+        XCTAssertEqual(Set(try XCTUnwrap(store.loadNote(id: document.id)).labels), ["a", "mine", "theirs"])
+    }
+
+    func testALabelTheUserRemovedIsNotBroughtBackByAnUnrelatedOutsideEdit() throws {
+        let document = openLabelled(["a", "b"])
+        document.edit { $0.labels = ["b"] }
+        try outsideWrite(document, labels: ["a", "b"], body: "text from Obsidian")
+
+        document.flush()
+
+        XCTAssertEqual(store.loadNote(id: document.id)?.labels, ["b"])
+    }
+
     // MARK: - A new note starts unsaved (R10)
 
     private func newDocument(_ content: String = "") -> NoteDocument {

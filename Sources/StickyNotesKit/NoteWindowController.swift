@@ -77,6 +77,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// typed into, and is not gone for lacking one.
     var hasFile: Bool { noteDocument.hasFile }
 
+    /// Try to write the note again, after the debounce.
+    func requestSave() { noteDocument.requestSave() }
+
+    /// The note's file is gone and its text could not be written anywhere.
+    var isStranded: Bool { noteDocument.isStranded }
+
     /// Discard without archiving. Used for abandoned captures, which should
     /// leave no trace at all. Text that arrived from outside since the window
     /// was opened is on screen now, and the note stays.

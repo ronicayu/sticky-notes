@@ -51,6 +51,9 @@ final class NoteDocument {
     static let debounce: TimeInterval = 0.5
     /// How long to wait before trying again after a write that did not land.
     static let retryDelay: TimeInterval = 5
+    /// A write that keeps failing is tried again after twice as long each time,
+    /// up to this, so a cause that lasts does not cost a retry every few seconds.
+    static let maxRetryDelay: TimeInterval = 300
 
     /// The note as the person sees it, ahead of the file by whatever is unsaved.
     private(set) var buffer: Note
@@ -78,6 +81,15 @@ final class NoteDocument {
     /// The person changed the note since the last write that landed.
     private var unsavedEdit = false
 
+    /// The note's active file is gone and the text could not be written where
+    /// the note went either, so it is on no disk. A person's close is then
+    /// refused for a reason that waiting will not fix quickly.
+    private(set) var isStranded = false
+
+    private var retryAttempts = 0
+    private var retryArmed = false
+    private var armedRetryDelay: TimeInterval = 0
+
     /// The active file was found gone and the text went to the archive, the
     /// trash or a recovered copy, so the note is no longer there to archive.
     private var activeFileGone = false
@@ -90,6 +102,7 @@ final class NoteDocument {
     /// path saves right after.
     private var persistedContent: String
     private var persistedTitle: String
+    private var persistedLabels: [String]
 
     /// The fingerprint of the file as this document last wrote or read it, the
     /// one every save is checked against. Nil means no file is expected: the
@@ -129,6 +142,7 @@ final class NoteDocument {
         buffer = note
         persistedContent = note.content
         persistedTitle = note.title
+        persistedLabels = note.labels
         self.repository = repository
         self.scheduler = scheduler
         self.clock = clock
@@ -162,6 +176,7 @@ final class NoteDocument {
         buffer = note
         persistedContent = note.content
         persistedTitle = note.title
+        persistedLabels = note.labels
         persistedFingerprint = fingerprint
         hasFile = fingerprint != nil
         unsavedEdit = false
@@ -226,6 +241,10 @@ final class NoteDocument {
     /// The file is read, not the store's cache, because the fingerprint of the
     /// bytes is what keeps the next save from overwriting this version.
     func storeDidChange() {
+        // Something changed on disk, which may be what a failing write was
+        // waiting for: start the backoff over, and bring an armed retry forward.
+        retryAttempts = 0
+        if retryArmed, armedRetryDelay > Self.retryDelay { scheduleRetry() }
         guard let snapshot = repository.snapshot(id: buffer.id, archived: false) else { return }
         hasFile = true
         externalChange(snapshot.note, fingerprint: snapshot.fingerprint)
@@ -243,15 +262,17 @@ final class NoteDocument {
         // The file may still be new to us: a rewrite that kept the text, such as a
         // move on the other Mac or a property edited in Obsidian. Its fingerprint
         // is taken, or the next save would meet it as a conflict. Labels the
-        // buffer lacks are left to that conflict, which unions them.
-        if updated.content == persistedContent, updated.title == persistedTitle {
+        // buffer lacks are decided below, with the rest of the merge.
+        if updated.content == persistedContent, updated.title == persistedTitle,
+           Set(updated.labels) == Set(persistedLabels) {
             adoptFingerprint(fingerprint, ifLabelsMatch: updated)
             return
         }
-        if updated.content == buffer.content, updated.title == buffer.title {
+        if updated.content == buffer.content, updated.title == buffer.title, Set(updated.labels) == Set(buffer.labels) {
             // The file holds what the buffer holds, so that is the base now.
             persistedContent = updated.content
             persistedTitle = updated.title
+            persistedLabels = updated.labels
             adoptFingerprint(fingerprint, ifLabelsMatch: updated)
             return
         }
@@ -297,7 +318,8 @@ final class NoteDocument {
     /// the outside text whole. A body both sides changed is merged by
     /// `ConflictResolver`, which keeps both. A title both sides changed stays the
     /// person's, and the other is added to the text as an "Also titled" line.
-    /// Labels are always added together.
+    /// Labels follow the same rule as the body: added together only when both
+    /// sides changed them.
     ///
     /// `fingerprint` is that of the file `external` was read from, when known.
     /// Otherwise the file is read again, and its newest version is merged in
@@ -337,7 +359,15 @@ final class NoteDocument {
             }
         }
 
-        taken.labels = buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
+        // Labels are decided like the body: a set only the outside changed is the
+        // outside's, so a label removed in Obsidian stays removed, and only a set
+        // both sides changed is added together.
+        if Set(external.labels) != Set(persistedLabels) {
+            let localChangedLabels = Set(buffer.labels) != Set(persistedLabels)
+            taken.labels = localChangedLabels
+                ? buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
+                : external.labels
+        }
         taken.preserved = external.preserved
         apply(taken, from: external, fingerprint: fingerprint)
     }
@@ -384,6 +414,7 @@ final class NoteDocument {
         // unsaved work and get deferred.
         persistedContent = source.content
         persistedTitle = source.title
+        persistedLabels = source.labels
         buffer.preserved = updated.preserved
         var applied = Applied()
         if updated.title != buffer.title {
@@ -403,15 +434,24 @@ final class NoteDocument {
 
     // MARK: - Saving
 
-    private func scheduleSave(after delay: TimeInterval = NoteDocument.debounce) {
+    private func scheduleRetry() {
+        let delay = min(Self.retryDelay * pow(2, Double(retryAttempts)), Self.maxRetryDelay)
+        retryAttempts += 1
+        scheduleSave(after: delay, isRetry: true)
+    }
+
+    private func scheduleSave(after delay: TimeInterval = NoteDocument.debounce, isRetry: Bool = false) {
         guard !isClosed else { return }
         if createsFileOnFirstEdit, !hasFile, wasNeverEdited, Self.isBlank(buffer) { return }
+        retryArmed = isRetry
+        armedRetryDelay = delay
         saveTask?.cancel()
         saveTask = scheduler.schedule(after: delay) { [weak self] in
             guard let self = self else { return }
             // Clear first: leaving it set made `flush` believe a save was still
             // owed, so quitting rewrote every open note.
             self.saveTask = nil
+            self.retryArmed = false
             guard !self.isClosed else { return }
             // A held-back outside edit has to be folded in first, or this write
             // silently overwrites it.
@@ -447,7 +487,7 @@ final class NoteDocument {
             buffer.updatedAt = clock.now()
             switch repository.save(buffer, expecting: persistedFingerprint) {
             case .failed:
-                scheduleSave(after: Self.retryDelay)
+                scheduleRetry()
                 return false
             case let .saved(fingerprint):
                 markPersisted()
@@ -464,7 +504,8 @@ final class NoteDocument {
                 case .done: return true
                 case .again: continue
                 case .failed:
-                    scheduleSave(after: Self.retryDelay)
+                    isStranded = true
+                    scheduleRetry()
                     return false
                 }
             case let .conflict(onDisk, fingerprint):
@@ -477,13 +518,16 @@ final class NoteDocument {
                 persistedFingerprint = fingerprint
             }
         }
-        scheduleSave(after: Self.retryDelay)
+        scheduleRetry()
         return false
     }
 
     private func markPersisted() {
+        retryAttempts = 0
+        isStranded = false
         persistedContent = buffer.content
         persistedTitle = buffer.title
+        persistedLabels = buffer.labels
         unsavedEdit = false
     }
 

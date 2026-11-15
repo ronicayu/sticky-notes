@@ -12,6 +12,7 @@ import XCTest
     private var clock: ManualClock!
     private var desk: DeskController!
     private var undo: UndoCenter!
+    private var scheduler: TestScheduler!
     private var originalTextSize: CGFloat = MarkdownStyler.baseFontSize
 
     override func setUp() async throws {
@@ -40,12 +41,14 @@ import XCTest
 
     private func makeDesk() -> DeskController {
         undo = UndoCenter(clock: clock)
+        scheduler = TestScheduler(clock: clock)
         return DeskController(
             store: store,
             settings: isolated.settings,
             clock: clock,
             undo: undo,
-            recovery: RecoveryFiles(settings: isolated.settings, store: store, clock: clock)
+            recovery: RecoveryFiles(settings: isolated.settings, store: store, clock: clock),
+            scheduler: scheduler
         )
     }
 
@@ -180,7 +183,7 @@ import XCTest
     func testAnExplicitColourBeatsTheDefault() throws {
         isolated.settings.defaultNoteColor = .green
         let id = desk.makeNote(color: .pink)
-        XCTAssertEqual(store.loadNote(id: id)?.color, .pink)
+        XCTAssertEqual(desk.windowControllers[id]?.bufferedNote.color, .pink)
     }
 
     func testTwoNewNotesDoNotOpenOnTheSameSpot() throws {
@@ -525,12 +528,83 @@ import XCTest
     func testACapturedNoteIsWrittenAtOnceBecauseItArrivedWithContent() throws {
         let withText = desk.makeNote(text: "from the clipboard")
         let withTitle = desk.makeNote(title: "From a URL")
-        let withLabel = desk.makeNote(labels: ["inbox"])
 
-        for id in [withText, withTitle, withLabel] {
+        for id in [withText, withTitle] {
             XCTAssertNotNil(store.loadNote(id: id))
             XCTAssertEqual(desk.windowControllers[id]?.hasFile, true)
         }
+    }
+
+    /// The blur sweep judges a note blank by its trimmed title and body, so the
+    /// capture must too: colour and labels alone, or whitespace, make no file.
+    func testACaptureOfNothingButWhitespaceColourOrLabelsLeavesNoFileAndNoTrash() throws {
+        let ids = [
+            desk.makeNote(text: " \n\t"),
+            desk.makeNote(color: .blue),
+            desk.makeNote(labels: ["inbox"]),
+        ]
+        for id in ids {
+            let controller = try XCTUnwrap(desk.windowControllers[id])
+            XCTAssertFalse(controller.hasFile)
+            controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: controller.window))
+        }
+        waitForDeferredWork()
+
+        XCTAssertTrue(desk.windowControllers.isEmpty, "an untouched capture stayed on the desk")
+        for folder in [store.activeURL, store.archiveURL, store.trashURL] {
+            XCTAssertTrue(try files(in: folder).isEmpty, "\(folder.lastPathComponent) holds a file for an untouched capture")
+        }
+    }
+
+    func testACaptureWhoseFirstWriteFailsIsWrittenToARecoveryFileAtQuit() throws {
+        try setPermissions(0o555, on: store.activeURL)
+
+        let id = desk.makeNote(text: "clipboard text that could not be written")
+
+        XCTAssertTrue(try files(in: store.activeURL).isEmpty)
+        XCTAssertEqual(desk.windowControllers[id]?.flushPendingSave(), false, "nothing was owed, so the text would be lost at quit")
+        XCTAssertEqual(desk.flushForQuit(), 0, "the text was not put anywhere")
+        let recovered = try files(in: RecoveryFiles(settings: isolated.settings, store: store, clock: clock).folder)
+        XCTAssertTrue(try String(contentsOf: XCTUnwrap(recovered.first)).contains("clipboard text that could not be written"))
+    }
+
+    /// The other Mac archived the note and its archive cannot be read, so nowhere
+    /// can be found for the text. The person's close used to be refused for as
+    /// long as that lasted.
+    func testClosingANoteWhoseTextHasNowhereToGoEndsWithARecoveryFileAndNoWindow() throws {
+        let note = seed("Stranded")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        type("body of Stranded and a late thought", into: controller)
+        store.archive(note)
+        try setPermissions(0o000, on: store.archiveURL)
+        store.handleFileSystemEvent()
+
+        controller.closeNote()
+
+        XCTAssertNil(desk.windowControllers[note.id], "the window could not be closed")
+        let recovered = try files(in: RecoveryFiles(settings: isolated.settings, store: store, clock: clock).folder)
+        XCTAssertTrue(try String(contentsOf: XCTUnwrap(recovered.first)).contains("a late thought"))
+        XCTAssertTrue(undo.hasPendingOffer)
+    }
+
+    /// A note renamed on the other Mac and still downloading is listed under a
+    /// name that says nothing of this note's.
+    func testReconcileKeepsTheWindowOfANoteThatIsDownloadingUnderANewName() throws {
+        let note = seed("Renamed")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        type("body of Renamed plus typing", into: controller)
+        let file = try XCTUnwrap(files(in: store.activeURL).first)
+        try FileManager.default.moveItem(
+            at: file, to: store.activeURL.appendingPathComponent(".Shopping list.md.icloud")
+        )
+        store.handleFileSystemEvent()
+
+        desk.reconcileOpenWindows()
+
+        XCTAssertNotNil(desk.windowControllers[note.id], "a note still downloading closed its window")
+        XCTAssertTrue(store.loadTrashed().isEmpty, "a recovered copy was made of a note that exists")
     }
 
     // MARK: - Quitting
