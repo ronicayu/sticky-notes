@@ -99,6 +99,17 @@ enum NoteFloatLevel: String, Codable, CaseIterable {
     }
 }
 
+/// What the file's frontmatter holds that the app does not own, and how the
+/// file laid it out: every other key (tags, aliases, plugin properties,
+/// comments) as the lines it was read from, and where the app's own keys sat
+/// among them. Written back as it was; the app never edits any of it, so it is
+/// not part of a note's text and a merge takes it from the file.
+struct PreservedFrontmatter: Equatable {
+    var layout: [MarkdownFile.Slot] = []
+    /// The file wrote `labels` as a block list, so it is written back that way.
+    var labelsAsBlock = false
+}
+
 struct Note: Codable, Identifiable {
     let id: UUID
     var title: String
@@ -113,6 +124,12 @@ struct Note: Codable, Identifiable {
     var floatLevel: NoteFloatLevel
     let createdAt: Date
     var updatedAt: Date
+    var preserved = PreservedFrontmatter()
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, content, positionX, positionY, width, height, collapsed, color, labels
+        case floatLevel, createdAt, updatedAt
+    }
 
     init(
         id: UUID,

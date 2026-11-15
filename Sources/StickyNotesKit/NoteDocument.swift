@@ -235,6 +235,9 @@ final class NoteDocument {
     /// of the file it came from, when the reader has it.
     func externalChange(_ updated: Note, fingerprint: Fingerprint? = nil) {
         hasFile = true
+        // Properties the app does not own are the file's, whatever happens to
+        // the text below, so the next save writes them back as they are now.
+        buffer.preserved = updated.preserved
         // Our own write, echoed back by the watcher. Mid-burst it is the text as
         // of the last debounce, which is not an outside edit.
         // The file may still be new to us: a rewrite that kept the text, such as a
@@ -335,6 +338,7 @@ final class NoteDocument {
         }
 
         taken.labels = buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
+        taken.preserved = external.preserved
         apply(taken, from: external, fingerprint: fingerprint)
     }
 
@@ -380,6 +384,7 @@ final class NoteDocument {
         // unsaved work and get deferred.
         persistedContent = source.content
         persistedTitle = source.title
+        buffer.preserved = updated.preserved
         var applied = Applied()
         if updated.title != buffer.title {
             buffer.title = updated.title

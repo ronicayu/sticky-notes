@@ -388,12 +388,13 @@ final class NoteStore {
     /// so it shows in the Trash tab and is never mistaken for the original.
     /// Rewritten in place when the same note is recovered again.
     func saveRecoveredCopy(of note: Note) -> Bool {
-        let copy = Note(
+        var copy = Note(
             id: Self.recoveredCopyId(for: note.id), title: note.title, content: note.content,
             positionX: note.positionX, positionY: note.positionY, width: note.width, height: note.height,
             collapsed: note.collapsed, color: note.color, labels: note.labels, floatLevel: note.floatLevel,
             createdAt: note.createdAt, updatedAt: note.updatedAt
         )
+        copy.preserved = note.preserved
         let url = existingURL(for: copy.id, in: trashURL) ?? {
             let stamp = NoteStore.filenameFormatter.string(from: clock.now())
             return trashURL.appendingPathComponent("recovered-\(note.id.uuidString)-\(stamp).\(NoteStore.fileExtension)")
@@ -1433,12 +1434,23 @@ final class NoteStore {
             ("created", iso8601.string(from: note.createdAt)),
             ("updated", iso8601.string(from: note.updatedAt))
         ]
-        let document = MarkdownFile.Document(frontmatter: frontmatter, body: note.content)
-        return MarkdownFile.serialize(document, forceQuoteKeys: ["title"])
+        let document = MarkdownFile.Document(
+            frontmatter: frontmatter, body: note.content, layout: note.preserved.layout
+        )
+        return MarkdownFile.serialize(
+            document, forceQuoteKeys: ["title"], blockListKeys: note.preserved.labelsAsBlock ? ["labels"] : []
+        )
     }
 
+    /// The keys the app reads and writes itself. Any other key in a note's
+    /// frontmatter is carried through as it was; see `PreservedFrontmatter`.
+    private static let ownedFrontmatterKeys: Set<String> = [
+        "id", "title", "color", "labels", "positionX", "positionY", "width", "height",
+        "collapsed", "float", "created", "updated"
+    ]
+
     private func parseMarkdown(_ raw: String, fallbackId: UUID?) -> Note? {
-        let doc = MarkdownFile.parse(raw)
+        let doc = MarkdownFile.parse(raw, ownedKeys: Self.ownedFrontmatterKeys)
         let id: UUID = doc.value(for: "id").flatMap(UUID.init(uuidString:)) ?? fallbackId ?? UUID()
         let title = doc.value(for: "title") ?? ""
         let color = doc.value(for: "color").flatMap(NoteColor.init(rawValue:)) ?? .yellow
@@ -1451,7 +1463,7 @@ final class NoteStore {
         let floatLevel = doc.value(for: "float").flatMap(NoteFloatLevel.init(rawValue:)) ?? .floating
         let createdAt = doc.value(for: "created").flatMap(iso8601.date(from:)) ?? clock.now()
         let updatedAt = doc.value(for: "updated").flatMap(iso8601.date(from:)) ?? createdAt
-        return Note(
+        var note = Note(
             id: id,
             title: title,
             content: doc.body,
@@ -1466,6 +1478,10 @@ final class NoteStore {
             createdAt: createdAt,
             updatedAt: updatedAt
         )
+        note.preserved = PreservedFrontmatter(
+            layout: doc.layout, labelsAsBlock: doc.blockListKeys.contains("labels")
+        )
+        return note
     }
 
     /// Parse a flat YAML inline-list value like `[a, b, c]`. Tolerates missing

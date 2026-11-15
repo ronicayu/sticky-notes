@@ -190,3 +190,114 @@ final class MarkdownFileTests: XCTestCase {
                        "a thematic break in the body must not be read as frontmatter")
     }
 }
+
+// MARK: - Frontmatter the app does not own
+
+final class MarkdownFileUnknownKeyTests: XCTestCase {
+    private let owned: Set<String> = ["id", "title", "labels"]
+
+    /// Every kind of line Obsidian and its plugins put in a frontmatter.
+    private let obsidianFile = """
+    ---
+    # written by a plugin
+    id: ABC
+    tags:
+      - project/x
+      - "needs: review"
+    aliases: [Plan B, 'Plan "C"']
+    cssclasses: wide-page
+    nested:
+      owner:
+        name: Ada
+        roles: [a, b]
+      note: "has # and : and '--- inside'"
+    summary: |
+      First line
+        indented line
+      ---
+      line after a dashed line
+
+    title: Meeting
+    quote: 'it''s'
+    url: https://example.com/a?b=c#d
+    labels:
+      - work
+      - home
+    empty:
+    ---
+
+    Body text
+    """
+
+    func testFrontmatterItDoesNotUnderstandComesBackByteForByte() {
+        let document = MarkdownFile.parse(obsidianFile, ownedKeys: owned)
+        let written = MarkdownFile.serialize(
+            document, forceQuoteKeys: [], blockListKeys: document.blockListKeys
+        )
+        XCTAssertEqual(written, obsidianFile)
+    }
+
+    func testAnOwnedKeyChangesInPlaceAndTheOthersStayWhereTheyWere() {
+        var document = MarkdownFile.parse(obsidianFile, ownedKeys: owned)
+        document.frontmatter = document.frontmatter.map { $0.0 == "title" ? ("title", "Renamed") : $0 }
+        let written = MarkdownFile.serialize(document, blockListKeys: document.blockListKeys)
+
+        XCTAssertEqual(written, obsidianFile.replacingOccurrences(of: "title: Meeting", with: "title: Renamed"))
+    }
+
+    func testAnOwnedKeyTheFileLacksIsAddedAfterTheExistingLines() {
+        var document = MarkdownFile.parse("---\ntags: [a]\n---\n\nbody", ownedKeys: owned)
+        document.frontmatter.append(("id", "NEW"))
+        XCTAssertEqual(MarkdownFile.serialize(document), "---\ntags: [a]\nid: NEW\n---\n\nbody")
+    }
+
+    func testABlockListIsReadAsItsItems() {
+        let document = MarkdownFile.parse("---\nlabels:\n  - work\n  - \"two words\"\n- odd\n---\n\nb", ownedKeys: owned)
+        XCTAssertEqual(document.value(for: "labels"), "[work, two words, odd]")
+        XCTAssertEqual(document.blockListKeys, ["labels"])
+    }
+
+    func testAFlowListIsNotABlockList() {
+        let document = MarkdownFile.parse("---\nlabels: [a, b]\n---\n\nb", ownedKeys: owned)
+        XCTAssertEqual(document.value(for: "labels"), "[a, b]")
+        XCTAssertTrue(document.blockListKeys.isEmpty)
+    }
+
+    func testABlockListIsWrittenAsABlockListWhenAsked() {
+        let document = MarkdownFile.Document(frontmatter: [("labels", "[a, b]")], body: "b")
+        XCTAssertEqual(
+            MarkdownFile.serialize(document, blockListKeys: ["labels"]),
+            "---\nlabels:\n  - a\n  - b\n---\n\nb"
+        )
+    }
+
+    func testAnEmptyListIsWrittenInFlowStyleEvenWhenBlockStyleIsAsked() {
+        let document = MarkdownFile.Document(frontmatter: [("labels", "[]")], body: "b")
+        XCTAssertEqual(MarkdownFile.serialize(document, blockListKeys: ["labels"]), "---\nlabels: []\n---\n\nb")
+    }
+
+    func testAnIndentedDashLineInsideAValueDoesNotEndTheFrontmatter() {
+        let raw = "---\nnote: |\n  a\n  ---\n  b\nid: A\n---\n\nbody"
+        let document = MarkdownFile.parse(raw, ownedKeys: owned)
+        XCTAssertEqual(document.value(for: "id"), "A")
+        XCTAssertEqual(document.body, "body")
+    }
+
+    func testAValueFoldedOverSeveralLinesIsReadAsOneLine() {
+        let document = MarkdownFile.parse("---\ntitle: \"a long\n  title\"\n---\n\nb", ownedKeys: owned)
+        XCTAssertEqual(document.value(for: "title"), "a long title")
+    }
+
+    func testLinesItDoesNotUnderstandAreKeptRatherThanDropped() {
+        let raw = "---\nid: A\nthis line has no colon\n: empty key\n---\n\nbody"
+        let document = MarkdownFile.parse(raw, ownedKeys: owned)
+        XCTAssertEqual(MarkdownFile.serialize(document), raw)
+    }
+
+    func testCRLFLinesOfOtherKeysAreKeptAsTheyWere() {
+        let raw = "---\r\nid: A\r\ntags:\r\n  - x\r\n---\r\n\r\nbody"
+        let document = MarkdownFile.parse(raw, ownedKeys: owned)
+        XCTAssertEqual(document.value(for: "id"), "A")
+        XCTAssertEqual(MarkdownFile.serialize(document), "---\nid: A\ntags:\r\n  - x\r\n---\n\nbody")
+    }
+}
