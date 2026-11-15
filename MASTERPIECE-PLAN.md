@@ -32,6 +32,13 @@ wait for Phase 0.
 After those: keyboard parity with the original Stickies (⌘1–⌘7 colours, ⌘M collapse, ⌘W close),
 a title that scales with ⌘+, incremental restyling, and VoiceOver on the custom views. Then stop.
 
+**Use case (owner, 2026-11-15).** One person uses the app on two Macs in turn, through one vault
+in iCloud Drive, and never edits on both at the same moment. Conflicts still arise from sync delay,
+from a Mac that was offline, from iCloud keeping this Mac's own older saves, and from Obsidian on the
+same Mac, so the merge and lineage rules stay. What only matters for two people (or two Macs)
+typing at once is not worth extra machinery: R8 and the two-Mac form of R10 are dropped, and F7/F8
+are fixed only through the shared document in 0.1, with no two-Mac-specific code.
+
 Phases 0–1 are foundations and must land first. Phases 2–4 are independent of each other.
 Phase 5 (distribution) needs only Phase 0's build-number change and an owner decision.
 
@@ -358,7 +365,7 @@ momentarily absent directory therefore closes every window and cancels every pen
 
 **Problem.** `makeNote` saves an empty note immediately (AppDelegate.swift:557-562) and the blur
 sweep deletes it (NoteWindowController.swift:741-750). In a synced vault every misfired hotkey is
-a create + delete that the other Mac briefly opens as a window.
+a create + delete that syncs to the other Mac for nothing.
 
 **Change.** `NoteDocument` for a new note starts `unsaved`; the first `edit` writes. Abandoning an
 `unsaved` document touches no file. `closeNote`'s empty check (:538-546) and
@@ -626,9 +633,9 @@ breaks. "Lost" means text that existed in a buffer or on disk and is in neither 
 | R5 | Reachable, confirmed | F8 |
 | R6 | Reachable, confirmed | F10 |
 | R7 | Same root as R6 | F10 |
-| R8 | Not reachable as text loss: `mergeBodies` containment makes a second heal a no-op | — |
+| R8 | Not reachable as text loss: `mergeBodies` containment makes a second heal a no-op. Dropped: needs two Macs at once | — |
 | R9 | Reachable, confirmed | F5 |
-| R10 | Reachable, confirmed | F3 |
+| R10 | Reachable, confirmed; the two-Mac form is dropped (use case), the one-Mac form stays in 1.2/1.3 | F3 |
 | R11 | No text loss; reachable as a nested Conflicted-copy block | F1 |
 | R12 | Outside the model | — |
 | R13 | Not a loss the app causes; "latest outside version wins" is the right rule | — |
