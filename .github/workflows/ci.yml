@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Tags make build-app.sh stamp a real version into Info.plist
-          # instead of falling back to 0.0.0-dev.
+          # Full history: tags give build-app.sh a real version instead of
+          # 0.0.0-dev, and the commit count is the build number.
           fetch-depth: 0
 
       - name: Cache SwiftPM dependencies
@@ -37,3 +37,12 @@ jobs:
 
       - name: Build release app bundle
         run: ./scripts/build-app.sh
+
+      - name: Check the build number was stamped
+        run: |
+          expected="$(git rev-list --count HEAD)"
+          actual="$(plutil -extract CFBundleVersion raw build/StickyNotes.app/Contents/Info.plist)"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "CFBundleVersion is '${actual}', expected '${expected}'" >&2
+            exit 1
+          fi

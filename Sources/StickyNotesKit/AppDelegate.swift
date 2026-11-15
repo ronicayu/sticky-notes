@@ -228,7 +228,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         menu.delegate = self
 
         let versionItem = NSMenuItem(
-            title: "Sticky Notes \(AppDelegate.appVersionString)",
+            title: "Sticky Notes \(AppVersion.displayString(info: Bundle.main.infoDictionary ?? [:]))",
             action: nil,
             keyEquivalent: ""
         )
@@ -308,18 +308,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         statusItem.menu = menu
-    }
-
-    /// Version stamped into Info.plist by `scripts/build-app.sh`. Falls back
-    /// to "dev" when running from `swift run` (no bundle = no Info.plist).
-    private static var appVersionString: String {
-        let info = Bundle.main.infoDictionary ?? [:]
-        if let raw = info["CFBundleShortVersionString"] as? String,
-           !raw.isEmpty,
-           raw != "__APP_VERSION__" {
-            return "v\(raw)"
-        }
-        return "dev"
     }
 
     /// Menu construction runs on the main thread; the library's helper is
