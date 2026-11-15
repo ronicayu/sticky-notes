@@ -527,15 +527,15 @@ final class NoteStore {
     }
 
     private func recordWrite(_ note: Note, to url: URL) {
-        WriteLineage.record(NoteStore.contentHash(note.content), for: NoteStore.lineageKey(url))
+        WriteLineage.record(NoteStore.contentHash(note), for: NoteStore.lineageKey(url))
     }
 
     private func isNewestOwnWrite(_ note: Note, at url: URL) -> Bool {
-        WriteLineage.isNewest(NoteStore.contentHash(note.content), for: NoteStore.lineageKey(url))
+        WriteLineage.isNewest(NoteStore.contentHash(note), for: NoteStore.lineageKey(url))
     }
 
     private func isOwnWrite(_ note: Note, at url: URL) -> Bool {
-        WriteLineage.contains(NoteStore.contentHash(note.content), for: NoteStore.lineageKey(url))
+        WriteLineage.contains(NoteStore.contentHash(note), for: NoteStore.lineageKey(url))
     }
 
     /// The same file reaches us as `/var/...` and `/private/var/...`.
@@ -543,8 +543,12 @@ final class NoteStore {
         url.resolvingSymlinksInPath().path
     }
 
-    private static func contentHash(_ body: String) -> String {
-        let digest = SHA256.hash(data: Data(ConflictResolver.normalizedBody(body).utf8))
+    /// Covers everything a merge keeps, so a version that differs from ours
+    /// only in its title or labels is never taken for our own save.
+    private static func contentHash(_ note: Note) -> String {
+        let fields = [ConflictResolver.normalizedBody(note.content), note.title]
+            + note.labels.sorted()
+        let digest = SHA256.hash(data: Data(fields.joined(separator: "\u{0}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -553,7 +557,7 @@ final class NoteStore {
     private func readMain(_ url: URL) -> Note? {
         guard let note = read(url) else { return nil }
         let key = NoteStore.lineageKey(url)
-        if !WriteLineage.isNewest(NoteStore.contentHash(note.content), for: key) {
+        if !WriteLineage.isNewest(NoteStore.contentHash(note), for: key) {
             WriteLineage.clear(key)
         }
         return note

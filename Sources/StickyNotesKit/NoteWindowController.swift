@@ -131,9 +131,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     init(note: Note, store: NoteStore, onClosed: @escaping (UUID) -> Void) {
         self.note = note
-        // Every caller hands over a note that is on disk exactly as given
-        // (just saved, or just loaded), so the file watcher's echo of it is
-        // not an outside edit.
+        // Every caller hands over a note as just saved or as last read, so
+        // the file watcher's echo of it is not an outside edit.
         self.lastPersistedContent = note.content
         self.lastPersistedTitle = note.title
         self.store = store

@@ -216,6 +216,14 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertTrue(merged.content.hasSuffix("- [ ]\nb\nc"), "got \(merged.content)")
     }
 
+    func testALabelOnAVersionWithNothingNewInItsBodyIsKept() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("a\nb", updated: 200), note("a", labels: ["work"], updated: 100)
+        ], now: now))
+        XCTAssertEqual(merged.content, "a\nb")
+        XCTAssertEqual(merged.labels, ["work"])
+    }
+
     func testTwoGenuinelyDivergentVersionsStillGetADivider() throws {
         let merged = try XCTUnwrap(ConflictResolver.merge([
             note("a\nmine", updated: 200), note("a\ntheirs", updated: 100)
@@ -662,6 +670,51 @@ final class ConflictSweepTests: XCTestCase {
 
         XCTAssertEqual(try XCTUnwrap(store.loadNote(id: note.id)).content, "the cat\nsat down")
         XCTAssertEqual(resolved, 1)
+    }
+
+    private func taggedVersion(
+        of note: Note, content: String, title: String, labels: String, updated: String
+    ) throws -> NoteStore.ConflictVersionHandle {
+        let url = root.appendingPathComponent("version-\(UUID().uuidString).md")
+        try "---\nid: \(note.id.uuidString)\ntitle: \"\(title)\"\nlabels: \(labels)\nupdated: \(updated)\n---\n\(content)\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        return .init(url: url, markResolved: {})
+    }
+
+    func testAnOlderOwnBodyCarryingAnotherMacsLabelKeepsTheLabel() throws {
+        var note = savedNote("A")
+        let tagged = try taggedVersion(
+            of: note, content: "A", title: "", labels: "[work]", updated: "1970-01-01T00:00:01Z"
+        )
+        note.content = "A\nB"
+        note.updatedAt = Date()
+        store.save(note)
+        store.conflictVersionsProvider = { _ in [tagged] }
+        store.otherVersionsRemover = { _ in }
+
+        store.resolveConflicts()
+
+        let merged = try XCTUnwrap(store.loadNote(id: note.id))
+        XCTAssertEqual(merged.labels, ["work"])
+        XCTAssertEqual(merged.content.trimmingCharacters(in: .whitespacesAndNewlines), "A\nB")
+    }
+
+    func testAnOlderOwnBodyCarryingAnotherMacsNewerTitleKeepsTheTitle() throws {
+        var note = savedNote("A")
+        let renamed = try taggedVersion(
+            of: note, content: "A", title: "Groceries", labels: "[]", updated: "2100-01-01T00:00:00Z"
+        )
+        note.content = "A\nB"
+        note.updatedAt = Date()
+        store.save(note)
+        store.conflictVersionsProvider = { _ in [renamed] }
+        store.otherVersionsRemover = { _ in }
+
+        store.resolveConflicts()
+
+        let merged = try XCTUnwrap(store.loadNote(id: note.id))
+        XCTAssertEqual(merged.title, "Groceries")
+        XCTAssertEqual(merged.content.trimmingCharacters(in: .whitespacesAndNewlines), "A\nB")
     }
 
     /// The race: this Mac saves, the other Mac's file arrives and the idle

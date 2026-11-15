@@ -44,12 +44,13 @@ enum ConflictResolver {
             .filter { !isCovered($0.body, by: base) }
             .map { "\(divider(for: $0.date, now: now))\n\n\($0.body)" }
 
-        guard base != winner.content || !appended.isEmpty else { return winner }
+        // Labels are additive: losing a tag in a merge is silent data loss too.
+        let labels = mergedLabels(versions)
+        guard base != winner.content || !appended.isEmpty || labels != winner.labels else { return winner }
         var merged = winner
         merged.content = ([base] + appended).joined(separator: "\n\n")
         merged.updatedAt = now
-        // Labels are additive: losing a tag in a merge is silent data loss too.
-        merged.labels = mergedLabels(versions)
+        merged.labels = labels
         return merged
     }
 
