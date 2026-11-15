@@ -234,6 +234,13 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertEqual(merged.content.components(separatedBy: "theirs").count, 2, "got \(merged.content)")
     }
 
+    func testBodyMergeIntoAnEmptyFileTakesTheOtherTextWithoutADivider() {
+        let merged = ConflictResolver.mergeBodies(
+            local: "", external: "first line", externalDate: now, now: now
+        )
+        XCTAssertEqual(merged, "first line")
+    }
+
     func testBodyMergeTakesAnOutsideAppendWithoutADivider() {
         let merged = ConflictResolver.mergeBodies(
             local: "a\nb", external: "a\nb\nc", externalDate: now, now: now

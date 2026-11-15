@@ -66,6 +66,7 @@ enum ConflictResolver {
         let localBody = normalize(local)
         let externalBody = normalize(external)
         guard !externalBody.isEmpty, externalBody != localBody else { return local }
+        if localBody.isEmpty { return external }
         if isCovered(externalBody, by: localBody) { return local }
         if isSuperset(externalBody, of: localBody) { return external }
         return "\(local)\n\n\(divider(for: externalDate, now: now))\n\n\(external)"
