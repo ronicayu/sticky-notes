@@ -30,6 +30,8 @@ struct Toast {
         return trimmed.isEmpty ? "Note archived" : "Archived “\(shorten(trimmed))”"
     }
 
+    static func labelRemovedMessage(label: String) -> String { "Removed #\(label)" }
+
     static func hiddenMessage(count: Int, label: String?) -> String {
         let noun = count == 1 ? "note" : "notes"
         if let label = label {

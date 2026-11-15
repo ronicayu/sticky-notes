@@ -263,6 +263,46 @@ final class TodoTextView: NSTextView {
         return true
     }
 
+    // MARK: - Accessibility
+
+    /// A checkbox is painted over the text, so VoiceOver would only read the
+    /// "- [ ]" under it. Each one is also offered as a check box that reports
+    /// whether it is checked and can be pressed.
+    override func accessibilityChildren() -> [Any]? {
+        guard let storage = textStorage else { return super.accessibilityChildren() }
+        var boxes: [CheckboxAccessibilityElement] = []
+        storage.enumerateAttribute(.checkboxRange, in: NSRange(location: 0, length: storage.length), options: []) { value, range, _ in
+            guard value is NSValue else { return }
+            boxes.append(CheckboxAccessibilityElement(textView: self, markerRange: range))
+        }
+        guard !boxes.isEmpty else { return super.accessibilityChildren() }
+        return (super.accessibilityChildren() ?? []) + boxes
+    }
+
+    /// The box whose marker starts at `location`, as drawn now.
+    func isCheckboxChecked(at location: Int) -> Bool {
+        guard let storage = textStorage, location < storage.length else { return false }
+        return (storage.attribute(.checkboxChecked, at: location, effectiveRange: nil) as? Bool) ?? false
+    }
+
+    /// What the line says after its marker, without the Markdown around words.
+    func checkboxTitle(afterMarker marker: NSRange) -> String {
+        let text = string as NSString
+        guard marker.upperBound <= text.length else { return "" }
+        let line = text.lineRange(for: NSRange(location: marker.location, length: 0))
+        let rest = text.substring(with: NSRange(location: marker.upperBound, length: line.upperBound - marker.upperBound))
+        return ["**", "~~", "`"]
+            .reduce(rest) { $0.replacingOccurrences(of: $1, with: "") }
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Where the box is on screen.
+    func checkboxScreenFrame(of marker: NSRange) -> NSRect {
+        guard let lm = layoutManager, let tc = textContainer, let window = window else { return .zero }
+        let inView = boundingRectInView(for: marker, lm: lm, tc: tc)
+        return window.convertToScreen(convert(inView, to: nil))
+    }
+
     private func checkboxStartIndex(at point: NSPoint) -> Int? {
         guard let storage = textStorage, let lm = layoutManager, let tc = textContainer else { return nil }
         let full = NSRange(location: 0, length: storage.length)
@@ -288,5 +328,47 @@ final class TodoTextView: NSTextView {
         rect.origin.x += textContainerOrigin.x
         rect.origin.y += textContainerOrigin.y
         return rect
+    }
+}
+
+/// One painted checkbox of a note, as VoiceOver sees it. It holds no state of
+/// its own: the text view is asked each time, so it is right after an edit.
+/// VoiceOver asks on the main thread.
+final class CheckboxAccessibilityElement: NSAccessibilityElement {
+    private weak var textView: TodoTextView?
+    private let markerRange: NSRange
+
+    @MainActor
+    init(textView: TodoTextView, markerRange: NSRange) {
+        self.textView = textView
+        self.markerRange = markerRange
+        super.init()
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .checkBox }
+
+    override func accessibilityParent() -> Any? { textView }
+
+    override func accessibilityFrame() -> NSRect {
+        MainActor.assumeIsolated { textView?.checkboxScreenFrame(of: markerRange) ?? .zero }
+    }
+
+    override func accessibilityLabel() -> String? {
+        let title = MainActor.assumeIsolated { textView?.checkboxTitle(afterMarker: markerRange) ?? "" }
+        return title.isEmpty ? "Task" : title
+    }
+
+    override func accessibilityValue() -> Any? {
+        let checked = MainActor.assumeIsolated { textView?.isCheckboxChecked(at: markerRange.location) == true }
+        return NSNumber(value: checked ? 1 : 0)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        MainActor.assumeIsolated {
+            guard let textView = textView, let delegate = textView.todoDelegate else { return false }
+            delegate.textViewDidToggleCheckbox(at: markerRange.location)
+            NSAccessibility.post(element: self, notification: .valueChanged)
+            return true
+        }
     }
 }

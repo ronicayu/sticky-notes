@@ -444,7 +444,7 @@ private final class QuickSwitcherSearchField: NSTextField {
 
 // MARK: - Row
 
-private final class QuickSwitcherCell: NSView {
+final class QuickSwitcherCell: NSView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("quickSwitcherCell")
 
     private let dot = NSView()
@@ -516,6 +516,13 @@ private final class QuickSwitcherCell: NSView {
         // Only repeat the excerpt when it says something the heading doesn't.
         let excerpt = match.excerpt
         detailLabel.stringValue = (excerpt == heading) ? relativeDate(match.note) : excerpt
+        defer {
+            NoteRowAccessibility.apply(
+                to: self, heading: heading, progress: MarkdownEditing.checkboxProgress(in: match.note.content),
+                detail: detailLabel.stringValue,
+                trailing: match.note.id == DailyNote.candidateID ? "daily note" : (archived ? "archived" : "")
+            )
+        }
 
         if match.note.id == DailyNote.candidateID {
             badge.stringValue = DailyNote.shortDate(match.note.createdAt)

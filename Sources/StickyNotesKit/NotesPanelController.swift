@@ -621,6 +621,11 @@ final class NotesPanelCell: NSView {
         detail.isHidden = detail.stringValue.isEmpty
 
         timeLabel.stringValue = NotesPanelCell.relativeFormatter.localizedString(for: note.updatedAt, relativeTo: Date())
+
+        NoteRowAccessibility.apply(
+            to: self, heading: heading, progress: MarkdownEditing.checkboxProgress(in: note.content),
+            detail: reason, trailing: timeLabel.stringValue
+        )
     }
 
     private func labelSummary(_ note: Note) -> String {

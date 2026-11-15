@@ -19,6 +19,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Called when closing was refused because the text could not be saved.
     /// The argument runs the close again.
     var onCloseRefused: ((_ retry: @escaping () -> Void) -> Void)?
+    /// Called when a label was removed with its chip, with what puts it back.
+    var onLabelRemoved: ((_ label: String, _ restore: @escaping () -> Void) -> Void)?
     /// Called when the note left the active folder under typed text, and the text
     /// was written where the note went.
     var onTextKept: ((NoteDocument.KeptIn) -> Void)?
@@ -54,12 +56,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// task list shows its remaining count there. Every path that changes the
     /// title or the body routes through here so the two can't drift apart.
     private func refreshCollapsedTitle() {
+        let name = note.title.isEmpty ? "Untitled" : note.title
         guard let progress = MarkdownEditing.checkboxProgress(in: note.content) else {
             titleLabel.text = note.title
+            titleLabel.spokenTitle = name
             return
         }
         let count = "\(progress.done)/\(progress.total)"
         titleLabel.text = note.title.isEmpty ? count : "\(note.title)   \(count)"
+        titleLabel.spokenTitle = "\(name), \(progress.done) of \(progress.total) tasks done"
     }
 
     private let dragZone: NoteDragZone
@@ -244,6 +249,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         titleLabel.textColor = MarkdownStyler.bodyTextColor
         titleLabel.placeholder = "Untitled"
         titleLabel.isHidden = !layout.collapsed
+        titleLabel.spokenTitle = note.title.isEmpty ? "Untitled" : note.title
         dragZone.reportsSingleClick = layout.collapsed
 
         bodyContainer = NSView()
@@ -422,6 +428,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             self?.onTextKept?(place)
         }
 
+        titleLabel.onPress = { [weak self] in self?.dragZoneDidClick() }
+        resizeGrip.onResize = { [weak self] dx, dy in self?.resizeByAccessibilityAction(dx: dx, dy: dy) }
+        updateButtonAccessibility()
+
         expandButton.target = self
         expandButton.action = #selector(toggleCollapse)
         trashButton.target = self
@@ -554,6 +564,31 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         button.setAccessibilityRole(.button)
         button.alphaValue = 0
         return button
+    }
+
+    /// What VoiceOver says for the chrome buttons that change with the note.
+    private func updateButtonAccessibility() {
+        expandButton.setAccessibilityLabel(geometry.collapsed ? "Expand note" : "Collapse note")
+        colorButton.setAccessibilityRole(.menuButton)
+        colorButton.setAccessibilityLabel("Color and float level")
+        colorButton.setAccessibilityValue(note.color.displayName)
+        labelButton.setAccessibilityRole(.menuButton)
+        labelButton.setAccessibilityLabel("Labels")
+        resizeGrip.isResizable = !geometry.collapsed
+    }
+
+    /// Change the size as the corner drag would, for VoiceOver. The top-left
+    /// corner stays where it is.
+    private func resizeByAccessibilityAction(dx: CGFloat, dy: CGFloat) {
+        guard let window = window, !geometry.collapsed else { return }
+        var frame = window.frame
+        let size = NSSize(
+            width: max(window.minSize.width, frame.width + dx),
+            height: max(window.minSize.height, frame.height + dy)
+        )
+        frame.origin.y += frame.height - size.height
+        frame.size = size
+        window.setFrame(NoteWindow.clampToVisibleScreen(frame), display: true, animate: false)
     }
 
     private func updateExpandButtonIcon() {
@@ -763,6 +798,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     func setColor(_ color: NoteColor) {
         guard color != note.color else { return }
         noteDocument.edit { $0.color = color }
+        colorButton.setAccessibilityValue(color.displayName)
         applyAppearanceColors()
     }
 
@@ -1019,6 +1055,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             window.makeFirstResponder(textView)
         }
         updateExpandButtonIcon()
+        updateButtonAccessibility()
         updateChromeVisibility()
         updateAlpha()
     }
@@ -1074,7 +1111,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         for label in note.labels {
             let chip = LabelChipView(labelName: label)
             chip.onRemove = { [weak self] in
-                self?.removeLabel(label)
+                self?.removeLabelOfferingUndo(label)
             }
             labelStack.addArrangedSubview(chip)
         }
@@ -1091,6 +1128,18 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         guard let idx = note.labels.firstIndex(of: name) else { return }
         noteDocument.adjust { $0.labels.remove(at: idx) }
         rebuildLabelChips()
+    }
+
+    /// A chip is one click or key press, so removing a label that way can be
+    /// taken back: the label returns to the place it had.
+    func removeLabelOfferingUndo(_ name: String) {
+        guard let idx = note.labels.firstIndex(of: name) else { return }
+        removeLabel(name)
+        onLabelRemoved?(name) { [weak self] in
+            guard let self = self, !self.note.labels.contains(name) else { return }
+            self.noteDocument.adjust { $0.labels.insert(name, at: min(idx, $0.labels.count)) }
+            self.rebuildLabelChips()
+        }
     }
 
     @objc func showLabelMenu() {

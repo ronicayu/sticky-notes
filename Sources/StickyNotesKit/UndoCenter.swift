@@ -27,6 +27,11 @@ import AppKit
         ))
     }
 
+    /// A label came off with one press of its chip.
+    func offerUndoForLabelRemoval(_ label: String, restore: @escaping () -> Void) {
+        toasts.show(Toast(message: Toast.labelRemovedMessage(label: label), now: clock.now(), undo: restore))
+    }
+
     /// A close was refused because the text could not be saved.
     func offerRetryAfterRefusedClose(_ retry: @escaping () -> Void) {
         toasts.show(Toast(

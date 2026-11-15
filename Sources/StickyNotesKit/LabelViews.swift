@@ -2,9 +2,9 @@ import AppKit
 
 // MARK: - Label chip
 
-/// Small rounded pill that renders a `#label`. Clicks bubble up so the
-/// owning note window can present a remove menu.
-final class LabelChipView: NSView {
+/// Small rounded pill that renders a `#label`. Pressing it, with a click, the
+/// space bar or VoiceOver, removes the label from the note.
+final class LabelChipView: NSButton {
     let labelName: String
     var onRemove: (() -> Void)?
 
@@ -15,13 +15,31 @@ final class LabelChipView: NSView {
     init(labelName: String) {
         self.labelName = labelName
         super.init(frame: .zero)
+        title = ""
+        isBordered = false
+        setButtonType(.momentaryChange)
+        focusRingType = .default
         wantsLayer = true
         layer?.cornerRadius = 7
         layer?.backgroundColor = Appearance.chipFill.cgColor
         toolTip = "Click to remove"
+        target = self
+        action = #selector(pressed)
+        setAccessibilityLabel("#\(labelName), remove")
+        setAccessibilityRole(.button)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func pressed() { onRemove?() }
+
+    override func isAccessibilityElement() -> Bool { true }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onRemove = onRemove else { return false }
+        onRemove()
+        return true
+    }
 
     override var intrinsicContentSize: NSSize {
         let text = "#\(labelName)" as NSString
@@ -44,9 +62,10 @@ final class LabelChipView: NSView {
         text.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
     }
 
-    override func mouseDown(with event: NSEvent) {
-        // Single-click → remove this label from the note.
-        onRemove?()
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7).fill()
     }
 }
 

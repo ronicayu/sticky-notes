@@ -190,6 +190,9 @@ import AppKit
         }
         controller.motionDuration = { [weak self] length in self?.motionDuration(length) ?? 0 }
         controller.archiveDestination = { [weak self] in self?.menuBarIconFrame?() }
+        controller.onLabelRemoved = { [weak self] label, restore in
+            self?.undo.offerUndoForLabelRemoval(label, restore: restore)
+        }
         controller.onTextKept = { [weak self] place in
             switch place {
             case .recoveredCopy: self?.undo.tellRecoveredCopy(in: "Trash")

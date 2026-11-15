@@ -225,6 +225,9 @@ private final class GeneralPaneView: NSView {
             swatch.isBordered = false
             swatch.imagePosition = .imageOnly
             swatch.toolTip = color.displayName
+            swatch.setAccessibilityLabel(color.displayName)
+            swatch.setAccessibilityRole(.radioButton)
+            swatch.setAccessibilityHelp("Color for new notes")
             swatch.identifier = NSUserInterfaceItemIdentifier(color.rawValue)
             swatch.translatesAutoresizingMaskIntoConstraints = false
             swatch.widthAnchor.constraint(equalToConstant: 28).isActive = true
@@ -320,6 +323,7 @@ private final class GeneralPaneView: NSView {
         let current = settings.defaultNoteColor
         for (color, button) in colorButtons {
             button.image = Self.swatchImage(for: color, size: 22, selected: color == current)
+            button.setAccessibilityValue(color == current ? 1 : 0)
         }
     }
 

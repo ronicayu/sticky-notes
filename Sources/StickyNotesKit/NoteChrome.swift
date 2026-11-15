@@ -39,7 +39,16 @@ final class FlushLeftTextField: NSTextField {
 /// Used for the collapsed sticky bar where NSTextField's baseline-aligned
 /// rendering leaves an empty lower half. Hit-test always returns nil so
 /// pointer events fall through to the underlying drag zone.
+///
+/// For VoiceOver it is plain text, or a button when `onPress` is set: the bar of
+/// a collapsed note is all there is to press to expand it.
 final class CenteredTitleLabel: NSView {
+    /// What pressing the label does. Set while the label is the way back to a
+    /// collapsed note's text.
+    var onPress: (() -> Void)?
+    /// What VoiceOver says for the title, when it should differ from the drawn
+    /// text, which may carry a task count such as "2/5".
+    var spokenTitle: String?
     var text: String = "" {
         didSet { needsDisplay = true }
     }
@@ -73,6 +82,26 @@ final class CenteredTitleLabel: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private var spokenName: String {
+        spokenTitle ?? (text.isEmpty ? placeholder : text)
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+
+    override func accessibilityRole() -> NSAccessibility.Role? {
+        onPress == nil ? .staticText : .button
+    }
+
+    override func accessibilityLabel() -> String? {
+        onPress == nil ? spokenName : "\(spokenName), collapsed note, click to expand"
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onPress = onPress else { return false }
+        onPress()
+        return true
+    }
 }
 
 extension NSColor {
@@ -105,6 +134,22 @@ protocol NoteDragZoneDelegate: AnyObject {
 /// (like buttons) still receive their own clicks via standard hit testing.
 final class NoteDragZone: NSView {
     weak var delegate: NoteDragZoneDelegate?
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Note top bar" }
+    override func accessibilityHelp() -> String? {
+        "Drag to move the note. Double-click to collapse or expand it."
+    }
+
+    /// The double-click, for a person who cannot make one.
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        let name = reportsSingleClick ? "Expand note" : "Collapse note"
+        return [NSAccessibilityCustomAction(name: name) { [weak self] in
+            self?.delegate?.dragZoneDidDoubleClick()
+            return true
+        }]
+    }
 
     /// When true, a click that doesn't move reports `dragZoneDidClick`.
     /// Set while the note is collapsed.
@@ -162,8 +207,39 @@ final class NoteDragZone: NSView {
 /// The window is borderless and resizable, which gives no visual hint that
 /// dragging the corner does anything. This doesn't implement resizing — AppKit
 /// already handles that — it just says the corner is live.
+///
+/// VoiceOver cannot drag a corner, so it gets the same resizing as four actions.
 final class ResizeGripView: NSView {
     override var isFlipped: Bool { true }
+
+    /// How far one action changes the note, in points.
+    static let accessibilityStep: CGFloat = 40
+
+    /// Asked to change the note's size by this much: width grows rightward and
+    /// height grows downward, as the corner drag does.
+    var onResize: ((_ dx: CGFloat, _ dy: CGFloat) -> Void)?
+
+    /// False while the note is collapsed: there is no corner to resize.
+    var isResizable = true
+
+    override func isAccessibilityElement() -> Bool { isResizable }
+    override func accessibilityRole() -> NSAccessibility.Role? { .growArea }
+    override func accessibilityLabel() -> String? { "Resize note" }
+    override func accessibilityHelp() -> String? { "Make the note wider, narrower, taller or shorter." }
+
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        let step = ResizeGripView.accessibilityStep
+        let choices: [(String, CGFloat, CGFloat)] = [
+            ("Make wider", step, 0), ("Make narrower", -step, 0),
+            ("Make taller", 0, step), ("Make shorter", 0, -step)
+        ]
+        return choices.map { name, dx, dy in
+            NSAccessibilityCustomAction(name: name) { [weak self] in
+                self?.onResize?(dx, dy)
+                return true
+            }
+        }
+    }
 
     /// Purely decorative: the window's own resize region handles the drag, and
     /// swallowing clicks here would break it.
