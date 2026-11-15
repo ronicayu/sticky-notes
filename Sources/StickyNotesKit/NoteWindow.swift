@@ -13,14 +13,37 @@ final class NoteWindow: NSWindow {
         return frameRect
     }
 
-    /// Clamp a saved frame into the visible region of whichever screen it
-     /// overlaps most, so a note saved next to an external display still has
-     /// its drag zone reachable when the app reopens with that display gone.
+    /// Bring a saved frame onto a screen when no screen lets the person take hold
+    /// of it: a note left next to an external display that is gone must have its
+    /// drag zone reachable when the app reopens. A frame the person can still
+    /// grab stays as it is, even when it hangs over the edge of a screen or lies
+    /// across two of them.
     static func clampToVisibleScreen(_ rect: NSRect) -> NSRect {
-        clamp(rect, into: NSScreen.screens.map(\.visibleFrame))
+        fit(rect, into: NSScreen.screens.map(\.visibleFrame))
     }
 
     /// `clampToVisibleScreen` for the given visible frames, one per screen.
+    static func fit(_ rect: NSRect, into screens: [NSRect]) -> NSRect {
+        isGrabbable(rect, on: screens) ? rect : clamp(rect, into: screens)
+    }
+
+    /// Whether the top strip of a note, the part that drags it, lies on a screen
+    /// in full height and wide enough to take hold of, and the note is not larger
+    /// than that screen, whose edge would hide its far corner.
+    static func isGrabbable(_ rect: NSRect, on screens: [NSRect]) -> Bool {
+        let strip = min(rect.height, NoteWindowController.collapsedHeight)
+        let drag = NSRect(x: rect.minX, y: rect.maxY - strip, width: rect.width, height: strip)
+        let wide = min(rect.width, minimumGrabWidth)
+        return screens.contains { screen in
+            let shown = screen.intersection(drag)
+            return shown.height >= strip - 0.5 && shown.width >= wide - 0.5
+                && rect.width <= screen.width + 0.5 && rect.height <= screen.height + 0.5
+        }
+    }
+
+    private static let minimumGrabWidth: CGFloat = 80
+
+    /// Move a frame wholly onto the screen it overlaps most, shrinking it to fit.
     static func clamp(_ rect: NSRect, into screens: [NSRect]) -> NSRect {
         func area(_ r: NSRect) -> CGFloat { max(0, r.width) * max(0, r.height) }
         guard let v = screens.max(by: { area($0.intersection(rect)) < area($1.intersection(rect)) }) else { return rect }

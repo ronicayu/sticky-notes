@@ -166,7 +166,7 @@ import XCTest
         XCTAssertEqual(layout.layout(for: note.id)?.y, laptop.minY + 250)
     }
 
-    func testCollapsingAStoodInNoteKeepsItsLayoutPosition() throws {
+    func testCollapsingAStoodInNoteKeepsItsLayoutTopEdge() throws {
         let note = makeNote()
         let chosen = NSRect(x: external.minX + 400, y: laptop.minY + 100, width: 240, height: 200)
         let controller = open(note, at: chosen)
@@ -175,14 +175,35 @@ import XCTest
         controller.dragZoneDidDoubleClick()
         scheduler.advance(by: 1)
 
+        let bar = NoteWindowController.collapsedHeight
         let saved = try XCTUnwrap(layout.layout(for: note.id))
         XCTAssertTrue(saved.collapsed)
         XCTAssertEqual(saved.x, chosen.minX)
-        XCTAssertEqual(saved.y, chosen.minY)
+        XCTAssertEqual(saved.y, chosen.maxY - bar, "the bar did not keep the note's top edge")
         XCTAssertEqual(saved.height, chosen.height)
 
         screensChange(controller, to: [laptop, external])
-        XCTAssertEqual(controller.window?.frame.origin, chosen.origin)
+        XCTAssertEqual(controller.window?.frame, NSRect(x: chosen.minX, y: chosen.maxY - bar, width: chosen.width, height: bar))
+
+        controller.dragZoneDidDoubleClick()
+        XCTAssertEqual(controller.window?.frame, chosen, "expanding moved the note")
+    }
+
+    func testExpandingAStoodInBarKeepsItsLayoutTopEdge() throws {
+        let note = makeNote()
+        let bar = NoteWindowController.collapsedHeight
+        let chosen = NSRect(x: external.minX + 400, y: laptop.minY + 500, width: 240, height: 200)
+        let controller = open(note, at: chosen, collapsed: true)
+        screensChange(controller, to: [laptop])
+
+        controller.toggleCollapse()
+
+        let saved = try XCTUnwrap(layout.layout(for: note.id))
+        XCTAssertFalse(saved.collapsed)
+        XCTAssertEqual(saved.y, chosen.minY + bar - chosen.height, "the note lost its top edge")
+
+        screensChange(controller, to: [laptop, external])
+        XCTAssertEqual(controller.window?.frame, NSRect(x: chosen.minX, y: chosen.minY + bar - 200, width: 240, height: 200))
     }
 
     func testClosingAStoodInNoteLeavesItsLayoutAlone() throws {
@@ -193,6 +214,93 @@ import XCTest
 
         controller.closeNote()
 
+        XCTAssertEqual(layout.layout(for: note.id)?.frame, chosen)
+    }
+
+    // MARK: - Collapsing and expanding without the mouse
+
+    func testExpandingABarAtTheScreenTopWithTheKeyboardKeepsTheNoteWhereItIs() throws {
+        let note = makeNote()
+        let top = laptop.maxY
+        let controller = open(note, at: NSRect(x: laptop.minX + 100, y: top - NoteWindowController.collapsedHeight, width: 240, height: 200), collapsed: true)
+        controller.isPersonDraggingOrResizing = { false }
+
+        controller.toggleCollapse()
+
+        let expanded = NSRect(x: laptop.minX + 100, y: top - 200, width: 240, height: 200)
+        XCTAssertEqual(controller.window?.frame, expanded)
+        XCTAssertEqual(layout.layout(for: note.id)?.frame, expanded, "the layout kept the bar's origin for the whole note")
+        XCTAssertEqual(layout.layout(for: note.id)?.collapsed, false)
+        screensChange(controller, to: [laptop, external])
+        XCTAssertEqual(controller.window?.frame, expanded, "the note jumped on the next screen change")
+    }
+
+    func testCollapsingAndExpandingAnExpandedNoteWithTheKeyboardReturnsItsLayout() throws {
+        let note = makeNote()
+        let chosen = NSRect(x: laptop.minX + 100, y: laptop.minY + 200, width: 240, height: 200)
+        let controller = open(note, at: chosen)
+        controller.isPersonDraggingOrResizing = { false }
+
+        controller.toggleCollapse()
+        XCTAssertEqual(layout.layout(for: note.id)?.y, chosen.maxY - NoteWindowController.collapsedHeight)
+        controller.toggleCollapse()
+
+        XCTAssertEqual(layout.layout(for: note.id)?.frame, chosen)
+        XCTAssertEqual(controller.window?.frame, chosen)
+    }
+
+    // MARK: - Notes the person placed across the edge of a screen
+
+    func testANoteAcrossTwoScreensStaysThereWhenTheScreensAreReported() throws {
+        let note = makeNote()
+        let neighbour = NSRect(x: laptop.maxX, y: laptop.minY, width: 1600, height: laptop.height)
+        let chosen = NSRect(x: laptop.maxX - 120, y: laptop.minY + 100, width: 240, height: 200)
+        let controller = open(note, at: chosen)
+
+        screensChange(controller, to: [laptop, neighbour])
+
+        XCTAssertEqual(controller.window?.frame, chosen, "a note the person put across two screens was pulled onto one")
+        XCTAssertEqual(layout.layout(for: note.id)?.frame, chosen)
+    }
+
+    func testANoteHalfOffTheLeftEdgeStaysThereWhenTheScreensAreReported() throws {
+        let note = makeNote()
+        let chosen = NSRect(x: laptop.minX - 100, y: laptop.minY + 100, width: 240, height: 200)
+        let controller = open(note, at: chosen)
+
+        screensChange(controller, to: [laptop])
+
+        XCTAssertEqual(controller.window?.frame, chosen)
+    }
+
+    func testCollapsingANoteAcrossTwoScreensIsRecorded() throws {
+        let note = makeNote()
+        let neighbour = NSRect(x: laptop.maxX, y: laptop.minY, width: 1600, height: laptop.height)
+        let chosen = NSRect(x: laptop.maxX - 120, y: laptop.minY + 100, width: 240, height: 200)
+        let controller = open(note, at: chosen)
+        screensChange(controller, to: [laptop, neighbour])
+        controller.isPersonDraggingOrResizing = { false }
+
+        controller.toggleCollapse()
+
+        let bar = NoteWindowController.collapsedHeight
+        let expected = NSRect(x: chosen.minX, y: chosen.maxY - bar, width: chosen.width, height: bar)
+        XCTAssertEqual(controller.window?.frame, expected)
+        XCTAssertEqual(layout.layout(for: note.id)?.y, expected.minY, "the collapse was not recorded")
+        XCTAssertEqual(layout.layout(for: note.id)?.collapsed, true)
+        screensChange(controller, to: [laptop, neighbour])
+        XCTAssertEqual(controller.window?.frame, expected)
+    }
+
+    func testANoteWithOnlyASliverOnAScreenIsBroughtBackOntoIt() throws {
+        let note = makeNote()
+        let chosen = NSRect(x: laptop.maxX - 30, y: laptop.minY + 100, width: 240, height: 200)
+        let controller = open(note, at: chosen)
+
+        screensChange(controller, to: [laptop])
+
+        let frame = try XCTUnwrap(controller.window?.frame)
+        XCTAssertTrue(laptop.contains(frame), "a note nobody can grab was left half off the screen")
         XCTAssertEqual(layout.layout(for: note.id)?.frame, chosen)
     }
 

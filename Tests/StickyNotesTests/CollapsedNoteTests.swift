@@ -84,6 +84,26 @@ import XCTest
         XCTAssertFalse(controller.isCollapsed)
     }
 
+    func testFocusingABarAtTheScreenTopKeepsTheNoteWhereItIsInTheLayout() throws {
+        let screen = try XCTUnwrap(NSScreen.main?.visibleFrame, "no screen")
+        let note = seed("Groceries")
+        let bar = NoteWindowController.collapsedHeight
+        desk.layout.set(
+            NoteLayout(x: screen.minX + 60, y: screen.maxY - bar, width: 240, height: 200, collapsed: true), for: note.id
+        )
+        let controller = try open(note)
+        controller.isPersonDraggingOrResizing = { false }
+
+        desk.focusNote(id: note.id)
+
+        let expanded = NSRect(x: screen.minX + 60, y: screen.maxY - 200, width: 240, height: 200)
+        XCTAssertFalse(controller.isCollapsed)
+        XCTAssertEqual(controller.window?.frame, expanded)
+        XCTAssertEqual(desk.layout.layout(for: note.id)?.frame, expanded, "the layout puts the note above the screen")
+        controller.screensDidChange()
+        XCTAssertEqual(controller.window?.frame, expanded, "the note jumped on the next screen change")
+    }
+
     func testTheFooterShowsWhenTheNoteWasLastSavedNotToday() throws {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d"

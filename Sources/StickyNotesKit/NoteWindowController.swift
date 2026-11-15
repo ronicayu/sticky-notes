@@ -1047,7 +1047,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         // The display arrangement just changed, so the stored geometry can
         // easily describe a spot that no longer exists — a monitor that was
         // unplugged. Clamping only at launch stranded the note until relaunch.
-        let shown = NoteWindow.clamp(frame, into: visibleScreenFrames())
+        let shown = NoteWindow.fit(frame, into: visibleScreenFrames())
         guard NoteWindowController.isSame(shown, frame) else {
             place(shown)
             return
@@ -1062,7 +1062,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     @objc func screensDidChange() {
         guard !isFadingOut else { return }
         let wanted = layoutFrame
-        let shown = NoteWindow.clamp(wanted, into: visibleScreenFrames())
+        let shown = NoteWindow.fit(wanted, into: visibleScreenFrames())
         let fits = NoteWindowController.isSame(shown, wanted)
         if fits && standInFrame == nil { return }
         place(shown)
@@ -1088,18 +1088,25 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     }
 
     /// The frame a collapse or expand ends in. On a stand-in it is a stand-in
-    /// too: the toggle is not the person placing the note.
+    /// too. Otherwise it is the person's own choice, even when the layout has no
+    /// screen: the person asked for the toggle, the system did not move the note.
     private func setFrameAsToggled(_ frame: NSRect) {
         guard let window = window else { return }
-        let wasStandIn = standInFrame != nil
-        isPlacingItself = wasStandIn
-        window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
-        isPlacingItself = false
-        if wasStandIn { standInFrame = window.frame }
+        if standInFrame != nil {
+            isPlacingItself = true
+            window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
+            isPlacingItself = false
+            standInFrame = window.frame
+        } else {
+            asPerson {
+                window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
+                recordFrame(frame, resized: true)
+            }
+        }
     }
 
     private var layoutFitsScreens: Bool {
-        NoteWindowController.isSame(NoteWindow.clamp(layoutFrame, into: visibleScreenFrames()), layoutFrame)
+        NoteWindow.isGrabbable(layoutFrame, on: visibleScreenFrames())
     }
 
     /// A move or resize that comes from the person, not from the system.
@@ -1162,7 +1169,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
     private func performToggleCollapse() {
         guard let window = window else { return }
+        // The bar and the note share their top edge, and the layout's origin is
+        // the bottom edge: it moves by the height the body adds or takes away.
+        let bodyHeight = CGFloat(geometry.height) - NoteWindowController.collapsedHeight
         geometry.collapsed.toggle()
+        geometry.y += Double(geometry.collapsed ? bodyHeight : -bodyHeight)
         layoutStore.set(geometry, for: note.id)
         var frame = window.frame
         if geometry.collapsed {
@@ -1206,7 +1217,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             // expand straight off the screen, leaving only its title bar.
             frame = NoteWindow.clamp(frame, into: visibleScreenFrames())
             setFrameAsToggled(frame)
-            recordFrame(frame, resized: true)
             window.initialFirstResponder = textView
             window.makeFirstResponder(textView)
         }
