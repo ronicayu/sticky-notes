@@ -368,7 +368,7 @@ private final class GeneralPaneView: NSView {
         return NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
             let inset = rect.insetBy(dx: 1, dy: 1)
             let path = NSBezierPath(roundedRect: inset, xRadius: 5, yRadius: 5)
-            NSColor(hex: color.bodyHex)?.setFill()
+            NSColor(hex: color.lightBodyHex)?.setFill()
             path.fill()
 
             if selected {

@@ -68,6 +68,36 @@ import XCTest
         XCTAssertEqual(Set(bodies).count, bodies.count, "two colors share a dark paper")
     }
 
+    /// The colour menu is drawn on the system's own background, so in dark mode
+    /// a swatch in the dark paper colour is near black and the seven look alike.
+    func testMenuSwatchesKeepTheirLightColorInDarkMode() throws {
+        let app = NSApplication.shared
+        let original = app.appearance
+        defer { app.appearance = original }
+
+        func centre(of image: NSImage) throws -> NSColor {
+            let rep = try XCTUnwrap(NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 14, pixelsHigh: 14, bitsPerSample: 8, samplesPerPixel: 4,
+                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+            ))
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            image.draw(in: NSRect(x: 0, y: 0, width: 14, height: 14))
+            return try XCTUnwrap(rep.colorAt(x: 7, y: 7)?.usingColorSpace(.sRGB))
+        }
+
+        app.appearance = NSAppearance(named: .darkAqua)
+        var seen: Set<String> = []
+        for color in NoteColor.allCases {
+            let pixel = try centre(of: NoteWindowController.colorSwatch(for: color))
+            let light = try XCTUnwrap(NSColor(hex: color.lightBodyHex)?.usingColorSpace(.sRGB))
+            XCTAssertEqual(pixel.brightnessComponent, light.brightnessComponent, accuracy: 0.02, "\(color)")
+            seen.insert(String(format: "%.2f-%.2f-%.2f", pixel.redComponent, pixel.greenComponent, pixel.blueComponent))
+        }
+        XCTAssertEqual(seen.count, NoteColor.allCases.count)
+    }
+
     /// The stored value is a color name, so adding dark variants must not have
     /// changed what lands in a file.
     func testAppearanceDoesNotAffectPersistedValues() {

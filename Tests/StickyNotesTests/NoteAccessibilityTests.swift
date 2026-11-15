@@ -189,6 +189,12 @@ import XCTest
 
     // MARK: - Chrome buttons
 
+    /// The colour menu also holds the float level, so the hover text names both.
+    func testTheColorButtonTooltipNamesTheFloatLevelToo() throws {
+        let color = try button(labelled: "Color and float level", in: try open())
+        XCTAssertEqual(color.toolTip, "Color and float level")
+    }
+
     func testTheChromeButtonsSayWhatTheyDoAndTheColorButtonSaysTheColor() throws {
         let controller = try open()
 
