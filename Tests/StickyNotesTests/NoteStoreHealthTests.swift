@@ -31,8 +31,7 @@ import XCTest
     private func makeNote(content: String = "n") -> Note {
         Note(
             id: UUID(), title: "", content: content,
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: [],
+            width: 240, height: 200, color: .yellow, labels: [],
             createdAt: Date(), updatedAt: Date()
         )
     }

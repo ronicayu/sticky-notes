@@ -22,8 +22,7 @@ final class ObsidianStorePathsTests: XCTestCase {
     private func note(_ body: String, id: UUID = UUID(), updated: TimeInterval = 1_700_000_500) -> Note {
         Note(
             id: id, title: "T", content: body,
-            positionX: 120, positionY: 240, width: 300, height: 220,
-            collapsed: false, color: .blue, labels: [],
+            width: 300, height: 220, color: .blue, labels: [],
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedAt: Date(timeIntervalSince1970: updated)
         )
@@ -147,11 +146,8 @@ final class ObsidianStorePathsTests: XCTestCase {
       - work
       - home
     tags: [a]
-    positionX: 120.00
-    positionY: 240.00
     width: 300.00
     height: 220.00
-    collapsed: false
     float: floating
     created: 2023-11-14T22:13:20Z
     updated: 2023-11-14T22:21:40Z

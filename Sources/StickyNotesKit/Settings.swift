@@ -141,6 +141,12 @@ final class Settings {
         localRootURL.appendingPathComponent("StickyNotes", isDirectory: true)
     }
 
+    /// Where this Mac keeps its note layout. Beside the storage roots, never in
+    /// one, so no sync service carries it to another Mac.
+    var layoutURL: URL {
+        localRootURL.appendingPathComponent("layout.json")
+    }
+
     var preferredStorageRoot: URL {
         if let vault = obsidianVaultPath {
             return URL(fileURLWithPath: vault, isDirectory: true)

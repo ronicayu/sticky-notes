@@ -11,8 +11,7 @@ final class NoteSearchTests: XCTestCase {
     ) -> Note {
         Note(
             id: UUID(), title: title, content: content,
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: labels,
+            width: 240, height: 200, color: .yellow, labels: labels,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_000 + updated)
         )

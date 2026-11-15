@@ -22,16 +22,13 @@ final class NoteStoreTests: XCTestCase {
         content: String = "hello",
         title: String = "",
         labels: [String] = [],
-        collapsed: Bool = false,
         color: NoteColor = .yellow
     ) -> Note {
         Note(
             id: UUID(),
             title: title,
             content: content,
-            positionX: 120, positionY: 240,
             width: 300, height: 220,
-            collapsed: collapsed,
             color: color,
             labels: labels,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
@@ -47,7 +44,6 @@ final class NoteStoreTests: XCTestCase {
             content: "line one\nline two",
             title: "Shopping",
             labels: ["home", "errands"],
-            collapsed: true,
             color: .blue
         )
         store.save(note)
@@ -58,8 +54,7 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(loaded.content, note.content)
         XCTAssertEqual(loaded.labels, note.labels)
         XCTAssertEqual(loaded.color, note.color)
-        XCTAssertEqual(loaded.collapsed, note.collapsed)
-        XCTAssertEqual(loaded.positionX, note.positionX, accuracy: 0.01)
+        XCTAssertEqual(loaded.width, note.width, accuracy: 0.01)
         XCTAssertEqual(loaded.height, note.height, accuracy: 0.01)
         XCTAssertEqual(loaded.createdAt.timeIntervalSince1970,
                        note.createdAt.timeIntervalSince1970, accuracy: 1.0)
@@ -109,16 +104,15 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(store.loadArchived().map(\.id), [note.id])
     }
 
-    func testRestoreReturnsNoteToActiveAndForcesItExpanded() throws {
+    func testRestoreReturnsNoteToActive() throws {
         let store = makeStore()
-        let note = makeNote(collapsed: true)
+        let note = makeNote()
         store.save(note)
         store.archive(note)
         store.restore(note)
 
         let restored = try XCTUnwrap(store.loadActive().first)
         XCTAssertEqual(restored.id, note.id)
-        XCTAssertFalse(restored.collapsed, "restore should expand so content is visible")
         XCTAssertTrue(store.loadArchived().isEmpty)
     }
 

@@ -12,8 +12,7 @@ final class ConflictResolverTests: XCTestCase {
     ) -> Note {
         Note(
             id: id, title: "T", content: content,
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: labels,
+            width: 240, height: 200, color: .yellow, labels: labels,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_000 + updated)
         )
@@ -425,8 +424,7 @@ final class TrashTests: XCTestCase {
     private func makeNote(_ content: String = "n") -> Note {
         Note(
             id: UUID(), title: "", content: content,
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: [],
+            width: 240, height: 200, color: .yellow, labels: [],
             createdAt: Date(), updatedAt: Date()
         )
     }
@@ -477,8 +475,7 @@ final class TrashTests: XCTestCase {
         for content in ["first", "second"] {
             let note = Note(
                 id: UUID(), title: "", content: content,
-                positionX: 0, positionY: 0, width: 240, height: 200,
-                collapsed: false, color: .yellow, labels: [],
+                width: 240, height: 200, color: .yellow, labels: [],
                 createdAt: created, updatedAt: created
             )
             store.save(note)

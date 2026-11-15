@@ -31,6 +31,16 @@ final class NoteWindow: NSWindow {
         return r
     }
 
+    /// How a note joins Spaces and full-screen apps. A floating note follows you
+    /// to every Space and shows over a full-screen app, as the quick switcher does.
+    /// A desktop note belongs to the desk it is on, so it does neither.
+    static func collectionBehavior(for level: NoteFloatLevel) -> NSWindow.CollectionBehavior {
+        switch level {
+        case .floating: return [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+        case .desktop: return [.stationary]
+        }
+    }
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -40,7 +50,7 @@ final class NoteWindow: NSWindow {
         )
         isMovableByWindowBackground = false
         level = .floating
-        collectionBehavior = [.canJoinAllSpaces, .stationary]
+        collectionBehavior = NoteWindow.collectionBehavior(for: .floating)
         hasShadow = true
         isOpaque = false
         backgroundColor = .clear

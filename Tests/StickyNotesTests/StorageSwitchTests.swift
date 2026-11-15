@@ -23,8 +23,7 @@ final class StorageSwitchTests: XCTestCase {
     private func makeNote(_ content: String, id: UUID = UUID(), title: String = "") -> Note {
         Note(
             id: id, title: title, content: content,
-            positionX: 120, positionY: 240, width: 300, height: 220,
-            collapsed: false, color: .blue, labels: [],
+            width: 300, height: 220, color: .blue, labels: [],
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_500)
         )

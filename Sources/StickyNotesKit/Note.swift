@@ -113,21 +113,34 @@ struct PreservedFrontmatter: Equatable {
     var originals: [String: MarkdownFile.Original] = [:]
 }
 
+/// Where an older build kept a note's window, in the note's own file. This
+/// build keeps the window per Mac (see `DeviceLayoutStore`) and no longer writes
+/// these keys, but a file that still has them places the note once, on a Mac
+/// that has no layout for it.
+struct LegacyPlacement: Equatable {
+    var x: Double
+    var y: Double
+    var collapsed: Bool
+}
+
 struct Note: Codable, Identifiable {
     let id: UUID
     var title: String
     var content: String
-    var positionX: Double
-    var positionY: Double
+    /// The size the note was last saved at: a hint for a Mac that has never
+    /// shown it. Where the window sits, and its size on a Mac that has shown it,
+    /// are that Mac's own and live in `DeviceLayoutStore`.
     var width: Double
     var height: Double
-    var collapsed: Bool
     var color: NoteColor
     var labels: [String]
     var floatLevel: NoteFloatLevel
     let createdAt: Date
     var updatedAt: Date
     var preserved = PreservedFrontmatter()
+    /// What the file's retired geometry keys held, when it still has them. Read
+    /// to place the note once; never written back.
+    var legacyPlacement: LegacyPlacement?
 
     private enum CodingKeys: String, CodingKey {
         case id, title, content, positionX, positionY, width, height, collapsed, color, labels
@@ -138,11 +151,8 @@ struct Note: Codable, Identifiable {
         id: UUID,
         title: String = "",
         content: String,
-        positionX: Double,
-        positionY: Double,
         width: Double,
         height: Double,
-        collapsed: Bool,
         color: NoteColor,
         labels: [String] = [],
         floatLevel: NoteFloatLevel = .floating,
@@ -152,11 +162,8 @@ struct Note: Codable, Identifiable {
         self.id = id
         self.title = title
         self.content = content
-        self.positionX = positionX
-        self.positionY = positionY
         self.width = width
         self.height = height
-        self.collapsed = collapsed
         self.color = color
         self.labels = labels
         self.floatLevel = floatLevel
@@ -171,22 +178,44 @@ struct Note: Codable, Identifiable {
         id = try c.decode(UUID.self, forKey: .id)
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         content = try c.decode(String.self, forKey: .content)
-        positionX = try c.decode(Double.self, forKey: .positionX)
-        positionY = try c.decode(Double.self, forKey: .positionY)
         width = try c.decode(Double.self, forKey: .width)
         height = try c.decode(Double.self, forKey: .height)
-        collapsed = (try? c.decode(Bool.self, forKey: .collapsed)) ?? false
         color = (try? c.decode(NoteColor.self, forKey: .color)) ?? .yellow
         labels = (try? c.decode([String].self, forKey: .labels)) ?? []
         floatLevel = (try? c.decode(NoteFloatLevel.self, forKey: .floatLevel)) ?? .floating
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        if let x = try? c.decode(Double.self, forKey: .positionX),
+           let y = try? c.decode(Double.self, forKey: .positionY) {
+            legacyPlacement = LegacyPlacement(
+                x: x, y: y, collapsed: (try? c.decode(Bool.self, forKey: .collapsed)) ?? false
+            )
+        }
     }
 
-    /// A new note at `frame`. Callers pass real screen geometry — this used
-    /// to invent a 1440x900 screen and pick a random spot inside it, which put
-    /// notes off screen on other displays and made each new note a scavenger
-    /// hunt. See `NotePlacement`.
+    /// The JSON shape older builds read, which only a test of the conversion needs.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encode(content, forKey: .content)
+        try c.encode(width, forKey: .width)
+        try c.encode(height, forKey: .height)
+        try c.encode(color, forKey: .color)
+        try c.encode(labels, forKey: .labels)
+        try c.encode(floatLevel, forKey: .floatLevel)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
+        let placement = legacyPlacement ?? LegacyPlacement(x: 0, y: 0, collapsed: false)
+        try c.encode(placement.x, forKey: .positionX)
+        try c.encode(placement.y, forKey: .positionY)
+        try c.encode(placement.collapsed, forKey: .collapsed)
+    }
+
+    /// A new note sized as `frame`. The note's window is placed by the caller
+    /// in `DeviceLayoutStore`; callers pass real screen geometry, because this
+    /// used to invent a 1440x900 screen, which put notes off screen on other
+    /// displays. See `NotePlacement`.
     static func makeNew(
         frame: CGRect,
         color: NoteColor = .yellow,
@@ -196,11 +225,8 @@ struct Note: Codable, Identifiable {
             id: UUID(),
             title: "",
             content: "",
-            positionX: Double(frame.origin.x),
-            positionY: Double(frame.origin.y),
             width: Double(frame.size.width),
             height: Double(frame.size.height),
-            collapsed: false,
             color: color,
             labels: [],
             floatLevel: .floating,

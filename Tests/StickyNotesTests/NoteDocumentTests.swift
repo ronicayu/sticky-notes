@@ -172,22 +172,22 @@ final class NoteDocumentTests: XCTestCase {
         XCTAssertEqual(try onDisk(document).updatedAt, after, "flush rewrote an already-saved note")
     }
 
-    func testChangesToTheNotesPlaceOnTheDeskAreSavedToo() throws {
+    func testChangesToTheNotesSizeHintAreSavedToo() throws {
         let document = open()
-        document.adjust { $0.positionX = 321 }
+        document.adjust { $0.width = 321 }
 
         scheduler.advance(by: 1)
-        XCTAssertEqual(try onDisk(document).positionX, 321)
+        XCTAssertEqual(try onDisk(document).width, 321)
     }
 
     func testAdjustingWithoutSavingArmsNothingUntilItIsRequested() throws {
         let document = open()
-        document.adjust(save: false) { $0.positionX = 321 }
+        document.adjust(save: false) { $0.width = 321 }
         XCTAssertEqual(scheduler.pendingCount, 0)
 
         document.requestSave()
         scheduler.advance(by: 1)
-        XCTAssertEqual(try onDisk(document).positionX, 321)
+        XCTAssertEqual(try onDisk(document).width, 321)
     }
 
     // MARK: - A write that does not land
@@ -301,7 +301,7 @@ final class NoteDocumentTests: XCTestCase {
         let document = open(title: "", content: "")
         XCTAssertTrue(document.isAbandonedCapture)
 
-        document.adjust { $0.positionX = 5 }
+        document.adjust { $0.width = 5 }
         XCTAssertTrue(document.isAbandonedCapture, "moving a note counted as typing into it")
 
         document.setBody("x")

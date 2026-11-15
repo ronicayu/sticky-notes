@@ -26,8 +26,8 @@ final class DailyFile: NoteRepository {
         let now = clock.now()
         return Note(
             id: id, content: body,
-            positionX: 0, positionY: 0, width: 0, height: 0,
-            collapsed: false, color: .yellow, createdAt: now, updatedAt: updatedAt ?? now
+            width: 0, height: 0,
+            color: .yellow, createdAt: now, updatedAt: updatedAt ?? now
         )
     }
 

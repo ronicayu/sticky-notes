@@ -74,8 +74,8 @@ final class NoteDocument {
 
     /// Set for a note that is created blank by the person asking for a new one:
     /// it gets its file with the first edit, and none if it is left untouched.
-    /// Where it sits on the desk goes out with that edit. Writing it sooner would
-    /// make every misfired hotkey a create and a delete in a synced vault.
+    /// Writing it sooner would make every misfired hotkey a create and a delete
+    /// in a synced vault.
     var createsFileOnFirstEdit = false
 
     /// The person changed the note since the last write that landed.
@@ -201,9 +201,10 @@ final class NoteDocument {
     func setBody(_ text: String) { edit { $0.content = text } }
     func setTitle(_ text: String) { edit { $0.title = text } }
 
-    /// A change to how the note sits on the desk, or one that never marked a
-    /// note as touched. Arms a save unless `save` is false, for a change the
-    /// caller reports with `requestSave` once it has made all of them.
+    /// A change that never marked the note as touched, such as a label removed.
+    /// Arms a save unless `save` is false, for a change the caller reports with
+    /// `requestSave` once it has made all of them, or one that is not saved at
+    /// all, such as the size hint, which goes out with the next content save.
     func adjust(save: Bool = true, _ change: (inout Note) -> Void) {
         change(&buffer)
         if save { scheduleSave() }

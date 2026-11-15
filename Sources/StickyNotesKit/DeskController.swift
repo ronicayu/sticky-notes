@@ -7,6 +7,8 @@ import AppKit
 @MainActor final class DeskController: NSObject {
     private let store: NoteStore
     private let settings: Settings
+    /// Where every note window sits on this Mac. Never synced.
+    let layout: DeviceLayoutStore
     private let clock: AppClock
     private let undo: UndoCenter
     private let recovery: RecoveryFiles
@@ -24,11 +26,12 @@ import AppKit
 
     init(
         store: NoteStore, settings: Settings, clock: AppClock, undo: UndoCenter, recovery: RecoveryFiles,
-        scheduler: Scheduler = MainScheduler()
+        scheduler: Scheduler = MainScheduler(), layout: DeviceLayoutStore? = nil
     ) {
         self.scheduler = scheduler
         self.store = store
         self.settings = settings
+        self.layout = layout ?? DeviceLayoutStore(url: settings.layoutURL, scheduler: scheduler)
         self.clock = clock
         self.undo = undo
         self.recovery = recovery
@@ -99,7 +102,13 @@ import AppKit
             }
             return
         }
-        let controller = NoteWindowController(note: note, store: store, clock: clock, scheduler: scheduler) { [weak self] id in
+        let controller = NoteWindowController(
+            note: note, store: store, layout: layout,
+            placing: { [weak self] size in
+                self?.nextNoteFrame(size: size) ?? NoteWindowController.placeOnPointerScreen(size: size)
+            },
+            clock: clock, scheduler: scheduler
+        ) { [weak self] id in
             guard let self = self else { return }
             self.windowControllers.removeValue(forKey: id)
             // An emptied desk should start the cascade from the top again.
@@ -203,7 +212,9 @@ import AppKit
             undo.dismiss()
         }
 
-        var note = Note.makeNew(frame: nextNoteFrame(), color: settings.defaultNoteColor, now: clock.now())
+        let frame = nextNoteFrame()
+        var note = Note.makeNew(frame: frame, color: settings.defaultNoteColor, now: clock.now())
+        layout.set(NoteLayout(frame: frame), for: note.id)
         if let title = title { note.title = title }
         if let color = color { note.color = color }
         note.content = text
@@ -236,14 +247,14 @@ import AppKit
 
     /// Frame for the next new note: cascading from the last one created this
     /// session, on whichever screen the pointer is on.
-    private func nextNoteFrame() -> NSRect {
+    private func nextNoteFrame(size: CGSize = NotePlacement.defaultSize) -> NSRect {
         let screen = NotePlacement.screenUnderPointer(
             mouse: NSEvent.mouseLocation,
             screens: NSScreen.screens.map(\.visibleFrame),
             main: NSScreen.main?.visibleFrame
         ) ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
 
-        let frame = NotePlacement.next(previous: lastNewNoteFrame, screen: screen)
+        let frame = NotePlacement.next(previous: lastNewNoteFrame, screen: screen, size: size)
         lastNewNoteFrame = frame
         return frame
     }
@@ -357,6 +368,11 @@ import AppKit
     /// external file changes — Obsidian edits, files arriving via iCloud
     /// Drive, archives created on another Mac, etc.
     @objc func storeDidChange(_ notification: Notification) {
+        // A note brought back from the archive opens expanded, wherever this Mac
+        // last had it.
+        if case let .moved(id, from: .archive, to: .active) = NoteStore.change(in: notification) {
+            layout.update(id) { $0.collapsed = false }
+        }
         // A save by this store of a note that already has a window changes
         // nothing on disk the app does not know. All that can differ is
         // whether its labels now hide it.
@@ -610,6 +626,7 @@ import AppKit
     /// recovery file outside the storage root. Returns how many buffers are
     /// still nowhere after that.
     func flushForQuit() -> Int {
+        layout.flush()
         let unsaved = flushPendingSaves()
         let dailyLost = dailyNoteController.map { !$0.flushPendingSave() && !recovery.writeDaily($0.dailyDocument) } ?? false
         let unrecovered = unsaved.filter { !recovery.write($0.bufferedNote) }

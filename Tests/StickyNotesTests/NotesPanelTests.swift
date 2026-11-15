@@ -26,8 +26,7 @@ import XCTest
     ) -> Note {
         let note = Note(
             id: UUID(), title: title, content: content,
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: color, labels: labels,
+            width: 240, height: 200, color: color, labels: labels,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000 + updated),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_000 + updated)
         )
@@ -208,8 +207,7 @@ final class LabelVisibilityTests: XCTestCase {
     private func note(labels: [String]) -> Note {
         Note(
             id: UUID(), title: "", content: "",
-            positionX: 0, positionY: 0, width: 1, height: 1,
-            collapsed: false, color: .yellow, labels: labels,
+            width: 1, height: 1, color: .yellow, labels: labels,
             createdAt: Date(), updatedAt: Date()
         )
     }

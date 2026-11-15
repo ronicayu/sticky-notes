@@ -164,7 +164,7 @@ final class NoteLeavesActiveFolderTests: XCTestCase {
 
     func testClosingBecauseTheFileWentWithNothingTypedWritesNothing() throws {
         let document = open("first")
-        document.adjust { $0.positionX = 99 }
+        document.adjust { $0.width = 99 }
         store.archive(document.buffer)
         let before = try files(in: store.archiveURL).map { try Data(contentsOf: $0) }
 
@@ -353,7 +353,7 @@ final class NoteLeavesActiveFolderTests: XCTestCase {
         let document = newDocument()
         XCTAssertFalse(document.hasFile)
 
-        document.adjust { $0.positionX = 40 }
+        document.adjust { $0.width = 40 }
         document.requestSave()
         scheduler.advance(by: 10)
         XCTAssertTrue(document.flush(), "nothing is owed")
@@ -362,9 +362,9 @@ final class NoteLeavesActiveFolderTests: XCTestCase {
         XCTAssertEqual(scheduler.pendingCount, 0)
     }
 
-    func testTheFirstEditOfANewNoteWritesItWithWhereItSits() throws {
+    func testTheFirstEditOfANewNoteWritesItWithItsSizeHint() throws {
         let document = newDocument()
-        document.adjust { $0.positionX = 40 }
+        document.adjust { $0.width = 40 }
         scheduler.advance(by: 1)
         document.setBody("x")
         XCTAssertTrue(try files(in: store.activeURL).isEmpty, "written before the debounce")
@@ -373,13 +373,13 @@ final class NoteLeavesActiveFolderTests: XCTestCase {
 
         let written = try XCTUnwrap(store.loadNote(id: document.id))
         XCTAssertEqual(written.content, "x")
-        XCTAssertEqual(written.positionX, 40)
+        XCTAssertEqual(written.width, 40)
         XCTAssertTrue(document.hasFile)
     }
 
     func testAbandoningANewNoteTouchesNoFile() throws {
         let document = newDocument()
-        document.adjust { $0.positionX = 40 }
+        document.adjust { $0.width = 40 }
         XCTAssertTrue(document.isAbandonedCapture)
 
         guard case .closed = document.close(.discard) else { return XCTFail("refused") }

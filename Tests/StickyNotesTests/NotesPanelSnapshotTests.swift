@@ -29,8 +29,7 @@ import XCTest
         for sample in samples {
             store.save(Note(
                 id: UUID(), title: sample.0, content: sample.1,
-                positionX: 0, positionY: 0, width: 240, height: 200,
-                collapsed: false, color: sample.3, labels: sample.2,
+                width: 240, height: 200, color: sample.3, labels: sample.2,
                 createdAt: Date().addingTimeInterval(sample.4),
                 updatedAt: Date().addingTimeInterval(sample.4)
             ))

@@ -35,8 +35,7 @@ import XCTest
         for (index, sample) in samples.enumerated() {
             store.save(Note(
                 id: UUID(), title: sample.0, content: sample.1,
-                positionX: 0, positionY: 0, width: 240, height: 200,
-                collapsed: false, color: sample.3, labels: sample.2,
+                width: 240, height: 200, color: sample.3, labels: sample.2,
                 createdAt: Date(timeIntervalSince1970: 1_700_000_000),
                 updatedAt: Date().addingTimeInterval(Double(-index) * 3600)
             ))
@@ -274,8 +273,7 @@ import XCTest
         XCTAssertEqual(controller.resultCount, 5)
 
         store.save(Note(
-            id: UUID(), title: "Brand new", content: "", positionX: 0, positionY: 0,
-            width: 240, height: 200, collapsed: false, color: .yellow, labels: [],
+            id: UUID(), title: "Brand new", content: "", width: 240, height: 200, color: .yellow, labels: [],
             createdAt: Date(), updatedAt: Date()
         ))
         controller.prepare()

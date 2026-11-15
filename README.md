@@ -115,7 +115,7 @@ Hotkeys are registered through `KeyboardShortcuts` and persisted to `UserDefault
     └── {yyyy-MM-dd HHmmss}-{id6}.md   # deleted notes, purged after 30 days
 ```
 
-`{id6}` is the first six hex characters of the note's id; the full id is in the frontmatter. Each file holds the note's metadata (position, size, color, labels, collapsed flag, timestamps) in YAML frontmatter and its text as plain Markdown, so Obsidian can open the folder as a vault. Files are written atomically and per-note, and edits made outside the app are picked up live.
+`{id6}` is the first six hex characters of the note's id; the full id is in the frontmatter. Each file holds the note's metadata (size, color, labels, float level, timestamps) in YAML frontmatter and its text as plain Markdown, so Obsidian can open the folder as a vault. Files are written atomically and per-note, and edits made outside the app are picked up live. Where a note's window sits, and whether it is collapsed, is kept per Mac in `layout.json` next to the notes folder in `~/Library/Application Support`, never in the synced files, so moving a note rewrites nothing in your vault.
 
 Switching storage (this Mac, iCloud Drive, a vault, and back) copies everything: active and archived notes, the trash with each note's deletion date, and `attachments/`. Nothing in the folder you leave is changed. A note the new folder already has is merged with, not overwritten, and the more recent archive, restore or delete of it stands. An attachment whose name is taken by a different file is kept under a new name and the copied notes' links are changed to match. One message says what was moved.
 

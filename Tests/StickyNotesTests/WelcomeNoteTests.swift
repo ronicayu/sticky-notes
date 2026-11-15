@@ -30,8 +30,7 @@ final class WelcomeNoteTests: XCTestCase {
     private func makeNote() -> Note {
         Note(
             id: UUID(), title: "existing", content: "x",
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: [],
+            width: 240, height: 200, color: .yellow, labels: [],
             createdAt: Date(), updatedAt: Date()
         )
     }
@@ -115,7 +114,6 @@ final class WelcomeNoteTests: XCTestCase {
     func testTheWelcomeNoteOpensOnScreen() throws {
         let store = makeStore()
         let note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
-        XCTAssertFalse(note.collapsed, "it explains things; it should not start collapsed")
         XCTAssertGreaterThan(note.width, 0)
         XCTAssertGreaterThan(note.height, 0)
     }

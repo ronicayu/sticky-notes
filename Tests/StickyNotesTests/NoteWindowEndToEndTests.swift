@@ -14,6 +14,9 @@ import XCTest
     private var store: NoteStore!
     private var clock: ManualClock!
     private var scheduler: TestScheduler!
+    private var layoutURL: URL!
+    private var layout: DeviceLayoutStore!
+    private let layoutScheduler = TestScheduler()
     private var closed: [UUID] = []
     private var controllers: [NoteWindowController] = []
 
@@ -24,11 +27,15 @@ import XCTest
         clock = ManualClock()
         scheduler = TestScheduler(clock: clock)
         store = NoteStore(rootURL: root, clock: clock)
+        layoutURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NoteWindowE2ELayout-\(UUID().uuidString).json")
+        layout = DeviceLayoutStore(url: layoutURL, scheduler: layoutScheduler)
     }
 
     override func tearDown() async throws {
         controllers.forEach { $0.window?.close() }
         try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: layoutURL)
     }
 
     // MARK: - Harness
@@ -40,7 +47,7 @@ import XCTest
         note.content = content
         store.save(note)
         let controller = NoteWindowController(
-            note: note, store: store, clock: clock, scheduler: scheduler, onClosed: { [unowned self] in closed.append($0) }
+            note: note, store: store, layout: layout, clock: clock, scheduler: scheduler, onClosed: { [unowned self] in closed.append($0) }
         )
         controllers.append(controller)
         return controller
@@ -96,15 +103,33 @@ import XCTest
         XCTAssertEqual(try onDisk(controller).title, "A better title")
     }
 
-    func testMovingTheWindowSavesItsPlace() throws {
-        let controller = try openNote()
+    func testMovingTheWindowRecordsItsPlaceOnThisMacAndLeavesTheNoteFileAlone() throws {
+        let controller = try openNote(content: "text")
+        let url = try noteFile()
+        let bytes = try Data(contentsOf: url)
+        let modified = try modificationDate(of: url)
         let window = try XCTUnwrap(controller.window)
+
         window.setFrameOrigin(NSPoint(x: 123, y: 234))
         controller.windowDidMove(Notification(name: NSWindow.didMoveNotification, object: window))
+        scheduler.advance(by: 5)
+        layoutScheduler.advance(by: 5)
 
-        scheduler.advance(by: 0.6)
-        XCTAssertEqual(try onDisk(controller).positionX, Double(window.frame.origin.x))
-        XCTAssertEqual(try onDisk(controller).positionY, Double(window.frame.origin.y))
+        XCTAssertEqual(try Data(contentsOf: url), bytes, "a move rewrote the note file")
+        XCTAssertEqual(try modificationDate(of: url), modified, "a move touched the note file")
+        let placed = try XCTUnwrap(layout.layout(for: controller.noteId))
+        XCTAssertEqual(placed.x, Double(window.frame.origin.x))
+        XCTAssertEqual(placed.y, Double(window.frame.origin.y))
+        let persisted = try JSONDecoder().decode([String: NoteLayout].self, from: Data(contentsOf: layoutURL))
+        XCTAssertEqual(persisted[controller.noteId.uuidString], placed, "this Mac's layout file did not follow")
+    }
+
+    private func noteFile() throws -> URL {
+        try XCTUnwrap(FileManager.default.contentsOfDirectory(at: store.activeURL, includingPropertiesForKeys: nil).first)
+    }
+
+    private func modificationDate(of url: URL) throws -> Date {
+        try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date)
     }
 
     func testFlushingWritesTextTypedSinceTheLastPause() throws {

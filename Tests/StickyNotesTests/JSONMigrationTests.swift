@@ -27,8 +27,7 @@ final class JSONMigrationTests: XCTestCase {
     ) -> Note {
         Note(
             id: id, title: title, content: content,
-            positionX: 120, positionY: 240, width: 300, height: 220,
-            collapsed: false, color: .blue, labels: labels,
+            width: 300, height: 220, color: .blue, labels: labels,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedAt: Date(timeIntervalSince1970: 1_700_000_500)
         )
@@ -109,9 +108,7 @@ final class JSONMigrationTests: XCTestCase {
 
     func testEveryFieldSurvivesTheConversion() throws {
         var note = makeNote("first line\nsecond: line\n- [ ] task", title: "A \"quoted\": title", labels: ["home", "to-do"])
-        note.positionX = 123.456
-        note.positionY = -40
-        note.collapsed = true
+        note.legacyPlacement = LegacyPlacement(x: 123.456, y: -40, collapsed: true)
         note.floatLevel = .desktop
         note.color = .purple
         try writeLegacy(note, in: "notes")
@@ -124,10 +121,11 @@ final class JSONMigrationTests: XCTestCase {
         XCTAssertEqual(loaded.content, note.content)
         XCTAssertEqual(loaded.labels, note.labels)
         XCTAssertEqual(loaded.color, .purple)
-        XCTAssertTrue(loaded.collapsed)
         XCTAssertEqual(loaded.floatLevel, .desktop)
-        XCTAssertEqual(loaded.positionX, 123.456, accuracy: 0.01)
-        XCTAssertEqual(loaded.positionY, -40, accuracy: 0.01)
+        let placement = try XCTUnwrap(loaded.legacyPlacement, "the converted note lost where it sat")
+        XCTAssertEqual(placement.x, 123.456, accuracy: 0.01)
+        XCTAssertEqual(placement.y, -40, accuracy: 0.01)
+        XCTAssertTrue(placement.collapsed)
         XCTAssertEqual(loaded.width, 300, accuracy: 0.01)
         XCTAssertEqual(loaded.createdAt, note.createdAt)
         XCTAssertEqual(loaded.updatedAt, note.updatedAt)

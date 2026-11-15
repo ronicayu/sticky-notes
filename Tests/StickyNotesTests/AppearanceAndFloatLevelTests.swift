@@ -93,8 +93,7 @@ final class NoteFloatLevelTests: XCTestCase {
     private func note(floatLevel: NoteFloatLevel) -> Note {
         Note(
             id: UUID(), title: "", content: "x",
-            positionX: 0, positionY: 0, width: 240, height: 200,
-            collapsed: false, color: .yellow, labels: [],
+            width: 240, height: 200, color: .yellow, labels: [],
             floatLevel: floatLevel,
             createdAt: Date(), updatedAt: Date()
         )

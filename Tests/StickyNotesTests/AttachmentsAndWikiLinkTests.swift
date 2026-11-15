@@ -174,8 +174,7 @@ final class AttachmentsTests: XCTestCase {
     private func note(title: String = "", content: String = "") -> Note {
         Note(
             id: UUID(), title: title, content: content,
-            positionX: 0, positionY: 0, width: 1, height: 1,
-            collapsed: false, color: .yellow, labels: [],
+            width: 1, height: 1, color: .yellow, labels: [],
             createdAt: Date(), updatedAt: Date()
         )
     }

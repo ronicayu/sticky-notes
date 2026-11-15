@@ -438,8 +438,8 @@ final class NoteStore {
     func saveRecoveredCopy(of note: Note) -> Bool {
         var copy = Note(
             id: Self.recoveredCopyId(for: note.id), title: note.title, content: note.content,
-            positionX: note.positionX, positionY: note.positionY, width: note.width, height: note.height,
-            collapsed: note.collapsed, color: note.color, labels: note.labels, floatLevel: note.floatLevel,
+            width: note.width, height: note.height,
+            color: note.color, labels: note.labels, floatLevel: note.floatLevel,
             createdAt: note.createdAt, updatedAt: note.updatedAt
         )
         copy.preserved = note.preserved
@@ -528,12 +528,6 @@ final class NoteStore {
         let to = generateURL(for: note, in: activeURL)
         guard moveFile(from: from, to: to) else { return }
         pathIndex[note.id] = to
-
-        // Force-expand on restore so the content is immediately visible.
-        if var restored = readMain(to), restored.collapsed {
-            restored.collapsed = false
-            write(restored, to: to)
-        }
         notifyChange(.moved(note.id, from: .archive, to: .active))
     }
 
@@ -1581,8 +1575,10 @@ final class NoteStore {
         return false
     }
 
-    private func writeReporting(_ note: Note, to url: URL) -> Result<Fingerprint, Error> {
-        let data = Data(renderMarkdown(note).utf8)
+    private func writeReporting(
+        _ note: Note, to url: URL, carryingLegacyPlacement: Bool = false
+    ) -> Result<Fingerprint, Error> {
+        let data = Data(renderMarkdown(note, carryingLegacyPlacement: carryingLegacyPlacement).utf8)
         do {
             try data.write(to: url, options: .atomic)
         } catch {
@@ -1746,7 +1742,7 @@ final class NoteStore {
             if let existing {
                 result = writeIfUnchanged(merged, to: destination, expecting: .fingerprint(existing.snapshot.fingerprint))
             } else {
-                switch writeReporting(merged, to: destination) {
+                switch writeReporting(merged, to: destination, carryingLegacyPlacement: true) {
                 case let .success(fingerprint): result = .saved(fingerprint)
                 case let .failure(error): result = .failed(error)
                 }
@@ -1858,8 +1854,8 @@ final class NoteStore {
     }
 
     /// Whether `back`, read from the Markdown file written for `note`, is the
-    /// same note. Dates keep whole seconds and geometry two decimals on disk,
-    /// and labels come back normalised, so those are compared as stored.
+    /// same note. Dates keep whole seconds and the size hint two decimals on
+    /// disk, and labels come back normalised, so those are compared as stored.
     private static func readsBackAs(_ note: Note, _ back: Note) -> Bool {
         func seconds(_ date: Date) -> Int { Int(date.timeIntervalSince1970.rounded(.down)) }
         let labels = note.labels.map(NoteLabel.normalize).filter { !$0.isEmpty }
@@ -1867,13 +1863,10 @@ final class NoteStore {
             && back.title == note.title
             && back.content == note.content
             && back.color == note.color
-            && back.collapsed == note.collapsed
             && back.floatLevel == note.floatLevel
             && back.labels == labels
             && seconds(back.createdAt) == seconds(note.createdAt)
             && seconds(back.updatedAt) == seconds(note.updatedAt)
-            && abs(back.positionX - note.positionX) < 0.01
-            && abs(back.positionY - note.positionY) < 0.01
             && abs(back.width - note.width) < 0.01
             && abs(back.height - note.height) < 0.01
     }
@@ -1910,18 +1903,32 @@ final class NoteStore {
 
     // MARK: - Markdown serialization
 
-    private func renderMarkdown(_ note: Note) -> String {
+    /// The Markdown text of a note. The window's position and collapsed state
+    /// are this Mac's (`DeviceLayoutStore`) and are not in it; a file that still
+    /// has them loses them with the next write. `carryingLegacyPlacement` keeps
+    /// them, for a note converted from JSON that no layout has seen yet.
+    private func renderMarkdown(_ note: Note, carryingLegacyPlacement: Bool = false) -> String {
         let labelsField = "[" + note.labels.joined(separator: ", ") + "]"
-        let frontmatter: [(String, String)] = [
+        var frontmatter: [(String, String)] = [
             ("id", note.id.uuidString),
             ("title", note.title),
             ("color", note.color.rawValue),
-            ("labels", labelsField),
-            ("positionX", String(format: "%.2f", note.positionX)),
-            ("positionY", String(format: "%.2f", note.positionY)),
+            ("labels", labelsField)
+        ]
+        if carryingLegacyPlacement, let placement = note.legacyPlacement {
+            frontmatter += [
+                ("positionX", String(format: "%.2f", placement.x)),
+                ("positionY", String(format: "%.2f", placement.y))
+            ]
+        }
+        frontmatter += [
             ("width", String(format: "%.2f", note.width)),
-            ("height", String(format: "%.2f", note.height)),
-            ("collapsed", note.collapsed ? "true" : "false"),
+            ("height", String(format: "%.2f", note.height))
+        ]
+        if carryingLegacyPlacement, let placement = note.legacyPlacement {
+            frontmatter.append(("collapsed", placement.collapsed ? "true" : "false"))
+        }
+        frontmatter += [
             ("float", note.floatLevel.rawValue),
             ("created", unreadableDate("created", of: note) ?? iso8601.string(from: note.createdAt)),
             ("updated", unreadableDate("updated", of: note) ?? iso8601.string(from: note.updatedAt))
@@ -1947,6 +1954,9 @@ final class NoteStore {
 
     /// The keys the app reads and writes itself. Any other key in a note's
     /// frontmatter is carried through as it was; see `PreservedFrontmatter`.
+    /// `positionX`, `positionY` and `collapsed` are read only, to place a note
+    /// once. They are named here so they are not kept as lines of the file
+    /// that belong to someone else, and they are not written.
     private static let ownedFrontmatterKeys: Set<String> = [
         "id", "title", "color", "labels", "positionX", "positionY", "width", "height",
         "collapsed", "float", "created", "updated"
@@ -1958,11 +1968,13 @@ final class NoteStore {
         let title = doc.value(for: "title") ?? ""
         let color = doc.value(for: "color").flatMap(NoteColor.init(rawValue:)) ?? .yellow
         let labels = parseLabelsList(doc.value(for: "labels"))
-        let positionX = Double(doc.value(for: "positionX") ?? "") ?? 200
-        let positionY = Double(doc.value(for: "positionY") ?? "") ?? 200
+        let legacyPlacement = Double(doc.value(for: "positionX") ?? "").flatMap { x in
+            Double(doc.value(for: "positionY") ?? "").map { y in
+                LegacyPlacement(x: x, y: y, collapsed: (doc.value(for: "collapsed") ?? "false") == "true")
+            }
+        }
         let width = Double(doc.value(for: "width") ?? "") ?? 240
         let height = Double(doc.value(for: "height") ?? "") ?? 200
-        let collapsed = (doc.value(for: "collapsed") ?? "false") == "true"
         let floatLevel = doc.value(for: "float").flatMap(NoteFloatLevel.init(rawValue:)) ?? .floating
         let createdAt = doc.value(for: "created").flatMap(iso8601.date(from:)) ?? clock.now()
         let updatedAt = doc.value(for: "updated").flatMap(iso8601.date(from:)) ?? createdAt
@@ -1970,11 +1982,8 @@ final class NoteStore {
             id: id,
             title: title,
             content: doc.body,
-            positionX: positionX,
-            positionY: positionY,
             width: width,
             height: height,
-            collapsed: collapsed,
             color: color,
             labels: labels,
             floatLevel: floatLevel,
@@ -1984,6 +1993,7 @@ final class NoteStore {
         note.preserved = PreservedFrontmatter(
             layout: doc.layout, labelsAsBlock: doc.blockListKeys.contains("labels"), originals: doc.originals
         )
+        note.legacyPlacement = legacyPlacement
         return note
     }
 
