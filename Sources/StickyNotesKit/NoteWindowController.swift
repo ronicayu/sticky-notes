@@ -57,10 +57,14 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     private let bodyContainer: NSView
     private var bodyHeightZeroConstraint: NSLayoutConstraint!
 
-    private static let titleExpandedFont = NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize + 7, weight: .bold)
+    /// The title is seven points above the body, so it follows the text size.
+    static var titleExpandedFont: NSFont {
+        NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize + 7, weight: .bold)
+    }
     private static let titleCollapsedFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
 
     private var dragZoneHeightConstraint: NSLayoutConstraint!
+    private var titleHeightConstraint: NSLayoutConstraint!
 
     /// The Markdown editor this window hosts.
     let editor: MarkdownEditorController
@@ -95,8 +99,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
     /// Height of the chrome strip when expanded.
     static let chromeHeight: CGFloat = 22
-    /// Height of the title row sitting below the chrome when expanded.
-    static let titleRowHeight: CGFloat = 28
+    /// Height of the title row sitting below the chrome when expanded: 28 at the
+    /// default text size, taller when a large title would not fit in it.
+    static func titleRowHeight(for font: NSFont) -> CGFloat {
+        max(28, ceil(font.ascender - font.descender + font.leading) + 4)
+    }
     /// Window height when collapsed (matches the chrome strip exactly).
     static let collapsedHeight: CGFloat = 22
 
@@ -265,6 +272,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             : NoteWindowController.chromeHeight
         dragZoneHeightConstraint = dragZone.heightAnchor.constraint(equalToConstant: initialChromeHeight)
 
+        titleHeightConstraint = titleField.heightAnchor.constraint(
+            equalToConstant: NoteWindowController.titleRowHeight(for: NoteWindowController.titleExpandedFont)
+        )
+
         // 0-height constraint that we activate to collapse the body fully out
         // of the layout. Required priority so it wins over body internals.
         bodyHeightZeroConstraint = bodyContainer.heightAnchor.constraint(equalToConstant: 0)
@@ -314,7 +325,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             titleField.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor, constant: 14),
             titleField.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor, constant: -14),
             titleField.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
-            titleField.heightAnchor.constraint(equalToConstant: NoteWindowController.titleRowHeight),
+            titleHeightConstraint,
 
             // Editor.
             scrollView.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor, constant: 14),
@@ -671,6 +682,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
     /// Re-apply styling after the shared text size changes.
     func restyleForTextSize() {
+        let font = NoteWindowController.titleExpandedFont
+        titleField.font = font
+        titleField.currentEditor()?.font = font
+        titleHeightConstraint.constant = NoteWindowController.titleRowHeight(for: font)
         editor.applyTextSize()
     }
 
