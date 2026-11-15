@@ -102,6 +102,19 @@ import XCTest
         XCTAssertEqual(all(LabelChipView.self, in: controller).map(\.labelName), ["home", "work", "later"])
     }
 
+    func testTypingAfterALabelRemovalLeavesCommandZToTheText() throws {
+        let controller = try open(labels: ["home", "work"])
+        let chip = try XCTUnwrap(all(LabelChipView.self, in: controller).first { $0.labelName == "work" })
+        defer { undo.dismiss() }
+
+        chip.performClick(nil)
+        controller.textView.string = "typo"
+        controller.textView.didChangeText()
+        undo.undoLastAction(nil)
+
+        XCTAssertEqual(controller.labels, ["home"], "⌘Z put the label back instead of undoing the typing")
+    }
+
     func testTakingBackALabelRemovalTwiceDoesNotDuplicateTheLabel() throws {
         let controller = try open(labels: ["work"])
         var restore: (() -> Void)?
