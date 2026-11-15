@@ -105,6 +105,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         settings.localStorageRoot.appendingPathComponent("Recovered", isDirectory: true)
     }
 
+    /// Close the daily note window for good. Unsaved text goes to disk first, or
+    /// to a recovery file: the controller and its pending save go with it.
+    private func tearDownDailyNote() {
+        if let controller = dailyNoteController, !controller.flushPendingSave() {
+            _ = writeDailyRecoveryFile(for: controller.dailyDocument)
+        }
+        dailyNoteController?.window?.orderOut(nil)
+        dailyNoteController = nil
+    }
+
+    /// The daily note window, if one exists.
+    var dailyNote: DailyNoteWindowController? { dailyNoteController }
+
     private func makeDailyNoteController() -> DailyNoteWindowController {
         let controller = DailyNoteWindowController(settings: settings, store: noteStore, clock: clock)
         controller.dailyDocument.saveRecovery = { [weak self] body, day in
@@ -980,8 +993,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // we leave vault mode.
         let nowVault = settings.obsidianVaultPath != nil
         if previousVault != nil && !nowVault {
-            dailyNoteController?.window?.orderOut(nil)
-            dailyNoteController = nil
+            tearDownDailyNote()
         } else if nowVault {
             // Entering vault mode from a non-vault one leaves no controller to
             // notify, so a daily note the user had visible stayed missing
@@ -997,8 +1009,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     func applyDailyPattern(_ pattern: String?) {
         settings.dailyNotesPattern = pattern
         if pattern == nil {
-            dailyNoteController?.window?.orderOut(nil)
-            dailyNoteController = nil
+            tearDownDailyNote()
         } else {
             dailyNoteController?.patternDidChange()
         }

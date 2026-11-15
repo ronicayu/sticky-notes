@@ -198,6 +198,17 @@ final class NoteDocument {
         guard let external = pendingExternal else { return }
         pendingExternal = nil
 
+        // Nothing of the person's own to protect: take the outside note as it is.
+        // Merging would let the newer local stamp win, and an empty base is
+        // never a superset, so the outside text would come back appended under
+        // a "Conflicted copy" divider.
+        if Self.isBlank(buffer) {
+            var taken = external
+            taken.labels = buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
+            apply(taken)
+            return
+        }
+
         var local = buffer
         local.updatedAt = clock.now()
 

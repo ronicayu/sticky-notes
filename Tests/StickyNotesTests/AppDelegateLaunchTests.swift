@@ -167,4 +167,91 @@ final class AppDelegateLaunchTests: XCTestCase {
         XCTAssertEqual(saved.updatedAt.timeIntervalSince1970,
                        clock.now().timeIntervalSince1970, accuracy: 1)
     }
+
+    // MARK: - The daily note's unsaved text
+
+    /// A daily note window holding unsaved typing, and a daily folder that
+    /// refuses writes.
+    private func openDailyNoteWithUnsavedTypingAndFailingWrites(_ app: AppDelegate) throws -> URL {
+        let vault = root.appendingPathComponent("vault", isDirectory: true)
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        isolated.settings.obsidianVaultPath = vault.path
+        isolated.settings.dailyNotesPattern = "Daily/{YYYY}-{MM}-{DD}.md"
+        app.openTodaysDailyNote()
+        let daily = try XCTUnwrap(app.dailyNote)
+        daily.window?.orderOut(nil)
+        daily.textView.string = "daily text typed just before the disk failed"
+        daily.textDidChange(Notification(name: NSText.didChangeNotification, object: daily.textView))
+        let folder = vault.appendingPathComponent("Daily", isDirectory: true)
+        try setWritable(false, folder)
+        addTeardownBlock { try? self.setWritable(true, folder) }
+        return folder
+    }
+
+    private func dailyRecoveryFiles(_ app: AppDelegate) throws -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: app.recoveryFolder, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.lastPathComponent.hasPrefix("Daily ") }
+    }
+
+    func testQuittingWhileTheDailyNoteCannotBeSavedWritesItToARecoveryFile() throws {
+        let app = makeDelegate()
+        _ = try openDailyNoteWithUnsavedTypingAndFailingWrites(app)
+        var asked = false
+        app.unsavedNotesChoice = { _ in asked = true; return .keepTrying }
+
+        XCTAssertEqual(app.applicationShouldTerminate(NSApplication.shared), .terminateNow)
+
+        XCTAssertFalse(asked, "asked the person although the text was safely copied")
+        let recovered = try XCTUnwrap(dailyRecoveryFiles(app).first)
+        XCTAssertEqual(try String(contentsOf: recovered, encoding: .utf8), "daily text typed just before the disk failed")
+    }
+
+    /// The count in the prompt is the notes whose text is nowhere: an ordinary
+    /// note and the daily note, when the recovery folder fails for both.
+    func testQuittingWhenTheRecoveryCopyFailsCountsTheDailyNoteWithTheOthers() throws {
+        let note = seed("Draft")
+        let app = makeDelegate()
+        app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        let controller = try XCTUnwrap(app.noteWindowControllers[note.id])
+        controller.textView.string = "note text typed just before quitting"
+        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
+        try setWritable(false, store.activeURL)
+        addTeardownBlock { [store = store!] in try? self.setWritable(true, store.activeURL) }
+        _ = try openDailyNoteWithUnsavedTypingAndFailingWrites(app)
+        // A file where the recovery folder should be: nothing can be copied there.
+        try FileManager.default.createDirectory(
+            at: app.recoveryFolder.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data().write(to: app.recoveryFolder)
+        var counts: [Int] = []
+        app.unsavedNotesChoice = { counts.append($0); return .keepTrying }
+
+        XCTAssertEqual(app.applicationShouldTerminate(NSApplication.shared), .terminateCancel)
+
+        XCTAssertEqual(counts, [2])
+        app.unsavedNotesChoice = { _ in .quitAnyway }
+    }
+
+    /// Switching off the daily note ends its controller and its armed save with
+    /// it, so what could not be written is copied first.
+    func testClearingTheDailyPatternKeepsUnsavedTextInARecoveryFile() throws {
+        let app = makeDelegate()
+        _ = try openDailyNoteWithUnsavedTypingAndFailingWrites(app)
+
+        app.applyDailyPattern(nil)
+
+        XCTAssertNil(app.dailyNote)
+        let recovered = try XCTUnwrap(dailyRecoveryFiles(app).first)
+        XCTAssertEqual(try String(contentsOf: recovered, encoding: .utf8), "daily text typed just before the disk failed")
+    }
+
+    func testLeavingVaultModeKeepsUnsavedDailyTextInARecoveryFile() throws {
+        let app = makeDelegate()
+        _ = try openDailyNoteWithUnsavedTypingAndFailingWrites(app)
+
+        app.applyStorageMode(.local)
+
+        XCTAssertNil(app.dailyNote)
+        XCTAssertFalse(try dailyRecoveryFiles(app).isEmpty)
+    }
 }

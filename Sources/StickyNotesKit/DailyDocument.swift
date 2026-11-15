@@ -88,7 +88,10 @@ final class DailyDocument {
     private let scheduler: Scheduler
     private let file: DailyFile
     private let document: NoteDocument
-    private let calendar = Calendar.current
+    /// Read on every use, so a change of time zone while the app runs moves the
+    /// day with it.
+    private let calendarProvider: () -> Calendar
+    private var calendar: Calendar { calendarProvider() }
 
     /// Start of the day whose file this is.
     private(set) var day: Date
@@ -118,13 +121,19 @@ final class DailyDocument {
     /// when it is about to be replaced. Returns whether it was.
     var saveRecovery: (_ body: String, _ day: Date) -> Bool = { _, _ in false }
 
-    init(settings: Settings, clock: AppClock, scheduler: Scheduler = MainScheduler()) {
+    init(
+        settings: Settings,
+        clock: AppClock,
+        scheduler: Scheduler = MainScheduler(),
+        calendar: @escaping () -> Calendar = { .current }
+    ) {
         self.settings = settings
+        calendarProvider = calendar
         self.clock = clock
         self.scheduler = scheduler
         file = DailyFile(clock: clock)
         document = NoteDocument(note: file.note(body: ""), repository: file, scheduler: scheduler, clock: clock)
-        day = calendar.startOfDay(for: clock.now())
+        day = calendar().startOfDay(for: clock.now())
         document.didApplyExternal = { [weak self] _ in self?.onBodyReplaced() }
     }
 
@@ -188,6 +197,10 @@ final class DailyDocument {
         isUnavailable = unavailable
         document.reset(to: file.note(body: body))
         onBodyReplaced()
+    }
+
+    private static func isBlank(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func hasICloudPlaceholder(for url: URL) -> Bool {
@@ -262,7 +275,7 @@ final class DailyDocument {
             matching: DateComponents(hour: 0, minute: 0, second: 1),
             matchingPolicy: .strict
         ) else { return }
-        rolloverTask = scheduler.schedule(after: next.timeIntervalSince(now)) { [weak self] in
+        rolloverTask = scheduler.scheduleOnWallClock(after: next.timeIntervalSince(now)) { [weak self] in
             guard let self = self else { return }
             self.rolloverIfNeeded(now: self.clock.now())
             self.armMidnight()
@@ -308,10 +321,11 @@ final class DailyDocument {
     // MARK: - Settings changes
 
     /// The pattern or vault changed: save against the previous file, then
-    /// resolve the new one. Text that cannot be saved is offered for recovery
-    /// before the buffer is replaced.
+    /// resolve the new one. Text that cannot be saved is kept for recovery
+    /// before the buffer is replaced; if that fails too, the document stays on
+    /// the old file, dirty and retrying, rather than drop the text.
     func patternDidChange() {
-        if !flush() { _ = saveRecovery(body, day) }
+        if !flush(), !saveRecovery(body, day) { return }
         load(now: clock.now())
         onFileChanged()
     }
@@ -322,9 +336,15 @@ final class DailyDocument {
     /// does not race; a missing file stays uncreated.
     func templateDidChange() {
         guard let url = url, !isUnavailable,
-              body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              Self.isBlank(body), document.pendingExternal == nil,
               let templated = DailyNote.renderedTemplate(for: day, fileURL: url, settings: settings)
         else { return }
+        // The buffer can be behind the file by the watcher's delay. Text on disk
+        // is the note, not a blank to fill: take it in, and write no template.
+        if let onDisk = try? String(contentsOf: url, encoding: .utf8), !Self.isBlank(onDisk) {
+            storeDidChange()
+            return
+        }
         if FileManager.default.fileExists(atPath: url.path) {
             try? templated.write(to: url, atomically: true, encoding: .utf8)
         }

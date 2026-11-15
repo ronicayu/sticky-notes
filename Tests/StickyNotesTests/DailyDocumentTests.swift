@@ -318,6 +318,51 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertFalse(document.hasUnsavedEdits)
     }
 
+    func testChangingThePatternWhenTheTextCannotBeKeptStaysOnTheOldFile() throws {
+        let document = makeDocument()
+        document.createTodaysFileIfMissing()
+        document.setBody("cannot be written or recovered")
+        try lockDailyFolder()
+        let dailyFolder = try url().deletingLastPathComponent()
+        let oldURL = document.url
+        var fileChanges = 0
+        document.onFileChanged = { fileChanges += 1 }
+        document.saveRecovery = { _, _ in false }
+
+        settings.dailyNotesPattern = "Elsewhere/{YYYY}-{MM}-{DD}.md"
+        document.patternDidChange()
+
+        XCTAssertEqual(document.body, "cannot be written or recovered", "the buffer was replaced")
+        XCTAssertEqual(document.url, oldURL)
+        XCTAssertTrue(document.hasUnsavedEdits)
+        XCTAssertEqual(fileChanges, 0)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dailyFolder.path)
+        scheduler.advance(by: NoteDocument.retryDelay + 0.1)
+        XCTAssertEqual(try String(contentsOf: XCTUnwrap(oldURL), encoding: .utf8), "cannot be written or recovered")
+    }
+
+    /// While the write keeps failing, every midnight finds the document still
+    /// blocked; the timers must not pile up.
+    func testRepeatedMidnightsWhileBlockedDoNotArmMoreTimers() throws {
+        let document = makeDocument()
+        document.startRollover()
+        document.createTodaysFileIfMissing()
+        document.setBody("stuck")
+        try lockDailyFolder()
+
+        clock.advance(by: day)
+        document.wakeDidHappen()
+        let armed = scheduler.pendingCount
+        clock.advance(by: day)
+        document.wakeDidHappen()
+        document.wakeDidHappen()
+
+        XCTAssertEqual(scheduler.pendingCount, armed)
+        XCTAssertLessThanOrEqual(armed, 3)
+        XCTAssertEqual(document.body, "stuck")
+    }
+
     func testChangingThePatternWithTextThatCannotBeSavedOffersItForRecovery() throws {
         let document = makeDocument()
         document.createTodaysFileIfMissing()
@@ -419,6 +464,79 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertNil(document.pendingExternalBody)
     }
 
+    /// The note was created empty on purpose and the caret is in it; the other
+    /// Mac's text arrives. The old rule took the outside text as it was. A merge
+    /// would append it under a "Conflicted copy" divider.
+    func testAnOutsideEditIntoAnEmptyNoteIsTakenWithoutADivider() throws {
+        let document = makeDocument()
+        document.createTodaysFileIfMissing()
+        document.isEditing = { true }
+
+        try write("call mom")
+        document.storeDidChange()
+        XCTAssertNotNil(document.pendingExternalBody)
+        document.blur()
+
+        XCTAssertEqual(try text(), "call mom")
+        XCTAssertEqual(document.body, "call mom")
+    }
+
+    func testAnOutsideEditIntoAnEmptyUnsavedBufferIsTakenWithoutADivider() throws {
+        try write("one")
+        let document = makeDocument()
+        document.setBody("")
+
+        try write("from the other Mac")
+        document.storeDidChange()
+        document.flush()
+
+        XCTAssertEqual(try text(), "from the other Mac")
+    }
+
+    // MARK: - Template changes against a file that has text
+
+    func testChangingTheTemplateNeverWritesOverTextTheWatcherHasNotReported() throws {
+        try write("")
+        let document = makeDocument()
+        try write("written a moment ago on the other Mac")
+        try configureTemplate("## Today\n\n")
+
+        document.templateDidChange()
+
+        XCTAssertEqual(try text(), "written a moment ago on the other Mac")
+        XCTAssertEqual(document.body, "written a moment ago on the other Mac")
+    }
+
+    func testChangingTheTemplateKeepsAHeldBackOutsideEdit() throws {
+        try write("")
+        let document = makeDocument()
+        document.isEditing = { true }
+        try write("held back text")
+        document.storeDidChange()
+        try configureTemplate("## Today\n\n")
+
+        document.templateDidChange()
+
+        XCTAssertEqual(try text(), "held back text", "the template was written over the held-back edit")
+        XCTAssertEqual(document.pendingExternalBody, "held back text")
+    }
+
+    // MARK: - Time zones
+
+    func testAChangeOfTimeZoneWhileRunningMovesTheDay() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 14 * 3600)!
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler, calendar: { calendar })
+        document.load()
+        let before = document.day
+
+        calendar.timeZone = TimeZone(secondsFromGMT: -12 * 3600)!
+        guard case .rolled = document.rolloverIfNeeded(now: clock.now()) else { return XCTFail("the day did not move") }
+
+        XCTAssertEqual(document.day, calendar.startOfDay(for: clock.now()))
+        XCTAssertNotEqual(document.day, before)
+    }
+
     // MARK: - A note that cannot be read yet
 
     /// The "waiting for today's note" placeholder accepted typing, saving was
@@ -490,12 +608,12 @@ final class DailyDocumentTests: XCTestCase {
     func testRollingOntoAnUndownloadedDayDoesNotSeedItEither() throws {
         try configureTemplate("## Today\n\n")
         let document = makeDocument()
-        document.startRollover()
         let tomorrow = try url(daysFromNow: 1)
         try FileManager.default.createDirectory(at: tomorrow.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data().write(to: tomorrow.deletingLastPathComponent().appendingPathComponent(".\(tomorrow.lastPathComponent).icloud"))
 
-        scheduler.advance(by: day)
+        clock.advance(by: day)
+        document.wakeDidHappen()
 
         XCTAssertTrue(document.isUnavailable)
         XCTAssertFalse(try exists())

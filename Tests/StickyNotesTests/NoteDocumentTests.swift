@@ -49,21 +49,25 @@ final class NoteDocumentTests: XCTestCase {
 
     /// What Obsidian does: rewrite the file in place, behind the store's back,
     /// then the watcher reports it.
-    private func writeOutside(_ document: NoteDocument, title: String = "Note", body: String) throws {
+    private func writeOutside(
+        _ document: NoteDocument, title: String = "Note", body: String, updated: String = "2030-01-01T00:00:00Z"
+    ) throws {
         let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
             at: store.activeURL, includingPropertiesForKeys: nil
         ).first { $0.pathExtension == "md" })
-        try "---\nid: \(document.id.uuidString)\ntitle: \"\(title)\"\nupdated: 2030-01-01T00:00:00Z\n---\n\(body)"
+        try "---\nid: \(document.id.uuidString)\ntitle: \"\(title)\"\nupdated: \(updated)\n---\n\(body)"
             .write(to: file, atomically: true, encoding: .utf8)
         store.handleFileSystemEvent()
     }
 
     /// An outside write that the store and the document have not been told about.
-    private func writeOutsideWithoutTellingTheDocument(_ document: NoteDocument, title: String = "Note", body: String) throws {
+    private func writeOutsideWithoutTellingTheDocument(
+        _ document: NoteDocument, title: String = "Note", body: String, updated: String = "2030-01-01T00:00:00Z"
+    ) throws {
         let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
             at: store.activeURL, includingPropertiesForKeys: nil
         ).first { $0.pathExtension == "md" })
-        try "---\nid: \(document.id.uuidString)\ntitle: \"\(title)\"\nupdated: 2030-01-01T00:00:00Z\n---\n\(body)"
+        try "---\nid: \(document.id.uuidString)\ntitle: \"\(title)\"\nupdated: \(updated)\n---\n\(body)"
             .write(to: file, atomically: true, encoding: .utf8)
     }
 
@@ -561,6 +565,66 @@ final class NoteDocumentTests: XCTestCase {
         XCTAssertEqual(try onDisk(document).content, "synced in from the other Mac")
         XCTAssertEqual(document.buffer.content, "synced in from the other Mac")
         XCTAssertEqual(applied.count, 1)
+    }
+
+    /// The outside version is older than the clock, as an Obsidian edit is: its
+    /// frontmatter `updated` is not touched. A merge would let the blank local
+    /// note win and append the outside text under a "Conflicted copy" divider.
+    func testAnEmptyNoteWithOlderTextOnDiskIsKeptWithItsTextAndTitle() throws {
+        let document = open(title: "", content: "")
+        try writeOutsideWithoutTellingTheDocument(
+            document, title: "Renamed in Obsidian", body: "typed in Obsidian", updated: "2000-01-01T00:00:00Z"
+        )
+
+        guard case let .closed(archivedNote) = document.close(.archive) else { return XCTFail("refused") }
+
+        XCTAssertEqual(archivedNote?.content, "typed in Obsidian")
+        XCTAssertEqual(archivedNote?.title, "Renamed in Obsidian")
+        XCTAssertEqual(try archived(document).content, "typed in Obsidian")
+        XCTAssertEqual(try archived(document).title, "Renamed in Obsidian")
+    }
+
+    func testAnEmptyNoteWithAnOlderHeldBackEditKeepsItsTextAndTitle() throws {
+        let document = open(title: "", content: "text")
+        _ = store.loadActive()
+        document.setBody("")
+        try writeOutside(document, title: "Renamed in Obsidian", body: "written in Obsidian", updated: "2000-01-01T00:00:00Z")
+        document.storeDidChange()
+        XCTAssertNotNil(document.pendingExternal)
+
+        guard case let .closed(archivedNote) = document.close(.archive) else { return XCTFail("refused") }
+
+        XCTAssertEqual(archivedNote?.content, "written in Obsidian")
+        XCTAssertEqual(archivedNote?.title, "Renamed in Obsidian")
+    }
+
+    func testLosingFocusOnABlankNoteTakesAnOlderOutsideEditAsItIs() throws {
+        let document = open(title: "", content: "")
+        document.isEditing = { true }
+        _ = store.loadActive()
+        try writeOutside(document, title: "", body: "written in Obsidian", updated: "2000-01-01T00:00:00Z")
+        document.storeDidChange()
+        XCTAssertNotNil(document.pendingExternal)
+
+        document.blur()
+
+        XCTAssertEqual(try onDisk(document).content, "written in Obsidian")
+    }
+
+    /// Obsidian does not touch `updated`, so the outside note is usually older
+    /// than the local buffer; the merge must keep both sides all the same.
+    func testAnOutsideWriteOlderThanTheClockStillMergesBothSides() throws {
+        let document = open(content: "original")
+        _ = store.loadActive()
+        document.setBody("original plus mine")
+
+        try writeOutside(document, body: "original\nfrom Obsidian", updated: "2000-01-01T00:00:00Z")
+        document.storeDidChange()
+        document.flush()
+
+        let content = try onDisk(document).content
+        XCTAssertTrue(content.contains("original plus mine"), content)
+        XCTAssertTrue(content.contains("from Obsidian"), content)
     }
 
     func testABlankClosedDocumentsBlurWritesNothing() throws {
