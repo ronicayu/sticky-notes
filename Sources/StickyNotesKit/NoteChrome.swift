@@ -94,7 +94,7 @@ final class CenteredTitleLabel: NSView {
     }
 
     override func accessibilityLabel() -> String? {
-        onPress == nil ? spokenName : "\(spokenName), collapsed note, click to expand"
+        onPress == nil ? spokenName : "\(spokenName), collapsed note, press to expand"
     }
 
     override func accessibilityPerformPress() -> Bool {
@@ -121,9 +121,6 @@ extension NSColor {
 @MainActor
 protocol NoteDragZoneDelegate: AnyObject {
     func dragZoneDidDoubleClick()
-    /// A click that didn't turn into a drag. Only sent while collapsed, where
-    /// the 22pt bar is the whole note and double-clicking it isn't discoverable.
-    func dragZoneDidClick()
     /// Called once the drag loop finishes, so the note can settle against
     /// nearby edges. `suppressSnapping` is true when the user held Option.
     func dragZoneDidEndDrag(suppressSnapping: Bool)
@@ -144,34 +141,26 @@ final class NoteDragZone: NSView {
 
     /// The double-click, for a person who cannot make one.
     override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
-        let name = reportsSingleClick ? "Expand note" : "Collapse note"
+        let name = isCollapsed ? "Expand note" : "Collapse note"
         return [NSAccessibilityCustomAction(name: name) { [weak self] in
             self?.delegate?.dragZoneDidDoubleClick()
             return true
         }]
     }
 
-    /// When true, a click that doesn't move reports `dragZoneDidClick`.
-    /// Set while the note is collapsed.
-    var reportsSingleClick = false
+    /// Names the VoiceOver action. A single click never toggles: it is how a
+    /// collapsed note gets picked up and moved.
+    var isCollapsed = false {
+        didSet { toolTip = isCollapsed ? "Double-click to expand" : nil }
+    }
 
     override var isFlipped: Bool { true }
 
-    /// True once a click in this sequence already acted. A collapsed note
-    /// expands on the first click of a double-click, so letting the second
-    /// half toggle as well would collapse it straight back.
-    private var singleClickHandled = false
-
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 {
-            if singleClickHandled {
-                singleClickHandled = false
-                return
-            }
             delegate?.dragZoneDidDoubleClick()
             return
         }
-        singleClickHandled = false
         let origin = window?.frame.origin
         // performDrag runs its own event loop and returns when the mouse is
         // released — snapping here means the note settles once, on drop,
@@ -186,13 +175,7 @@ final class NoteDragZone: NSView {
             return abs(end.x - start.x) > 2 || abs(end.y - start.y) > 2
         } ?? false
 
-        if !moved {
-            if reportsSingleClick {
-                delegate?.dragZoneDidClick()
-                singleClickHandled = true
-            }
-            return
-        }
+        guard moved else { return }
         let optionHeld = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option)
         delegate?.dragZoneDidEndDrag(suppressSnapping: optionHeld)
     }

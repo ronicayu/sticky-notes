@@ -109,7 +109,7 @@ import XCTest
         controller.toggleCollapse()
 
         let bar = try XCTUnwrap(controller.window?.contentView.flatMap { find(CenteredTitleLabel.self, in: $0) })
-        XCTAssertEqual(bar.accessibilityLabel(), "Welcome, 1 of 4 tasks done, collapsed note, click to expand")
+        XCTAssertEqual(bar.accessibilityLabel(), "Welcome, 1 of 4 tasks done, collapsed note, press to expand")
     }
 
     func testCollapsingAnyOtherNoteCountsToo() throws {

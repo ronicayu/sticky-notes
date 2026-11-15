@@ -254,7 +254,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         titleLabel.placeholder = "Untitled"
         titleLabel.isHidden = !layout.collapsed
         titleLabel.spokenTitle = note.title.isEmpty ? "Untitled" : note.title
-        dragZone.reportsSingleClick = layout.collapsed
+        dragZone.isCollapsed = layout.collapsed
 
         bodyContainer = NSView()
         bodyContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -432,7 +432,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             self?.onTextKept?(place)
         }
 
-        titleLabel.onPress = { [weak self] in self?.dragZoneDidClick() }
+        titleLabel.onPress = { [weak self] in self?.expandIfCollapsed() }
         resizeGrip.onResize = { [weak self] dx, dy in self?.resizeByAccessibilityAction(dx: dx, dy: dy) }
         updateButtonAccessibility()
 
@@ -756,6 +756,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         performToggleCollapse()
     }
 
+    private func expandIfCollapsed() {
+        guard geometry.collapsed else { return }
+        performToggleCollapse()
+    }
+
     // MARK: - Color picker
 
     @objc private func showColorMenu() {
@@ -877,13 +882,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     }
 
     // MARK: - NSWindowDelegate
-
-    /// A collapsed note is an 18pt bar whose only affordance is knowing to
-    /// double-click it. One click expands.
-    func dragZoneDidClick() {
-        guard geometry.collapsed else { return }
-        dragZoneDidDoubleClick()
-    }
 
     func dragZoneDidEndDrag(suppressSnapping: Bool) {
         guard !suppressSnapping, let window = window else { return }
@@ -1056,7 +1054,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
             refreshCollapsedTitle()
             titleLabel.isHidden = false
-            dragZone.reportsSingleClick = true
+            dragZone.isCollapsed = true
             bodyContainer.isHidden = true
             bodyHeightZeroConstraint.isActive = true
 
@@ -1069,7 +1067,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
         } else {
             titleLabel.isHidden = true
-            dragZone.reportsSingleClick = false
+            dragZone.isCollapsed = false
             bodyContainer.isHidden = false
             bodyHeightZeroConstraint.isActive = false
 
