@@ -94,7 +94,12 @@ enum MarkdownStyler {
         let source = storage.string
         let document = Document(parsing: source)
         let table = LineOffsetTable(source)
-        var visitor = StylingVisitor(storage: storage, source: source as NSString, table: table)
+        var visitor = StylingVisitor(
+            storage: storage, source: source as NSString, table: table,
+            baseFontSize: baseFontSize, baseFont: baseFont(),
+            markerColor: markerColor, bodyColor: bodyTextColor,
+            linkColor: linkColor, codeColor: codeColor
+        )
         visitor.visit(document)
 
         // Checkbox lines: tag the "- [ ] " / "- [x] " prefix so the editor can
@@ -333,13 +338,19 @@ private struct LineOffsetTable {
 /// from the source line because their AST `range` includes child paragraphs
 /// that we don't want to repaint. Inline nodes (Strong, Emphasis, Strikethrough,
 /// InlineCode) get their full marker-and-content range from the AST.
-// `@preconcurrency`: `MarkupWalker` is not main-actor aware, but styling only
-// ever runs on the main thread.
-@MainActor
-private struct StylingVisitor: @preconcurrency MarkupWalker {
+///
+/// Holds no main-actor state: the sizes and colours it needs are read by the
+/// caller and passed in, so the visitor conforms to `MarkupWalker` as it is.
+private struct StylingVisitor: MarkupWalker {
     let storage: NSTextStorage
     let source: NSString
     let table: LineOffsetTable
+    let baseFontSize: CGFloat
+    let baseFont: NSFont
+    let markerColor: NSColor
+    let bodyColor: NSColor
+    let linkColor: NSColor
+    let codeColor: NSColor
 
     // MARK: Block
 
@@ -360,11 +371,11 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
         let fontSize: CGFloat
         let weight: NSFont.Weight
         if line.hasPrefix("# ") {
-            markerLen = 2; fontSize = MarkdownStyler.baseFontSize + 7; weight = .bold
+            markerLen = 2; fontSize = baseFontSize + 7; weight = .bold
         } else if line.hasPrefix("## ") {
-            markerLen = 3; fontSize = MarkdownStyler.baseFontSize + 4; weight = .semibold
+            markerLen = 3; fontSize = baseFontSize + 4; weight = .semibold
         } else if line.hasPrefix("### ") {
-            markerLen = 4; fontSize = MarkdownStyler.baseFontSize + 1; weight = .semibold
+            markerLen = 4; fontSize = baseFontSize + 1; weight = .semibold
         } else {
             descendInto(heading)
             return
@@ -372,8 +383,8 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
 
         let markerRange = NSRange(location: lineRange.location, length: min(markerLen, lineRange.length))
         storage.addAttributes([
-            .foregroundColor: MarkdownStyler.markerColor,
-            .font: MarkdownStyler.baseFont(),
+            .foregroundColor: markerColor,
+            .font: baseFont,
             .mdMarkerScope: NSValue(range: lineRange)
         ], range: markerRange)
 
@@ -430,7 +441,7 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
 
     private func applyListMarker(lineRange: NSRange, markerStart: Int, markerLength: Int, headIndent: CGFloat) {
         let markerRange = NSRange(location: markerStart, length: markerLength)
-        storage.addAttribute(.foregroundColor, value: MarkdownStyler.markerColor, range: markerRange)
+        storage.addAttribute(.foregroundColor, value: markerColor, range: markerRange)
 
         let para = NSMutableParagraphStyle()
         para.headIndent = headIndent
@@ -466,7 +477,7 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
     mutating func visitStrikethrough(_ strike: Strikethrough) {
         applyInlineMarker(node: strike, markerLen: 2, innerAttrs: [
             .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-            .strikethroughColor: MarkdownStyler.bodyTextColor
+            .strikethroughColor: bodyColor
         ])
         descendInto(strike)
     }
@@ -504,7 +515,7 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
         let inner = NSRange(location: nsr.location + leadLength, length: trailStart - leadLength)
         if inner.length > 0 {
             var attrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: MarkdownStyler.linkColor,
+                .foregroundColor: linkColor,
                 .underlineStyle: NSUnderlineStyle.single.rawValue
             ]
             if let destination = link.destination, let url = URL(string: destination) {
@@ -517,7 +528,7 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
 
     private func markMarker(_ range: NSRange, scope: NSValue) {
         storage.addAttributes([
-            .foregroundColor: MarkdownStyler.markerColor,
+            .foregroundColor: markerColor,
             .mdMarkerScope: scope
         ], range: range)
     }
@@ -533,8 +544,8 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
             nsr,
             markerLen: backticks,
             innerAttrs: [
-                .font: NSFont.monospacedSystemFont(ofSize: MarkdownStyler.baseFontSize - 1, weight: .regular),
-                .foregroundColor: MarkdownStyler.codeColor
+                .font: NSFont.monospacedSystemFont(ofSize: baseFontSize - 1, weight: .regular),
+                .foregroundColor: codeColor
             ]
         )
     }
@@ -560,11 +571,11 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
         let lead  = NSRange(location: nsr.location, length: markerLen)
         let trail = NSRange(location: nsr.location + nsr.length - markerLen, length: markerLen)
         storage.addAttributes([
-            .foregroundColor: MarkdownStyler.markerColor,
+            .foregroundColor: markerColor,
             .mdMarkerScope: scope
         ], range: lead)
         storage.addAttributes([
-            .foregroundColor: MarkdownStyler.markerColor,
+            .foregroundColor: markerColor,
             .mdMarkerScope: scope
         ], range: trail)
 
@@ -585,7 +596,7 @@ private struct StylingVisitor: @preconcurrency MarkupWalker {
     /// outer trait and render bold-italic as italic.
     private func addFontTraits(_ traits: NSFontDescriptor.SymbolicTraits, in range: NSRange) {
         storage.enumerateAttribute(.font, in: range, options: []) { value, subrange, _ in
-            let current = (value as? NSFont) ?? MarkdownStyler.baseFont()
+            let current = (value as? NSFont) ?? baseFont
             var merged = current.fontDescriptor.symbolicTraits
             merged.formUnion(traits)
             let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
