@@ -21,8 +21,6 @@ import XCTest
         try? FileManager.default.removeItem(at: root)
     }
 
-    private let bothFormats: [StorageFormat] = [.json, .markdown]
-
     private func makeNote(_ content: String = "hello") -> Note {
         var note = Note.makeNew(frame: NSRect(x: 0, y: 0, width: 240, height: 200))
         note.content = content
@@ -30,9 +28,9 @@ import XCTest
     }
 
     /// Another process (Obsidian, the other Mac) rewriting the file: a second
-    /// store on the same folder, which this store's cache knows nothing about.
-    private func outsideWrite(_ note: Note, format: StorageFormat) {
-        NoteStore(rootURL: root, format: format).save(note)
+    /// store on the same root, which this store's cache knows nothing about.
+    private func outsideWrite(_ note: Note) {
+        NoteStore(rootURL: root).save(note)
     }
 
     private func lockActiveFolder(_ store: NoteStore) throws {
@@ -57,166 +55,148 @@ import XCTest
     // MARK: - SaveResult
 
     func testASaveReturnsTheFingerprintOfTheFileItWrote() throws {
-        for format in bothFormats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            let note = makeNote()
+        let store = NoteStore(rootURL: root)
+        let note = makeNote()
 
-            guard case let .saved(fingerprint) = store.save(note, expecting: nil) else {
-                return XCTFail("\(format): creating a note did not report .saved")
-            }
-            let snapshot = try XCTUnwrap(store.snapshot(id: note.id), "\(format)")
-            XCTAssertEqual(snapshot.fingerprint, fingerprint, "\(format)")
-            XCTAssertEqual(snapshot.note.content, "hello", "\(format)")
+        guard case let .saved(fingerprint) = store.save(note, expecting: nil) else {
+            return XCTFail("creating a note did not report .saved")
         }
+        let snapshot = try XCTUnwrap(store.snapshot(id: note.id))
+        XCTAssertEqual(snapshot.fingerprint, fingerprint)
+        XCTAssertEqual(snapshot.note.content, "hello")
     }
 
     func testSavingAgainWithTheFingerprintItReturnedSucceeds() throws {
-        for format in bothFormats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            var note = makeNote("one")
-            guard case let .saved(first) = store.save(note, expecting: nil) else { return XCTFail("\(format)") }
+        let store = NoteStore(rootURL: root)
+        var note = makeNote("one")
+        guard case let .saved(first) = store.save(note, expecting: nil) else { return XCTFail() }
 
-            note.content = "two"
-            guard case let .saved(second) = store.save(note, expecting: first) else {
-                return XCTFail("\(format): a save expecting the file it wrote last was refused")
-            }
-            XCTAssertNotEqual(first, second, "\(format)")
-            XCTAssertEqual(store.snapshot(id: note.id)?.note.content, "two", "\(format)")
+        note.content = "two"
+        guard case let .saved(second) = store.save(note, expecting: first) else {
+            return XCTFail("a save expecting the file it wrote last was refused")
         }
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(store.snapshot(id: note.id)?.note.content, "two")
     }
 
     func testAStaleFingerprintAfterAnOutsideWriteIsAConflictAndWritesNothing() throws {
-        for format in bothFormats {
-            let folder = root.appendingPathComponent("\(format)")
-            let store = NoteStore(rootURL: folder, format: format)
-            var note = makeNote("mine")
-            guard case let .saved(seen) = store.save(note, expecting: nil) else { return XCTFail("\(format)") }
+        let store = NoteStore(rootURL: root)
+        var note = makeNote("mine")
+        guard case let .saved(seen) = store.save(note, expecting: nil) else { return XCTFail() }
 
-            var outside = note
-            outside.content = "mine\nand what Obsidian added"
-            NoteStore(rootURL: folder, format: format).save(outside)
-            let before = try XCTUnwrap(store.snapshot(id: note.id))
+        var outside = note
+        outside.content = "mine\nand what Obsidian added"
+        NoteStore(rootURL: root).save(outside)
+        let before = try XCTUnwrap(store.snapshot(id: note.id))
 
-            note.content = "mine, edited here"
-            guard case let .conflict(onDisk, fingerprint) = store.save(note, expecting: seen) else {
-                return XCTFail("\(format): a save over a file it had not seen was not refused")
-            }
-
-            XCTAssertEqual(onDisk.content, "mine\nand what Obsidian added", "\(format)")
-            XCTAssertEqual(fingerprint, before.fingerprint, "\(format)")
-            let after = try XCTUnwrap(store.snapshot(id: note.id))
-            XCTAssertEqual(after.fingerprint, before.fingerprint, "\(format): the refused save changed the file")
-            XCTAssertEqual(after.note.content, "mine\nand what Obsidian added", "\(format)")
+        note.content = "mine, edited here"
+        guard case let .conflict(onDisk, fingerprint) = store.save(note, expecting: seen) else {
+            return XCTFail("a save over a file it had not seen was not refused")
         }
+
+        XCTAssertEqual(onDisk.content, "mine\nand what Obsidian added")
+        XCTAssertEqual(fingerprint, before.fingerprint)
+        let after = try XCTUnwrap(store.snapshot(id: note.id))
+        XCTAssertEqual(after.fingerprint, before.fingerprint, "the refused save changed the file")
+        XCTAssertEqual(after.note.content, "mine\nand what Obsidian added")
     }
 
     func testRetryingWithTheConflictsFingerprintSaves() throws {
-        for format in bothFormats {
-            let folder = root.appendingPathComponent("\(format)")
-            let store = NoteStore(rootURL: folder, format: format)
-            var note = makeNote("mine")
-            guard case let .saved(seen) = store.save(note, expecting: nil) else { return XCTFail("\(format)") }
-            var outside = note
-            outside.content = "theirs"
-            NoteStore(rootURL: folder, format: format).save(outside)
+        let store = NoteStore(rootURL: root)
+        var note = makeNote("mine")
+        guard case let .saved(seen) = store.save(note, expecting: nil) else { return XCTFail() }
+        var outside = note
+        outside.content = "theirs"
+        NoteStore(rootURL: root).save(outside)
 
-            guard case let .conflict(onDisk, fingerprint) = store.save(note, expecting: seen) else {
-                return XCTFail("\(format)")
-            }
-            note.content = "\(onDisk.content)\nmine"
-
-            guard case .saved = store.save(note, expecting: fingerprint) else {
-                return XCTFail("\(format): the retry was refused")
-            }
-            XCTAssertEqual(store.snapshot(id: note.id)?.note.content, "theirs\nmine", "\(format)")
+        guard case let .conflict(onDisk, fingerprint) = store.save(note, expecting: seen) else {
+            return XCTFail()
         }
+        note.content = "\(onDisk.content)\nmine"
+
+        guard case .saved = store.save(note, expecting: fingerprint) else {
+            return XCTFail("the retry was refused")
+        }
+        XCTAssertEqual(store.snapshot(id: note.id)?.note.content, "theirs\nmine")
     }
 
     func testExpectingNoFileCreatesAndConflictsWhenOneExists() throws {
-        for format in bothFormats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            var note = makeNote("first")
-            guard case .saved = store.save(note, expecting: nil) else {
-                return XCTFail("\(format): creating a note was refused")
-            }
-
-            note.content = "second"
-            guard case let .conflict(onDisk, _) = store.save(note, expecting: nil) else {
-                return XCTFail("\(format): a create over an existing file was not refused")
-            }
-            XCTAssertEqual(onDisk.content, "first", "\(format)")
-            XCTAssertEqual(store.snapshot(id: note.id)?.note.content, "first", "\(format)")
+        let store = NoteStore(rootURL: root)
+        var note = makeNote("first")
+        guard case .saved = store.save(note, expecting: nil) else {
+            return XCTFail("creating a note was refused")
         }
+
+        note.content = "second"
+        guard case let .conflict(onDisk, _) = store.save(note, expecting: nil) else {
+            return XCTFail("a create over an existing file was not refused")
+        }
+        XCTAssertEqual(onDisk.content, "first")
+        XCTAssertEqual(store.snapshot(id: note.id)?.note.content, "first")
     }
 
     func testSavingAfterTheFileWasDeletedOrArchivedIsGoneAndWritesNothing() throws {
-        for format in bothFormats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            var deleted = makeNote("deleted")
-            var archived = makeNote("archived")
-            guard case let .saved(deletedSeen) = store.save(deleted, expecting: nil),
-                  case let .saved(archivedSeen) = store.save(archived, expecting: nil) else {
-                return XCTFail("\(format)")
-            }
-            store.discardActive(deleted)
-            store.archive(archived)
-
-            deleted.content = "typed after"
-            archived.content = "typed after"
-            for (note, seen, name) in [(deleted, deletedSeen, "deleted"), (archived, archivedSeen, "archived")] {
-                guard case .gone = store.save(note, expecting: seen) else {
-                    return XCTFail("\(format): \(name) note was not reported gone")
-                }
-            }
-            XCTAssertTrue(store.loadActive().isEmpty, "\(format): a gone note was written back")
+        let store = NoteStore(rootURL: root)
+        var deleted = makeNote("deleted")
+        var archived = makeNote("archived")
+        guard case let .saved(deletedSeen) = store.save(deleted, expecting: nil),
+              case let .saved(archivedSeen) = store.save(archived, expecting: nil) else {
+            return XCTFail()
         }
+        store.discardActive(deleted)
+        store.archive(archived)
+
+        deleted.content = "typed after"
+        archived.content = "typed after"
+        for (note, seen, name) in [(deleted, deletedSeen, "deleted"), (archived, archivedSeen, "archived")] {
+            guard case .gone = store.save(note, expecting: seen) else {
+                return XCTFail("\(name) note was not reported gone")
+            }
+        }
+        XCTAssertTrue(store.loadActive().isEmpty, "a gone note was written back")
     }
 
     func testAFileThatCannotBeReadIsNotOverwritten() throws {
-        for format in bothFormats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            var note = makeNote("precious")
-            guard case let .saved(seen) = store.save(note, expecting: nil) else { return XCTFail("\(format)") }
-            let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
-                at: store.activeURL, includingPropertiesForKeys: nil
-            ).first)
-            let garbage = Data([0xFF, 0xFE, 0x00, 0x01])
-            try garbage.write(to: file)
+        let store = NoteStore(rootURL: root)
+        var note = makeNote("precious")
+        guard case let .saved(seen) = store.save(note, expecting: nil) else { return XCTFail() }
+        let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: store.activeURL, includingPropertiesForKeys: nil
+        ).first)
+        let garbage = Data([0xFF, 0xFE, 0x00, 0x01])
+        try garbage.write(to: file)
 
-            note.content = "replacement"
-            guard case .failed = store.save(note, expecting: seen) else {
-                return XCTFail("\(format): an unreadable file was not reported as failed")
-            }
-            XCTAssertEqual(try Data(contentsOf: file), garbage, "\(format): the unreadable file was overwritten")
+        note.content = "replacement"
+        guard case .failed = store.save(note, expecting: seen) else {
+            return XCTFail("an unreadable file was not reported as failed")
         }
+        XCTAssertEqual(try Data(contentsOf: file), garbage, "the unreadable file was overwritten")
     }
 
     func testAWriteThatCannotLandIsFailedBothBlindAndChecked() throws {
-        for format in bothFormats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            var note = makeNote("one")
-            guard case let .saved(seen) = store.save(note, expecting: nil) else { return XCTFail("\(format)") }
-            try lockActiveFolder(store)
+        let store = NoteStore(rootURL: root)
+        var note = makeNote("one")
+        guard case let .saved(seen) = store.save(note, expecting: nil) else { return XCTFail() }
+        try lockActiveFolder(store)
 
-            note.content = "two"
-            guard case .failed = store.save(note) else { return XCTFail("\(format): blind save did not fail") }
-            guard case .failed = store.save(note, expecting: seen) else {
-                return XCTFail("\(format): checked save did not fail")
-            }
-            XCTAssertNotNil(store.lastFailure, "\(format)")
+        note.content = "two"
+        guard case .failed = store.save(note) else { return XCTFail("blind save did not fail") }
+        guard case .failed = store.save(note, expecting: seen) else {
+            return XCTFail("checked save did not fail")
+        }
+        XCTAssertNotNil(store.lastFailure)
 
-            try unlockActiveFolder(store)
-            XCTAssertEqual(store.snapshot(id: note.id)?.note.content, "one", "\(format)")
-            guard case .saved = store.save(note, expecting: seen) else {
-                return XCTFail("\(format): the file changed although both saves failed")
-            }
+        try unlockActiveFolder(store)
+        XCTAssertEqual(store.snapshot(id: note.id)?.note.content, "one")
+        guard case .saved = store.save(note, expecting: seen) else {
+            return XCTFail("the file changed although both saves failed")
         }
     }
 
     // MARK: - Change payload
 
     func testEachStoreOperationPostsItsOwnChange() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         let id = note.id
 
@@ -234,13 +214,13 @@ import XCTest
     }
 
     func testAFileSystemEventPostsResetAndANotificationWithoutAChangeReadsAsReset() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         XCTAssertEqual(changes(from: store) { store.handleFileSystemEvent() }, [.reset])
         XCTAssertEqual(NoteStore.change(in: Notification(name: NoteStore.didChange)), .reset)
     }
 
     func testASweepMergeNamesTheNotesItRewrote() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let note = makeNote("current text")
         store.save(note)
         let version = root.appendingPathComponent("version.md")
@@ -255,7 +235,7 @@ import XCTest
     // MARK: - Disk reads
 
     func testSavingAnotherNoteCostsAnOpenWindowNoDiskRead() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let shown = makeNote("on screen")
         store.save(shown)
         let controller = NoteWindowController(note: shown, store: store, onClosed: { _ in })
@@ -272,7 +252,7 @@ import XCTest
     /// Covers the synchronous part only: the watcher's echo of the save is a
     /// `.reset`, which drops the cache and makes every window read again.
     func testTheSynchronousPartOfAWindowsSaveReadsNoFiles() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let shown = makeNote("on screen")
         store.save(shown)
         let controller = NoteWindowController(note: shown, store: store, onClosed: { _ in })
@@ -294,7 +274,7 @@ import XCTest
     /// index, so that is the file a save writes and the entry `loadNote` returns.
     func testASaveReplacesTheSameCacheEntryLoadNoteAnswersWith() throws {
         let note = makeNote("first")
-        NoteStore(rootURL: root, format: .markdown).save(note)
+        NoteStore(rootURL: root).save(note)
         let active = root.appendingPathComponent("notes")
         let original = try XCTUnwrap(FileManager.default.contentsOfDirectory(
             at: active, includingPropertiesForKeys: nil
@@ -303,7 +283,7 @@ import XCTest
         try String(contentsOf: original, encoding: .utf8)
             .replacingOccurrences(of: "first", with: "stale copy")
             .write(to: copy, atomically: true, encoding: .utf8)
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         XCTAssertEqual(store.loadActive().count, 2)
 
         var edited = note
@@ -323,7 +303,7 @@ import XCTest
     }
 
     func testAMergeThatCannotBeWrittenLeavesTheConflictVersionsInPlace() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let note = makeNote("current text")
         store.save(note)
         let other = try aConflictVersion(of: note, content: "only the other Mac has this")

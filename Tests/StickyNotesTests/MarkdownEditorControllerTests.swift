@@ -14,7 +14,7 @@ import XCTest
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MarkdownEditor-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        store = NoteStore(rootURL: root, format: .markdown)
+        store = NoteStore(rootURL: root)
         clock = ManualClock()
     }
 

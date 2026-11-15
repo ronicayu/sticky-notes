@@ -40,7 +40,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testPanelListsEveryActiveNoteByDefault() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "One")
         seed(store, title: "Two")
         seed(store, title: "Three")
@@ -50,7 +50,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSearchNarrowsTheList() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Groceries")
         seed(store, title: "Standup")
         seed(store, content: "buy groceries on the way home")
@@ -64,7 +64,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSearchMatchesLabels() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Tagged", labels: ["urgent"])
         seed(store, title: "Untagged")
 
@@ -74,7 +74,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testClearingSearchRestoresTheFullList() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "One")
         seed(store, title: "Two")
 
@@ -86,7 +86,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testLabelFilterNarrowsToTaggedNotes() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Work note", labels: ["work"])
         seed(store, title: "Home note", labels: ["home"])
         seed(store, title: "Untagged")
@@ -100,7 +100,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testLabelFilterAndSearchCombine() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Work plan", labels: ["work"])
         seed(store, title: "Work log", labels: ["work"])
         seed(store, title: "Home plan", labels: ["home"])
@@ -112,7 +112,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testAFilterOnADeletedLabelFallsBackToAllNotes() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let tagged = seed(store, title: "Work", labels: ["work"])
         seed(store, title: "Other")
 
@@ -128,7 +128,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSortByTitleIsAlphabetical() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Charlie", updated: 300)
         seed(store, title: "alpha", updated: 200)
         seed(store, title: "Bravo", updated: 100)
@@ -140,7 +140,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSortByLastEditedIsNewestFirst() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "Oldest", updated: 0)
         seed(store, title: "Newest", updated: 300)
         seed(store, title: "Middle", updated: 100)
@@ -151,7 +151,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testSearchResultsKeepRelevanceOrderRegardlessOfSort() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "zzz plan", updated: 0)           // title hit
         seed(store, content: "a plan mentioned here", updated: 900)  // body hit, newer
 
@@ -163,7 +163,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testArchivedTabListsArchivedNotesOnly() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let archived = seed(store, title: "Gone")
         seed(store, title: "Here")
         store.archive(archived)
@@ -176,7 +176,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testPanelRefreshesWhenTheStoreChanges() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         seed(store, title: "First")
 
         let panel = makePanel(store)
@@ -188,7 +188,7 @@ final class NotesPanelTests: XCTestCase {
     }
 
     func testEmptyStoreShowsNoRows() {
-        let panel = makePanel(NoteStore(rootURL: root, format: .json))
+        let panel = makePanel(NoteStore(rootURL: root))
         XCTAssertEqual(panel.rowCount, 0)
     }
 }

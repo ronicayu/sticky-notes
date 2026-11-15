@@ -387,40 +387,34 @@ final class TrashTests: XCTestCase {
         )
     }
 
-    private let formats: [StorageFormat] = [.json, .markdown]
-
     func testDeletingForeverMovesTheNoteToTheTrash() throws {
-        for format in formats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            let note = makeNote("recoverable")
-            store.save(note)
-            store.archive(note)
-            store.deleteForever(note)
+        let store = NoteStore(rootURL: root)
+        let note = makeNote("recoverable")
+        store.save(note)
+        store.archive(note)
+        store.deleteForever(note)
 
-            XCTAssertTrue(store.loadArchived().isEmpty, "\(format)")
-            XCTAssertEqual(store.loadTrashed().map(\.content), ["recoverable"],
-                           "\(format): delete should be recoverable")
-        }
+        XCTAssertTrue(store.loadArchived().isEmpty)
+        XCTAssertEqual(store.loadTrashed().map(\.content), ["recoverable"],
+                       "delete should be recoverable")
     }
 
     func testATrashedNoteCanBeRestored() throws {
-        for format in formats {
-            let store = NoteStore(rootURL: root.appendingPathComponent("restore-\(format)"), format: format)
-            let note = makeNote("came back")
-            store.save(note)
-            store.archive(note)
-            store.deleteForever(note)
+        let store = NoteStore(rootURL: root)
+        let note = makeNote("came back")
+        store.save(note)
+        store.archive(note)
+        store.deleteForever(note)
 
-            let trashed = try XCTUnwrap(store.loadTrashed().first, "\(format)")
-            store.restoreFromTrash(trashed)
+        let trashed = try XCTUnwrap(store.loadTrashed().first)
+        store.restoreFromTrash(trashed)
 
-            XCTAssertEqual(store.loadArchived().map(\.content), ["came back"], "\(format)")
-            XCTAssertTrue(store.loadTrashed().isEmpty, "\(format)")
-        }
+        XCTAssertEqual(store.loadArchived().map(\.content), ["came back"])
+        XCTAssertTrue(store.loadTrashed().isEmpty)
     }
 
     func testTrashedNotesAreNotListedAsActiveOrArchived() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         store.save(note)
         store.archive(note)
@@ -433,7 +427,7 @@ final class TrashTests: XCTestCase {
     /// Two notes created in the same second get the same Markdown filename, and
     /// the trash is the one place we must not overwrite anything.
     func testTwoDeletionsWithTheSameFilenameBothSurvive() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let created = Date(timeIntervalSince1970: 1_700_000_000)
 
         for content in ["first", "second"] {
@@ -453,7 +447,7 @@ final class TrashTests: XCTestCase {
     }
 
     func testRecentlyTrashedNotesAreNotPurged() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         store.save(note)
         store.archive(note)
@@ -464,7 +458,7 @@ final class TrashTests: XCTestCase {
     }
 
     func testExpiredNotesArePurged() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         store.save(note)
         store.archive(note)
@@ -480,7 +474,7 @@ final class TrashTests: XCTestCase {
     /// modification date, so a note last edited months ago used to be purged
     /// the moment it was deleted — the one thing the trash exists to prevent.
     func testANoteDeletedTodaySurvivesEvenIfItWasEditedLongAgo() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote()
         store.save(note)
         store.archive(note)
@@ -503,18 +497,18 @@ final class TrashTests: XCTestCase {
     }
 
     func testPurgingAnEmptyTrashIsHarmless() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         XCTAssertEqual(store.purgeExpiredTrash(), 0)
     }
 
     func testTrashLivesInsideTheStorageRoot() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         XCTAssertEqual(store.trashURL.lastPathComponent, ".trash")
         XCTAssertEqual(store.trashURL.deletingLastPathComponent().path, root.path)
     }
 
     func testTheTrashTabListsDeletedNotes() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote("deleted")
         store.save(note)
         store.archive(note)
@@ -528,7 +522,7 @@ final class TrashTests: XCTestCase {
     }
 
     func testPuttingBackFromTheTrashTabReturnsTheNoteToArchive() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         let note = makeNote("put back")
         store.save(note)
         store.archive(note)
@@ -543,7 +537,7 @@ final class TrashTests: XCTestCase {
     }
 
     func testResolvingConflictsOnACleanStoreChangesNothing() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         store.save(makeNote("untouched"))
         XCTAssertEqual(store.resolveConflicts(), 0)
         XCTAssertEqual(store.loadActive().map(\.content), ["untouched"])
@@ -558,7 +552,7 @@ final class ConflictSweepTests: XCTestCase {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ConflictSweep-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        store = NoteStore(rootURL: root, format: .markdown)
+        store = NoteStore(rootURL: root)
     }
 
     override func tearDownWithError() throws {
@@ -749,7 +743,7 @@ final class ConflictSweepTests: XCTestCase {
         store.save(note)
 
         WriteLineage.reset()
-        let relaunched = NoteStore(rootURL: root, format: .markdown)
+        let relaunched = NoteStore(rootURL: root)
         relaunched.conflictVersionsProvider = { _ in [typo] }
         relaunched.otherVersionsRemover = { _ in }
 
@@ -814,7 +808,7 @@ final class ConflictSweepTests: XCTestCase {
         note.updatedAt = Date()
         store.save(note)
 
-        let second = NoteStore(rootURL: root, format: .markdown)
+        let second = NoteStore(rootURL: root)
         second.conflictVersionsProvider = { _ in [typo] }
         second.otherVersionsRemover = { _ in }
 

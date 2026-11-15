@@ -60,7 +60,7 @@ import XCTest
     override func setUpWithError() throws {
         isolated = IsolatedSettings()
         clock = ManualClock()
-        store = NoteStore(rootURL: isolated.localRoot.appendingPathComponent("notes"), format: .markdown)
+        store = NoteStore(rootURL: isolated.localRoot.appendingPathComponent("notes"))
         recovery = RecoveryFiles(settings: isolated.settings, store: store, clock: clock)
     }
 

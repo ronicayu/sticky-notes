@@ -43,33 +43,28 @@ import AppKit
         let previousVault = settings.obsidianVaultPath
 
         let newRoot: URL
-        let format: StorageFormat
         switch mode {
         case .local:
             settings.obsidianVaultPath = nil
             settings.useICloud = false
             newRoot = settings.localStorageRoot
-            format = .json
         case .iCloud:
             settings.obsidianVaultPath = nil
             guard settings.iCloudAvailable, let icloud = settings.iCloudRootURL else {
                 // Caller's UI should disable this, but stay safe.
                 settings.useICloud = false
                 newRoot = settings.localStorageRoot
-                format = .json
                 break
             }
             settings.useICloud = true
             newRoot = icloud.appendingPathComponent("StickyNotes", isDirectory: true)
-            format = .json
         case .vault(let path):
             settings.obsidianVaultPath = path
             newRoot = URL(fileURLWithPath: path, isDirectory: true)
                 .appendingPathComponent("StickyNotes", isDirectory: true)
-            format = .markdown
         }
 
-        store.reconfigure(rootURL: newRoot, format: format)
+        store.reconfigure(rootURL: newRoot)
         startPrefetching()
 
         // Daily note feature requires a vault — tear down its window when

@@ -1,20 +1,58 @@
 import CryptoKit
 import Foundation
 
-enum StorageFormat {
-    case json       // local Application Support / iCloud Drive (legacy)
-    case markdown   // Obsidian vault — `.md` with YAML frontmatter
-}
-
-/// A write or move that failed twice. Surfaced to the user rather than
-/// swallowed — a full disk or a revoked vault permission would otherwise look
-/// exactly like a note that saved fine.
+/// A write or move that failed twice, or a legacy file that could not be
+/// converted. Surfaced to the user rather than swallowed — a full disk or a
+/// revoked vault permission would otherwise look exactly like a note that
+/// saved fine.
 struct StorageFailure {
+    enum Kind {
+        /// A write or move did not land. A later write that lands clears it.
+        case write
+        /// A `.json` note could not be converted and was left in place. It stays
+        /// reported until a later conversion run finds nothing wrong.
+        case migration
+    }
+
     let url: URL
     let error: Error
     let date: Date
+    var kind: Kind = .write
 
     var fileName: String { url.lastPathComponent }
+}
+
+/// Why a legacy `.json` note was left unconverted.
+enum MigrationError: LocalizedError {
+    case unreadable
+    case malformed(String)
+    case unreadableConflictVersion
+    case couldNotWrite(String)
+    case readBackDiffers
+    case couldNotDeleteOriginal
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadable:
+            return "The file could not be read."
+        case .malformed(let detail):
+            return "The file is not a valid note (\(detail)). It was left where it is."
+        case .unreadableConflictVersion:
+            return "A sync conflict copy of this note has not downloaded yet. It will be converted once it has."
+        case .couldNotWrite(let detail):
+            return detail
+        case .readBackDiffers:
+            return "The Markdown file did not read back the same as the note. The original was kept."
+        case .couldNotDeleteOriginal:
+            return "The note was converted, but the old .json file could not be removed."
+        }
+    }
+}
+
+/// What one run of the JSON-to-Markdown conversion did.
+struct MigrationReport {
+    var migrated = 0
+    var failures: [StorageFailure] = []
 }
 
 /// The body hashes this process wrote to each file, oldest first, shared by
@@ -99,17 +137,18 @@ final class NoteStore {
     /// landing. Read by the menu bar to decide whether to show a warning.
     private(set) var lastFailure: StorageFailure?
 
+    /// What the last conversion of legacy `.json` notes did, at launch or when
+    /// the storage moved.
+    private(set) var lastMigration = MigrationReport()
+
     private(set) var rootURL: URL
-    private(set) var format: StorageFormat
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
     private var watcher: FileWatcher?
     private let iso8601 = ISO8601DateFormatter()
 
-    /// In Markdown mode the filename is creation-timestamp based (not derivable
-    /// from the UUID), so we need an in-memory map to relocate files for
-    /// archive/restore/delete. Populated by every load + save.
-    private var markdownPathIndex: [UUID: URL] = [:]
+    /// The filename is creation-timestamp based (not derivable from the UUID),
+    /// so we need an in-memory map to relocate files for archive/restore/delete.
+    /// Populated by every load + save.
+    private var pathIndex: [UUID: URL] = [:]
 
     /// Ids we've seen on disk in this process. If a save() targets a known
     /// id whose active file has since vanished — an external agent or
@@ -136,7 +175,7 @@ final class NoteStore {
     /// repopulate it can't interleave.
     private var cache: [String: [Note]] = [:]
 
-    /// Directory paths whose `markdownPathIndex` entries are known to be
+    /// Directory paths whose `pathIndex` entries are known to be
     /// complete, because we've read every file in them. Lets a lookup miss be
     /// trusted instead of triggering another full scan — without it, saving
     /// the Nth note in a vault re-reads the other N-1 looking for an id that
@@ -147,7 +186,7 @@ final class NoteStore {
     var activeURL: URL { rootURL.appendingPathComponent("notes", isDirectory: true) }
     var archiveURL: URL { rootURL.appendingPathComponent("archive", isDirectory: true) }
 
-    private var fileExtension: String { format == .json ? "json" : "md" }
+    private static let fileExtension = "md"
 
     private static let filenameFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -161,16 +200,11 @@ final class NoteStore {
 
     /// No default root: a store that quietly opens the user's real storage is
     /// how a test ends up writing to it. Production gets its root from `Settings`.
-    init(rootURL: URL, format: StorageFormat, clock: AppClock = SystemClock()) {
+    init(rootURL: URL, clock: AppClock = SystemClock()) {
         self.rootURL = rootURL
-        self.format = format
         self.clock = clock
-        encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
         ensureDirectories()
+        migrateJSONNotes()
         startWatching()
         purgeExpiredTrash()
         resolveConflicts()
@@ -212,14 +246,14 @@ final class NoteStore {
             // fully known, which suppresses the scan that would find it under
             // its new name. Dropping the save there loses whatever the user
             // just typed, so pay for one rescan before believing it's gone.
-            if format == .markdown, !confirmedDeletedIds.contains(note.id),
+            if !confirmedDeletedIds.contains(note.id),
                rescanForId(note.id, in: activeURL) != nil {
                 confirmedDeletedIds.remove(note.id)
             } else {
                 // Really gone. Remember that, or every subsequent keystroke
                 // pays for another full scan of the notes directory.
                 confirmedDeletedIds.insert(note.id)
-                markdownPathIndex.removeValue(forKey: note.id)
+                pathIndex.removeValue(forKey: note.id)
                 return .gone
             }
         }
@@ -227,7 +261,7 @@ final class NoteStore {
         let result = writeIfUnchanged(note, to: url, expecting: expectation)
         switch result {
         case .saved:
-            markdownPathIndex[note.id] = url
+            pathIndex[note.id] = url
             knownIds.insert(note.id)
 
             // A save touches exactly one known file, so patch the cache rather
@@ -301,7 +335,7 @@ final class NoteStore {
         guard let from = existingURL(for: note.id, in: activeURL) else { return }
         let to = generateURL(for: note, in: archiveURL)
         guard moveFile(from: from, to: to) else { return }
-        markdownPathIndex[note.id] = to
+        pathIndex[note.id] = to
         notifyChange(.moved(note.id, from: .active, to: .archive))
     }
 
@@ -309,7 +343,7 @@ final class NoteStore {
         if let url = existingURL(for: note.id, in: activeURL) {
             try? FileManager.default.removeItem(at: url)
         }
-        markdownPathIndex.removeValue(forKey: note.id)
+        pathIndex.removeValue(forKey: note.id)
         knownIds.remove(note.id)
         notifyChange(.removed(note.id))
     }
@@ -318,7 +352,7 @@ final class NoteStore {
         guard let from = existingURL(for: note.id, in: archiveURL) else { return }
         let to = generateURL(for: note, in: activeURL)
         guard moveFile(from: from, to: to) else { return }
-        markdownPathIndex[note.id] = to
+        pathIndex[note.id] = to
 
         // Force-expand on restore so the content is immediately visible.
         if var restored = readMain(to), restored.collapsed {
@@ -354,7 +388,7 @@ final class NoteStore {
                 try? FileManager.default.removeItem(at: url)
             }
         }
-        markdownPathIndex.removeValue(forKey: note.id)
+        pathIndex.removeValue(forKey: note.id)
         knownIds.remove(note.id)
         notifyChange(change)
     }
@@ -374,7 +408,7 @@ final class NoteStore {
         guard let from = existingURL(for: note.id, in: trashURL) else { return }
         let to = generateURL(for: note, in: archiveURL)
         guard moveFile(from: from, to: to) else { return }
-        markdownPathIndex[note.id] = to
+        pathIndex[note.id] = to
         notifyChange(.moved(note.id, from: .trash, to: .archive))
     }
 
@@ -394,25 +428,29 @@ final class NoteStore {
     func purgeExpiredTrash(now explicitNow: Date? = nil) -> Int {
         let now = explicitNow ?? clock.now()
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.addedToDirectoryDateKey, .contentModificationDateKey]
         guard let files = try? fm.contentsOfDirectory(
             at: trashURL,
-            includingPropertiesForKeys: keys
+            includingPropertiesForKeys: NoteStore.retentionKeys
         ) else { return 0 }
 
         var removed = 0
-        for url in files where url.pathExtension == fileExtension {
-            // When the file entered the trash is the only date that reflects
-            // the deletion; the modification date is a stamped fallback for
-            // filesystems that don't report it.
-            let values = try? url.resourceValues(forKeys: Set(keys))
-            guard let deleted = values?.addedToDirectoryDate ?? values?.contentModificationDate
-            else { continue }
+        for url in files where url.pathExtension == NoteStore.fileExtension {
+            guard let deleted = NoteStore.deletionDate(of: url) else { continue }
             guard now.timeIntervalSince(deleted) > NoteStore.trashRetention else { continue }
             if (try? fm.removeItem(at: url)) != nil { removed += 1 }
         }
         if removed > 0 { notifyChange(.reset) }
         return removed
+    }
+
+    private static let retentionKeys: [URLResourceKey] = [.addedToDirectoryDateKey, .contentModificationDateKey]
+
+    /// When a trashed file was deleted. When the file entered the trash is the
+    /// only date that reflects the deletion; the modification date is a stamped
+    /// fallback for filesystems that don't report it.
+    private static func deletionDate(of url: URL) -> Date? {
+        guard let values = try? url.resourceValues(forKeys: Set(retentionKeys)) else { return nil }
+        return values.addedToDirectoryDate ?? values.contentModificationDate
     }
 
     /// Trash filenames can collide with an earlier deletion of a note created
@@ -431,28 +469,29 @@ final class NoteStore {
         return candidate
     }
 
-    /// Switch to a new root and/or format. Migrates all existing notes by
-    /// re-writing them in the new location/format. Old files are left alone.
+    /// Switch to a new root. Copies all existing notes there by re-writing them,
+    /// after converting any legacy `.json` notes already in it. Old files are
+    /// left alone.
     @discardableResult
-    func reconfigure(rootURL newRoot: URL, format newFormat: StorageFormat) -> Bool {
+    func reconfigure(rootURL newRoot: URL) -> Bool {
         let active = loadActive()
         let archived = loadArchived()
 
         watcher?.stop()
         rootURL = newRoot
-        format = newFormat
-        markdownPathIndex.removeAll()
+        pathIndex.removeAll()
         ensureDirectories()
+        migrateJSONNotes()
 
         for note in active {
             let url = generateURL(for: note, in: activeURL)
             write(note, to: url)
-            markdownPathIndex[note.id] = url
+            pathIndex[note.id] = url
         }
         for note in archived {
             let url = generateURL(for: note, in: archiveURL)
             write(note, to: url)
-            markdownPathIndex[note.id] = url
+            pathIndex[note.id] = url
         }
 
         startWatching()
@@ -536,40 +575,27 @@ final class NoteStore {
     }
 
     /// Returns the on-disk URL for a note that already exists in the given
-    /// directory, or nil if not found. JSON mode uses deterministic
-    /// `<uuid>.json` paths; Markdown mode looks up the cached path and falls
-    /// back to scanning the directory by frontmatter id.
+    /// directory, or nil if not found. Looks up the cached path and falls back
+    /// to scanning the directory by frontmatter id.
     private func existingURL(for id: UUID, in dir: URL) -> URL? {
-        switch format {
-        case .json:
-            let url = dir.appendingPathComponent("\(id.uuidString).json")
-            return FileManager.default.fileExists(atPath: url.path) ? url : nil
-        case .markdown:
-            if let cached = markdownPathIndex[id], dirKey(cached.deletingLastPathComponent()) == dirKey(dir),
-               FileManager.default.fileExists(atPath: cached.path) {
-                return cached
-            }
-            // The index covers this directory, so a miss is the answer — the
-            // note isn't here. (The `fileExists` check above still catches an
-            // entry whose file was deleted since we indexed it, which is what
-            // keeps the no-resurrect guard working.)
-            if indexedDirs.contains(dirKey(dir)) { return nil }
-            // Cold index: scan and rebuild for this dir.
-            return scanForId(id, in: dir)
+        if let cached = pathIndex[id], dirKey(cached.deletingLastPathComponent()) == dirKey(dir),
+           FileManager.default.fileExists(atPath: cached.path) {
+            return cached
         }
+        // The index covers this directory, so a miss is the answer — the
+        // note isn't here. (The `fileExists` check above still catches an
+        // entry whose file was deleted since we indexed it, which is what
+        // keeps the no-resurrect guard working.)
+        if indexedDirs.contains(dirKey(dir)) { return nil }
+        // Cold index: scan and rebuild for this dir.
+        return scanForId(id, in: dir)
     }
 
     /// Builds a fresh URL for a new save into the given directory.
     private func generateURL(for note: Note, in dir: URL) -> URL {
-        switch format {
-        case .json:
-            return dir.appendingPathComponent("\(note.id.uuidString).json")
-        case .markdown:
-            let stamp = NoteStore.filenameFormatter.string(from: note.createdAt)
-            let suffix = String(note.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
-            let base = "\(stamp)-\(suffix)"
-            return dir.appendingPathComponent("\(base).md")
-        }
+        let stamp = NoteStore.filenameFormatter.string(from: note.createdAt)
+        let suffix = String(note.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
+        return dir.appendingPathComponent("\(stamp)-\(suffix).md")
     }
 
     /// Read every file in `dir` to locate `id`, indexing all of them on the
@@ -586,9 +612,9 @@ final class NoteStore {
             return nil
         }
         var match: URL?
-        for url in files where url.pathExtension == fileExtension {
+        for url in files where url.pathExtension == NoteStore.fileExtension {
             guard let note = readMain(url) else { continue }
-            markdownPathIndex[note.id] = url
+            pathIndex[note.id] = url
             if note.id == id { match = url }
         }
         indexedDirs.insert(dirKey(dir))
@@ -619,7 +645,7 @@ final class NoteStore {
             guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
                 continue
             }
-            for url in files where url.pathExtension == fileExtension {
+            for url in files where url.pathExtension == NoteStore.fileExtension {
                 if let id = resolveConflict(at: url) {
                     resolved += 1
                     changedIds.insert(id)
@@ -762,11 +788,9 @@ final class NoteStore {
             return []
         }
         var notes: [Note] = []
-        for url in files where url.pathExtension == fileExtension {
+        for url in files where url.pathExtension == NoteStore.fileExtension {
             guard let note = readMain(url) else { continue }
-            if format == .markdown {
-                markdownPathIndex[note.id] = url
-            }
+            pathIndex[note.id] = url
             knownIds.insert(note.id)
             notes.append(note)
         }
@@ -789,14 +813,8 @@ final class NoteStore {
     private func readSnapshot(_ url: URL) -> NoteSnapshot? {
         readCount += 1
         guard let data = try? Data(contentsOf: url) else { return nil }
-        let note: Note?
-        switch format {
-        case .json:
-            note = try? decoder.decode(Note.self, from: data)
-        case .markdown:
-            note = String(data: data, encoding: .utf8).flatMap {
-                parseMarkdown($0, fallbackId: idFromFilename(url) ?? stableId(for: url))
-            }
+        let note = String(data: data, encoding: .utf8).flatMap {
+            parseMarkdown($0, fallbackId: idFromFilename(url) ?? stableId(for: url))
         }
         return note.map { NoteSnapshot(note: $0, fingerprint: Fingerprint(of: data)) }
     }
@@ -812,13 +830,7 @@ final class NoteStore {
     }
 
     private func writeReporting(_ note: Note, to url: URL) -> Result<Fingerprint, Error> {
-        let data: Data
-        do {
-            data = try render(note)
-        } catch {
-            recordFailure(url: url, error: error)
-            return .failure(error)
-        }
+        let data = Data(renderMarkdown(note).utf8)
         do {
             try data.write(to: url, options: .atomic)
         } catch {
@@ -838,15 +850,6 @@ final class NoteStore {
         return .success(Fingerprint(of: data))
     }
 
-    private func render(_ note: Note) throws -> Data {
-        switch format {
-        case .json:
-            return try encoder.encode(note)
-        case .markdown:
-            return Data(renderMarkdown(note).utf8)
-        }
-    }
-
     @discardableResult
     private func moveFile(from: URL, to: URL) -> Bool {
         let fm = FileManager.default
@@ -861,15 +864,201 @@ final class NoteStore {
         }
     }
 
+    // MARK: - Conversion from JSON
+
+    /// Convert every `<uuid>.json` note in `notes/`, `archive/` and `.trash/` to
+    /// Markdown beside it. Runs at launch and when the storage moves, so a root
+    /// last used by an older version is converted whichever way it is reached.
+    /// A vault root holds no such files and is left as it is.
+    ///
+    /// Each note is written, read back and compared before its JSON is deleted,
+    /// so no state exists in which neither file holds it. A file that fails any
+    /// step stays where it is and is reported in `lastMigration` and
+    /// `lastFailure`. Safe to run again: it only ever finds what is left.
+    @discardableResult
+    func migrateJSONNotes() -> MigrationReport {
+        var report = MigrationReport()
+        for dir in [activeURL, archiveURL, trashURL] {
+            migrateJSONNotes(in: dir, into: &report)
+        }
+        lastMigration = report
+        if let failure = report.failures.last {
+            lastFailure = failure
+            NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
+        } else if lastFailure?.kind == .migration {
+            lastFailure = nil
+            NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
+        }
+        return report
+    }
+
+    private func migrateJSONNotes(in dir: URL, into report: inout MigrationReport) {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+            return
+        }
+        let ordered = files.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let legacy = ordered.filter { $0.pathExtension == "json" }
+        guard !legacy.isEmpty else { return }
+
+        // A note with an id that already has a Markdown file in this folder is
+        // a conversion an earlier run did not finish, or a copy that came back.
+        var markdown: [UUID: (url: URL, snapshot: NoteSnapshot)] = [:]
+        for url in ordered where url.pathExtension == NoteStore.fileExtension {
+            if let snapshot = readSnapshot(url) { markdown[snapshot.note.id] = (url, snapshot) }
+        }
+
+        for url in legacy {
+            // A file converted now would enter the trash today and live another
+            // thirty days, so one that has already outlived its retention goes
+            // the way an expired Markdown file does at launch.
+            if dirKey(dir) == dirKey(trashURL), isExpiredInTrash(url) {
+                try? FileManager.default.removeItem(at: url)
+                continue
+            }
+            if let error = migrateJSONNote(at: url, in: dir, markdown: &markdown) {
+                report.failures.append(StorageFailure(url: url, error: error, date: clock.now(), kind: .migration))
+            } else {
+                report.migrated += 1
+            }
+        }
+    }
+
+    private func isExpiredInTrash(_ url: URL) -> Bool {
+        guard let deleted = NoteStore.deletionDate(of: url) else { return false }
+        return clock.now().timeIntervalSince(deleted) > NoteStore.trashRetention
+    }
+
+    /// Returns why the note was left alone, or nil once it is converted.
+    private func migrateJSONNote(
+        at url: URL,
+        in dir: URL,
+        markdown: inout [UUID: (url: URL, snapshot: NoteSnapshot)]
+    ) -> MigrationError? {
+        guard let data = try? Data(contentsOf: url) else { return .unreadable }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let note: Note
+        do {
+            note = try decoder.decode(Note.self, from: data)
+        } catch {
+            return .malformed(error.localizedDescription)
+        }
+
+        // A sync conflict on the JSON file holds text this Mac does not have.
+        // Deleting the file would delete it, so fold it in, or wait for it.
+        var versions = [note]
+        let conflicts = conflictVersionsProvider(url)
+        for conflict in conflicts {
+            guard let conflictData = try? Data(contentsOf: conflict.url),
+                  let conflictNote = try? decoder.decode(Note.self, from: conflictData)
+            else { return .unreadableConflictVersion }
+            versions.append(conflictNote)
+        }
+
+        let existing = markdown[note.id]
+        if let existing { versions.insert(existing.snapshot.note, at: 0) }
+
+        var merged = versions[0]
+        if ConflictResolver.needsMerge(versions), let combined = ConflictResolver.merge(versions, now: clock.now()) {
+            merged = combined
+        }
+        if merged.title.isEmpty, let title = versions.first(where: { !$0.title.isEmpty })?.title {
+            merged.title = title
+        }
+
+        if let existing, !NoteStore.differs(merged, from: existing.snapshot.note) {
+            // The Markdown file already holds everything the JSON does.
+        } else {
+            let destination = existing?.url ?? NoteStore.unusedURL(generateURL(for: merged, in: dir))
+            let result: SaveResult
+            if let existing {
+                result = writeIfUnchanged(merged, to: destination, expecting: .fingerprint(existing.snapshot.fingerprint))
+            } else {
+                switch writeReporting(merged, to: destination) {
+                case let .success(fingerprint): result = .saved(fingerprint)
+                case let .failure(error): result = .failed(error)
+                }
+            }
+            guard case let .saved(fingerprint) = result else {
+                return .couldNotWrite(existing == nil ? "The Markdown file could not be written." : "The Markdown file for this note changed while it was being updated.")
+            }
+            guard let back = readSnapshot(destination), back.fingerprint == fingerprint,
+                  NoteStore.readsBackAs(merged, back.note) else {
+                if existing == nil { try? FileManager.default.removeItem(at: destination) }
+                return .readBackDiffers
+            }
+            markdown[merged.id] = (destination, back)
+
+            // The file entered the trash folder just now, which is not when the
+            // note was deleted. Carry the stamped deletion date over; purging
+            // goes by when a file entered the folder, so this only keeps the
+            // record straight and the converted note lives at most thirty days
+            // longer, never fewer.
+            if existing == nil, dirKey(dir) == dirKey(trashURL), let deleted = NoteStore.deletionDate(of: url) {
+                try? FileManager.default.setAttributes([.modificationDate: deleted], ofItemAtPath: destination.path)
+            }
+        }
+
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            return .couldNotDeleteOriginal
+        }
+        for conflict in conflicts { conflict.markResolved() }
+        return nil
+    }
+
+    /// True when `a` holds text, a title or labels that `b` lacks.
+    private static func differs(_ a: Note, from b: Note) -> Bool {
+        ConflictResolver.needsMerge([a, b]) || a.title != b.title || a.labels != b.labels
+    }
+
+    /// Whether `back`, read from the Markdown file written for `note`, is the
+    /// same note. Dates keep whole seconds and geometry two decimals on disk,
+    /// and labels come back normalised, so those are compared as stored.
+    private static func readsBackAs(_ note: Note, _ back: Note) -> Bool {
+        func seconds(_ date: Date) -> Int { Int(date.timeIntervalSince1970.rounded(.down)) }
+        let labels = note.labels.map(NoteLabel.normalize).filter { !$0.isEmpty }
+        return back.id == note.id
+            && back.title == note.title
+            && back.content == note.content
+            && back.color == note.color
+            && back.collapsed == note.collapsed
+            && back.floatLevel == note.floatLevel
+            && back.labels == labels
+            && seconds(back.createdAt) == seconds(note.createdAt)
+            && seconds(back.updatedAt) == seconds(note.updatedAt)
+            && abs(back.positionX - note.positionX) < 0.01
+            && abs(back.positionY - note.positionY) < 0.01
+            && abs(back.width - note.width) < 0.01
+            && abs(back.height - note.height) < 0.01
+    }
+
+    /// `candidate`, or the first of `name-2.md`, `name-3.md`… that is free.
+    private static func unusedURL(_ candidate: URL) -> URL {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: candidate.path) else { return candidate }
+        let base = candidate.deletingPathExtension()
+        var counter = 2
+        while true {
+            let next = base.deletingLastPathComponent()
+                .appendingPathComponent("\(base.lastPathComponent)-\(counter).\(candidate.pathExtension)")
+            if !fm.fileExists(atPath: next.path) { return next }
+            counter += 1
+        }
+    }
+
     // MARK: - Health
 
-    private func recordFailure(url: URL, error: Error) {
-        lastFailure = StorageFailure(url: url, error: error, date: clock.now())
+    private func recordFailure(url: URL, error: Error, kind: StorageFailure.Kind = .write) {
+        lastFailure = StorageFailure(url: url, error: error, date: clock.now(), kind: kind)
         NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
     }
 
+    /// A landed write clears a write failure. A note that could not be converted
+    /// is still unconverted, so only a later conversion run clears that one.
     private func recordSuccess() {
-        guard lastFailure != nil else { return }
+        guard let failure = lastFailure, failure.kind == .write else { return }
         lastFailure = nil
         NotificationCenter.default.post(name: NoteStore.healthDidChange, object: self)
     }

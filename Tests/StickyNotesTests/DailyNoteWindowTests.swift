@@ -27,7 +27,7 @@ import XCTest
         vault = FileManager.default.temporaryDirectory
             .appendingPathComponent("DailyNoteWindow-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
-        store = NoteStore(rootURL: vault.appendingPathComponent("StickyNotes"), format: .markdown)
+        store = NoteStore(rootURL: vault.appendingPathComponent("StickyNotes"))
         settings.obsidianVaultPath = vault.path
         settings.dailyNotesPattern = pattern
         settings.dailyTemplatePath = nil

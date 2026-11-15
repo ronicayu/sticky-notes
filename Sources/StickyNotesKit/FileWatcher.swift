@@ -5,7 +5,7 @@ import CoreServices
 /// content edits) via FSEvents and calls `onChange` (debounced) on the main
 /// queue. Unlike a directory-level `DispatchSourceFileSystemObject`, this
 /// fires when an external editor (Obsidian, an iCloud sync agent, etc.)
-/// rewrites a `.md` / `.json` inside the watched tree.
+/// rewrites a `.md` inside the watched tree.
 final class FileWatcher {
     private var stream: FSEventStreamRef?
     private var pending = false

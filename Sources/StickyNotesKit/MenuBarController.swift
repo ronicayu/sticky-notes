@@ -284,8 +284,9 @@ import KeyboardShortcuts
                 button.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
                                        accessibilityDescription: "Sticky Notes — can't save")
                 button.image?.isTemplate = true
-                button.toolTip = "Sticky Notes can't save to \(failure.fileName)"
-                self.storageWarningItem.title = "⚠︎ Couldn't save \(failure.fileName)"
+                let action = failure.kind == .migration ? "convert" : "save"
+                button.toolTip = "Sticky Notes can't \(action) \(failure.fileName)"
+                self.storageWarningItem.title = "⚠︎ Couldn't \(action) \(failure.fileName)"
                 self.storageWarningItem.isHidden = false
             } else {
                 self.applyNormalMenuBarIcon(to: button)
@@ -309,16 +310,31 @@ import KeyboardShortcuts
     @objc private func showStorageFailure() {
         guard let failure = store.lastFailure else { return }
         let alert = NSAlert()
-        alert.messageText = "Couldn't save \(failure.fileName)"
-        alert.informativeText = """
-        \(failure.error.localizedDescription)
+        switch failure.kind {
+        case .write:
+            alert.messageText = "Couldn't save \(failure.fileName)"
+            alert.informativeText = """
+            \(failure.error.localizedDescription)
 
-        The note is still open and its text is safe — it just isn't on disk \
-        yet. Sticky Notes keeps retrying as you edit. Check that the storage \
-        folder exists and the disk isn't full.
+            The note is still open and its text is safe — it just isn't on disk \
+            yet. Sticky Notes keeps retrying as you edit. Check that the storage \
+            folder exists and the disk isn't full.
 
-        Location: \(failure.url.deletingLastPathComponent().path)
-        """
+            Location: \(failure.url.deletingLastPathComponent().path)
+            """
+        case .migration:
+            alert.messageText = "Couldn't convert \(failure.fileName)"
+            alert.informativeText = """
+            \(failure.error.localizedDescription)
+
+            Sticky Notes now stores notes as Markdown files. This older note file \
+            is untouched and its text is safe, but the note will not appear \
+            until the file is repaired or removed. Sticky Notes tries again at \
+            every launch.
+
+            Location: \(failure.url.deletingLastPathComponent().path)
+            """
+        }
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Show Storage Folder")
         alert.addButton(withTitle: "OK")

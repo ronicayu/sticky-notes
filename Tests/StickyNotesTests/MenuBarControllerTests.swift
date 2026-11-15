@@ -19,7 +19,7 @@ import XCTest
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MenuBar-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        store = NoteStore(rootURL: root, format: .markdown)
+        store = NoteStore(rootURL: root)
         isolated = IsolatedSettings()
         clock = ManualClock()
         let undo = UndoCenter(clock: clock)

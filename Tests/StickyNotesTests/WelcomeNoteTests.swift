@@ -24,7 +24,7 @@ final class WelcomeNoteTests: XCTestCase {
     }
 
     private func makeStore() -> NoteStore {
-        NoteStore(rootURL: root, format: .json)
+        NoteStore(rootURL: root)
     }
 
     private func makeNote() -> Note {

@@ -43,13 +43,13 @@ final class NoteStoreHealthTests: XCTestCase {
     }
 
     func testAHealthyStoreReportsNoFailure() {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         store.save(makeNote())
         XCTAssertNil(store.lastFailure)
     }
 
     func testAFailedWriteIsRecordedRatherThanSwallowed() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         try skipIfPermissionsAreNotEnforced(store)
         try setWritable(false, at: store.activeURL)
 
@@ -61,7 +61,7 @@ final class NoteStoreHealthTests: XCTestCase {
     }
 
     func testAFailedWritePostsAHealthNotification() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         try skipIfPermissionsAreNotEnforced(store)
         try setWritable(false, at: store.activeURL)
 
@@ -71,7 +71,7 @@ final class NoteStoreHealthTests: XCTestCase {
     }
 
     func testASubsequentSuccessfulWriteClearsTheFailure() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         try skipIfPermissionsAreNotEnforced(store)
         try setWritable(false, at: store.activeURL)
         store.save(makeNote())
@@ -87,7 +87,7 @@ final class NoteStoreHealthTests: XCTestCase {
     }
 
     func testAFailedSaveDoesNotAppearInTheCache() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         try skipIfPermissionsAreNotEnforced(store)
         _ = store.loadActive()  // warm the cache
 
@@ -99,7 +99,7 @@ final class NoteStoreHealthTests: XCTestCase {
     }
 
     func testAFailedSaveCanBeRetriedOnceTheProblemClears() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         try skipIfPermissionsAreNotEnforced(store)
         let note = makeNote(content: "eventually")
 
@@ -118,7 +118,7 @@ final class NoteStoreHealthTests: XCTestCase {
     /// The no-resurrect guard keys off ids the store has seen. A note whose
     /// first write failed was never really seen, so it must not be locked out.
     func testAFailedFirstWriteDoesNotTripTheNoResurrectGuard() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         try skipIfPermissionsAreNotEnforced(store)
         let note = makeNote(content: "first attempt failed")
 
@@ -131,7 +131,7 @@ final class NoteStoreHealthTests: XCTestCase {
     }
 
     func testFailuresAreReportedInMarkdownModeToo() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         try skipIfPermissionsAreNotEnforced(store)
         try setWritable(false, at: store.activeURL)
 
@@ -141,7 +141,7 @@ final class NoteStoreHealthTests: XCTestCase {
     }
 
     func testTheRetryRecreatesAMissingStorageDirectory() throws {
-        let store = NoteStore(rootURL: root, format: .json)
+        let store = NoteStore(rootURL: root)
         // Simulate the folder being moved or deleted out from under us.
         try FileManager.default.removeItem(at: store.activeURL)
 

@@ -104,12 +104,10 @@ final class NoteFloatLevelTests: XCTestCase {
         XCTAssertEqual(Note.makeNew(frame: CGRect(x: 0, y: 0, width: 240, height: 200)).floatLevel, .floating)
     }
 
-    func testFloatLevelSurvivesBothStorageFormats() throws {
-        for format in [StorageFormat.json, .markdown] {
-            let store = NoteStore(rootURL: root.appendingPathComponent("\(format)"), format: format)
-            store.save(note(floatLevel: .desktop))
-            XCTAssertEqual(try XCTUnwrap(store.loadActive().first).floatLevel, .desktop, "\(format)")
-        }
+    func testFloatLevelSurvivesASaveAndLoad() throws {
+        let store = NoteStore(rootURL: root)
+        store.save(note(floatLevel: .desktop))
+        XCTAssertEqual(try XCTUnwrap(store.loadActive().first).floatLevel, .desktop)
     }
 
     /// Notes written before the field existed have to keep opening.
@@ -129,7 +127,7 @@ final class NoteFloatLevelTests: XCTestCase {
     }
 
     func testMarkdownFrontmatterWithoutFloatDefaultsToFloating() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let raw = """
         ---
         id: 3F2504E0-4F89-11D3-9A0C-0305E82C3301
@@ -144,7 +142,7 @@ final class NoteFloatLevelTests: XCTestCase {
     }
 
     func testFloatLevelIsWrittenToFrontmatter() throws {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         store.save(note(floatLevel: .desktop))
         let file = try XCTUnwrap(try FileManager.default
             .contentsOfDirectory(at: store.activeURL, includingPropertiesForKeys: nil).first)

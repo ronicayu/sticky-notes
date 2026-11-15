@@ -11,7 +11,7 @@ import AppKit
     public convenience override init() {
         let settings = Settings(defaults: .standard)
         self.init(
-            store: NoteStore(rootURL: settings.preferredStorageRoot, format: settings.preferredFormat),
+            store: NoteStore(rootURL: settings.preferredStorageRoot),
             settings: settings,
             clock: SystemClock()
         )

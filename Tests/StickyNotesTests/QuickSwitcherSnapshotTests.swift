@@ -24,7 +24,7 @@ final class QuickSwitcherSnapshotTests: XCTestCase {
     }
 
     private func seededStore() -> NoteStore {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let samples: [(String, String, [String], NoteColor)] = [
             ("Groceries", "- [ ] oat milk\n- [x] eggs\n- [ ] sourdough", ["home"], .yellow),
             ("Q3 planning", "Ship the search release.\nThen the editor work.", ["work"], .blue),

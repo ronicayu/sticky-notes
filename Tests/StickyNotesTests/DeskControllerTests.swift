@@ -19,7 +19,7 @@ import XCTest
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("Desk-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        store = NoteStore(rootURL: root, format: .markdown)
+        store = NoteStore(rootURL: root)
         isolated = IsolatedSettings()
         clock = ManualClock()
         desk = makeDesk()
@@ -230,7 +230,7 @@ import XCTest
         let shown = seed("Shown")
         desk.restoreActiveNotes()
         let unseen = seed("Synced in")
-        let other = NoteStore(rootURL: root, format: .markdown)
+        let other = NoteStore(rootURL: root)
 
         desk.storeDidChange(Notification(
             name: NoteStore.didChange, object: other, userInfo: [NoteStore.changeKey: NoteStore.Change.saved(shown.id)]

@@ -10,7 +10,7 @@ final class AttachmentsTests: XCTestCase {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AttachmentsTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        store = NoteStore(rootURL: root, format: .markdown)
+        store = NoteStore(rootURL: root)
     }
 
     override func tearDownWithError() throws {

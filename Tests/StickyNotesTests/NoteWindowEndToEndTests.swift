@@ -23,7 +23,7 @@ import XCTest
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         clock = ManualClock()
         scheduler = TestScheduler(clock: clock)
-        store = NoteStore(rootURL: root, format: .markdown, clock: clock)
+        store = NoteStore(rootURL: root, clock: clock)
     }
 
     override func tearDownWithError() throws {

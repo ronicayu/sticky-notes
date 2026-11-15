@@ -144,7 +144,8 @@ struct Note: Codable, Identifiable {
         self.updatedAt = updatedAt
     }
 
-    /// Custom decoder so notes saved before newer fields existed still decode.
+    /// Custom decoder so legacy JSON notes saved before newer fields existed still
+    /// decode. Only the conversion to Markdown reads JSON notes.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)

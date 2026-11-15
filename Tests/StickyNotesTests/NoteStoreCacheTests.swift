@@ -17,8 +17,8 @@ final class NoteStoreCacheTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func makeStore(_ format: StorageFormat = .json) -> NoteStore {
-        NoteStore(rootURL: root, format: format)
+    private func makeStore() -> NoteStore {
+        NoteStore(rootURL: root)
     }
 
     private func makeNote(content: String = "n", labels: [String] = []) -> Note {
@@ -98,11 +98,11 @@ final class NoteStoreCacheTests: XCTestCase {
     }
 
     func testReconfigureInvalidatesTheCache() {
-        let store = makeStore(.json)
+        let store = makeStore()
         store.save(makeNote(content: "moved"))
         _ = store.loadActive()
 
-        store.reconfigure(rootURL: root.appendingPathComponent("vault", isDirectory: true), format: .markdown)
+        store.reconfigure(rootURL: root.appendingPathComponent("vault", isDirectory: true))
         XCTAssertEqual(store.loadActive().map(\.content), ["moved"],
                        "cache from the old root leaked into the new one")
     }
@@ -130,7 +130,7 @@ final class NoteStoreCacheTests: XCTestCase {
     // MARK: - Acceptance: a large library stays responsive
 
     func testPanelSizedLibraryReadsAreFastOnceWarm() {
-        let store = makeStore(.markdown)
+        let store = makeStore()
         for i in 0..<500 {
             store.save(makeNote(content: "note \(i)\n\nsome body text", labels: ["label\(i % 20)"]))
         }
@@ -153,7 +153,7 @@ final class NoteStoreCacheTests: XCTestCase {
     /// used to fall back to reading every file in the directory — making the
     /// Nth save in a vault cost N-1 file reads. Saving 500 notes took ~30s.
     func testSavingIntoALargeVaultStaysLinear() {
-        let store = makeStore(.markdown)
+        let store = makeStore()
 
         let start = CFAbsoluteTimeGetCurrent()
         for i in 0..<500 { store.save(makeNote(content: "note \(i)")) }
@@ -165,7 +165,7 @@ final class NoteStoreCacheTests: XCTestCase {
     }
 
     func testAllLabelsOverALargeLibraryDoesNotRescanPerCall() {
-        let store = makeStore(.markdown)
+        let store = makeStore()
         for i in 0..<500 { store.save(makeNote(labels: ["label\(i % 20)"])) }
 
         _ = store.allLabels()  // warm both directories

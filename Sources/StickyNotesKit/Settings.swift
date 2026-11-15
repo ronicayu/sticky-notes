@@ -151,8 +151,4 @@ final class Settings {
         }
         return localStorageRoot
     }
-
-    var preferredFormat: StorageFormat {
-        obsidianVaultPath != nil ? .markdown : .json
-    }
 }

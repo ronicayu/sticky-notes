@@ -18,7 +18,7 @@ final class NotesPanelSnapshotTests: XCTestCase {
     }
 
     private func seededStore() -> NoteStore {
-        let store = NoteStore(rootURL: root, format: .markdown)
+        let store = NoteStore(rootURL: root)
         let samples: [(String, String, [String], NoteColor, TimeInterval)] = [
             ("Groceries", "- [ ] oat milk\n- [x] eggs", ["home"], .yellow, -120),
             ("Q3 planning", "Ship the search release first.", ["work"], .blue, -3600),

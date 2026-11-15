@@ -18,7 +18,7 @@ import XCTest
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("Storage-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        store = NoteStore(rootURL: root.appendingPathComponent("start"), format: .json)
+        store = NoteStore(rootURL: root.appendingPathComponent("start"))
         isolated = IsolatedSettings()
         clock = ManualClock()
         desk = DeskController(
@@ -53,7 +53,6 @@ import XCTest
 
         XCTAssertEqual(isolated.settings.obsidianVaultPath, vaultPath)
         XCTAssertEqual(store.rootURL.path, vaultPath + "/StickyNotes")
-        XCTAssertEqual(store.format, .markdown)
         XCTAssertEqual(store.loadActive().map(\.id), [note.id])
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.activeURL.path))
     }
@@ -68,7 +67,6 @@ import XCTest
         XCTAssertNil(isolated.settings.obsidianVaultPath)
         XCTAssertFalse(isolated.settings.useICloud)
         XCTAssertEqual(store.rootURL, isolated.settings.localStorageRoot)
-        XCTAssertEqual(store.format, .json)
         XCTAssertEqual(store.loadActive().map(\.id), [note.id])
     }
 
