@@ -104,7 +104,11 @@ import AppKit
             self?.offerUndoForArchive(of: archived)
         }
         controller.onTextKept = { [weak self] place in
-            if place == .recoveredCopy { self?.undo.tellRecoveredCopy(in: "Trash") }
+            switch place {
+            case .recoveredCopy: self?.undo.tellRecoveredCopy(in: "Trash")
+            case .trash: self?.undo.tellDeletedElsewhere()
+            case .archive: break
+            }
         }
         controller.onCloseRefused = { [weak self] retry in
             self?.undo.offerRetryAfterRefusedClose(retry)

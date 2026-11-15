@@ -291,7 +291,22 @@ final class NoteLeavesActiveFolderTests: XCTestCase {
 
     // MARK: - Discarding an empty note that has a file (F3)
 
-    func testClosingAnEmptyNoteThatHasAFileLeavesItInTheTrash() throws {
+    /// "Empty" is judged from the window, and the file may hold more than it
+    /// shows, so an empty note's file is never unlinked. (Model finding F3.)
+    func testDiscardingAnEmptyNoteGoesToTheTrash() throws {
+        let document = open("")
+        document.setBody("x")
+        document.setBody("")
+        document.setTitle("")
+
+        guard case .closed = document.close(.discard) else { return XCTFail("refused") }
+
+        XCTAssertNil(store.loadNote(id: document.id))
+        XCTAssertEqual(store.loadTrashed().map(\.id), [document.id])
+        XCTAssertTrue(store.loadArchived().isEmpty)
+    }
+
+    func testClosingAnEmptyNoteThatHasAFileLeavesItInTheTrashToo() throws {
         let document = open("")
         document.setBody("x")
         document.setBody("")
@@ -299,7 +314,6 @@ final class NoteLeavesActiveFolderTests: XCTestCase {
 
         guard case .closed = document.close(.archive) else { return XCTFail("refused") }
 
-        XCTAssertNil(store.loadNote(id: document.id))
         XCTAssertEqual(store.loadTrashed().map(\.id), [document.id])
         XCTAssertTrue(store.loadArchived().isEmpty)
     }

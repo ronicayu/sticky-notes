@@ -499,7 +499,9 @@ import XCTest
         desk.reconcileOpenWindows()
         XCTAssertNotNil(desk.windowControllers[id], "a new note has no file yet and is not gone")
 
-        controller.discardAbandonedCapture()
+        // Focus moves away: the window sweeps up an untouched note on its own.
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: controller.window))
+        waitForDeferredWork()
 
         XCTAssertNil(desk.windowControllers[id])
         for folder in [store.activeURL, store.archiveURL, store.trashURL] {

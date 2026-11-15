@@ -42,6 +42,11 @@ import AppKit
         toasts.show(Toast(message: "Note disappeared — recovered copy in \(place)", undoTitle: "OK", now: clock.now(), undo: {}))
     }
 
+    /// The note was deleted from under the window; its text went to the trash.
+    func tellDeletedElsewhere() {
+        toasts.show(Toast(message: "Note was deleted — your typing is in Trash", undoTitle: "OK", now: clock.now(), undo: {}))
+    }
+
     /// Whether a toast is waiting for an answer.
     var hasPendingOffer: Bool { toasts.visibleToast != nil }
 

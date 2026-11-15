@@ -155,8 +155,7 @@ final class NoteWhereaboutsTests: XCTestCase {
 
     // MARK: - Discarding
 
-    /// (Model finding F3: an "empty" note's file can hold text the window never showed.)
-    func testDiscardingAnEmptyNoteGoesToTheTrash() throws {
+    func testDiscardingANoteMovesItsFileToTheTrash() throws {
         let note = makeNote("")
         store.save(note)
 
