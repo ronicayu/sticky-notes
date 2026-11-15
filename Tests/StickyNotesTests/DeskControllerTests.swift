@@ -742,6 +742,36 @@ import XCTest
         }
     }
 
+    func testAnEmptyNoteSweptUpOnBlurIsOfferedBackAndComesBackWhereItWas() throws {
+        let id = desk.makeNote(color: .blue, labels: ["inbox"])
+        let controller = try XCTUnwrap(desk.windowControllers[id])
+        let frame = try XCTUnwrap(controller.window?.frame)
+        defer { undo.dismiss() }
+
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: controller.window))
+        waitForDeferredWork()
+        XCTAssertNil(desk.windowControllers[id])
+        XCTAssertTrue(undo.hasPendingOffer, "the note vanished without a word")
+
+        undo.undoLastAction(nil)
+
+        let back = try XCTUnwrap(desk.windowControllers[id], "undo did not bring the note back")
+        XCTAssertEqual(back.window?.frame, frame)
+        XCTAssertEqual(back.bufferedNote.color, .blue)
+        XCTAssertEqual(back.labels, ["inbox"])
+        XCTAssertFalse(undo.hasPendingOffer)
+    }
+
+    func testPressingTheNewNoteChordAgainDiscardsWithoutAToast() throws {
+        let id = desk.makeNote()
+        let controller = try XCTUnwrap(desk.windowControllers[id])
+
+        controller.discardAbandonedCapture()
+
+        XCTAssertNil(desk.windowControllers[id])
+        XCTAssertFalse(undo.hasPendingOffer, "a deliberate never-mind was announced")
+    }
+
     func testTheFirstEditOfANewNoteWritesIt() throws {
         let id = desk.makeNote()
         let controller = try XCTUnwrap(desk.windowControllers[id])

@@ -208,6 +208,14 @@ import AppKit
         controller.onLabelRemoved = { [weak self] label, restore in
             self?.undo.offerUndoForLabelRemoval(label, restore: restore)
         }
+        controller.onEmptyNoteRemoved = { [weak self] emptyNote in
+            self?.undo.offerUndoForEmptyNoteRemoval { [weak self] in
+                // The note's place is still in the layout, so it returns there.
+                self?.showAllIfHidden()
+                self?.presentWindow(for: emptyNote, animateIn: true)
+                self?.windowControllers[emptyNote.id]?.focusTitle()
+            }
+        }
         controller.onTextKept = { [weak self] place in
             switch place {
             case .recoveredCopy: self?.undo.tellRecoveredCopy(in: "Trash")
