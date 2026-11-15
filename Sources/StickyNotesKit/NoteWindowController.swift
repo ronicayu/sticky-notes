@@ -10,6 +10,21 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Where this Mac keeps the window: the note's file holds none of it.
     private let layoutStore: DeviceLayoutStore
     private var geometry: NoteLayout
+    /// Set while the window shows somewhere other than where `geometry` puts it,
+    /// because the screen that held the note is gone: the frame it shows, clamped
+    /// onto a screen that exists. `geometry` and the layout keep the person's own
+    /// frame, so the note goes back when the screen does. The person moving or
+    /// resizing the note ends this and makes where it is now their choice.
+    private var standInFrame: NSRect?
+    /// True while the controller itself moves the window, so the move is not the
+    /// person's.
+    private var isPlacingItself = false
+    /// How many of the person's own commands (arrange, resize by VoiceOver, snapping) are moving the window.
+    private var personActionDepth = 0
+    /// Whether the person is dragging or resizing the window now. A test replaces it.
+    var isPersonDraggingOrResizing: (() -> Bool)?
+    /// The visible frame of every screen. A test replaces it to add and remove screens.
+    var visibleScreenFrames: () -> [NSRect] = { NSScreen.screens.map(\.visibleFrame) }
     private let clock: AppClock
     private let scheduler: Scheduler
     private let onClosed: (UUID) -> Void
@@ -23,6 +38,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     var onCollapsed: (() -> Void)?
     /// Called when a label was removed with its chip, with what puts it back.
     var onLabelRemoved: ((_ label: String, _ restore: @escaping () -> Void) -> Void)?
+    /// Called when an untouched note was swept away because focus left it.
+    var onEmptyNoteRemoved: ((Note) -> Void)?
     /// Called when the note left the active folder under typed text, and the text
     /// was written where the note went.
     var onTextKept: ((NoteDocument.KeptIn) -> Void)?
@@ -123,8 +140,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Discard without archiving. Used for abandoned captures, which should
     /// leave no trace at all. Text that arrived from outside since the window
     /// was opened is on screen now, and the note stays.
-    func discardAbandonedCapture() {
-        closeThroughDocument(.discard)
+    func discardAbandonedCapture(offeringUndo: Bool = false) {
+        closeThroughDocument(.discard, offeringUndo: offeringUndo)
     }
 
     /// Height of the chrome strip when expanded.
@@ -170,6 +187,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         self.clock = clock
         self.scheduler = scheduler
         self.onClosed = onClosed
+        let hadLayout = layoutStore.layout(for: note.id) != nil
         var layout = NoteWindowController.resolveLayout(
             for: note, in: layoutStore, placing: placing ?? NoteWindowController.placeOnPointerScreen
         )
@@ -181,7 +199,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             : CGFloat(layout.height)
         let rawFrame = NSRect(x: layout.x, y: layout.y, width: layout.width, height: displayHeight)
         let frame = NoteWindow.clampToVisibleScreen(rawFrame)
-        if frame.origin != rawFrame.origin || frame.size != rawFrame.size {
+        let isOffScreen = frame.origin != rawFrame.origin || frame.size != rawFrame.size
+        if isOffScreen && hadLayout {
+            // The frame the person left is on a screen that is not here now. It
+            // stays in the layout; only the window is brought onto a screen.
+            standInFrame = frame
+        } else if isOffScreen {
             layout.x = Double(frame.origin.x)
             layout.y = Double(frame.origin.y)
             layout.width = Double(frame.size.width)
@@ -212,7 +235,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         )
         colorButton = NoteWindowController.makeChromeButton(
             symbol: "paintpalette",
-            tooltip: "Change color"
+            tooltip: "Color and float level"
         )
         labelButton = NoteWindowController.makeChromeButton(
             symbol: "tag",
@@ -254,7 +277,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         titleLabel.placeholder = "Untitled"
         titleLabel.isHidden = !layout.collapsed
         titleLabel.spokenTitle = note.title.isEmpty ? "Untitled" : note.title
-        dragZone.reportsSingleClick = layout.collapsed
+        dragZone.isCollapsed = layout.collapsed
 
         bodyContainer = NSView()
         bodyContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -393,7 +416,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         super.init(window: window)
         window.delegate = self
         window.alphaValue = NoteWindowController.blurAlpha
-        window.initialFirstResponder = textView
+        // A collapsed note hides its body: focus must not start in text nobody can see.
+        window.initialFirstResponder = layout.collapsed ? nil : textView
         window.minSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         window.contentMinSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         editor.onTextChange = { [weak self] text in
@@ -432,7 +456,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             self?.onTextKept?(place)
         }
 
-        titleLabel.onPress = { [weak self] in self?.dragZoneDidClick() }
+        titleLabel.onPress = { [weak self] in self?.expandIfCollapsed() }
         resizeGrip.onResize = { [weak self] dx, dy in self?.resizeByAccessibilityAction(dx: dx, dy: dy) }
         updateButtonAccessibility()
 
@@ -451,7 +475,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             self?.updateChromeVisibility()
         }
 
-        updateDateLabel()
+        updateDateLabel(editedNow: false)
         updateChromeVisibility(animated: false)
         rebuildLabelChips()
 
@@ -459,6 +483,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             self,
             selector: #selector(storeDidChange(_:)),
             name: NoteStore.didChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screensDidChange),
+            name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
     }
@@ -503,7 +533,21 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Record where the window is now, and the size as the hint the next save
     /// of the note writes. The note file is not touched.
     private func recordFrame(_ frame: NSRect, resized: Bool) {
-        guard !isFadingOut else { return }
+        guard !isFadingOut, !isPlacingItself else { return }
+        var resized = resized
+        if standInFrame != nil || !layoutFitsScreens {
+            if let shown = standInFrame, NoteWindowController.isSame(frame, shown) { return }
+            // Without a screen for the layout, only the person's own move or
+            // resize is a choice. Any other change is the system fitting the
+            // window to the screens that are left.
+            guard isPlacedByPerson else {
+                standInFrame = frame
+                return
+            }
+            // Where the person has put it now is their frame, size included.
+            standInFrame = nil
+            resized = true
+        }
         geometry.x = Double(frame.origin.x)
         geometry.y = Double(frame.origin.y)
         if resized {
@@ -614,7 +658,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         }
         frame.origin.y += frame.height - size.height
         frame.size = size
-        window.setFrame(frame, display: true, animate: false)
+        asPerson { window.setFrame(frame, display: true, animate: false) }
     }
 
     private func updateExpandButtonIcon() {
@@ -633,6 +677,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         let isKey = window?.isKeyWindow ?? false
         let shouldShow = !geometry.collapsed && (isKey || isHovering)
         let target: CGFloat = shouldShow ? 1.0 : 0
+        // A transparent button still takes clicks; on the collapsed bar they
+        // would expand, recolor or archive the note instead of moving it.
+        for button in [trashButton, expandButton, colorButton, labelButton] {
+            button.isHidden = geometry.collapsed
+        }
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = Appearance.animationDuration(0.16)
@@ -675,7 +724,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         closeThroughDocument(.archive)
     }
 
-    private func closeThroughDocument(_ reason: NoteDocument.CloseReason) {
+    private func closeThroughDocument(_ reason: NoteDocument.CloseReason, offeringUndo: Bool = false) {
+        // Closing the window resigns key, which asks to discard the note again.
+        guard !noteDocument.isClosed else { return }
         switch noteDocument.close(reason) {
         case .refused:
             // A note to be discarded that turned out to hold text just stays.
@@ -685,6 +736,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             return
         case let .closed(archived):
             if let archived = archived { onArchived?(archived) }
+            if offeringUndo, archived == nil { onEmptyNoteRemoved?(note) }
             // The note is saved and gone from the desk's books by now; only the
             // picture of it is still on screen for the length of the fade. A note
             // that was only discarded leaves at once.
@@ -753,6 +805,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     // MARK: - NoteDragZoneDelegate
 
     func dragZoneDidDoubleClick() {
+        performToggleCollapse()
+    }
+
+    private func expandIfCollapsed() {
+        guard geometry.collapsed else { return }
         performToggleCollapse()
     }
 
@@ -867,7 +924,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
                 xRadius: 3,
                 yRadius: 3
             )
-            NSColor(hex: color.bodyHex)?.setFill()
+            // The light paper colour in both appearances: the menu stays light
+            // or dark with the system, and the dark papers are all near black.
+            NSColor(hex: color.lightBodyHex)?.setFill()
             path.fill()
             NSColor.black.withAlphaComponent(0.18).setStroke()
             path.lineWidth = 0.5
@@ -877,13 +936,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     }
 
     // MARK: - NSWindowDelegate
-
-    /// A collapsed note is an 18pt bar whose only affordance is knowing to
-    /// double-click it. One click expands.
-    func dragZoneDidClick() {
-        guard geometry.collapsed else { return }
-        dragZoneDidDoubleClick()
-    }
 
     func dragZoneDidEndDrag(suppressSnapping: Bool) {
         guard !suppressSnapping, let window = window else { return }
@@ -895,7 +947,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
         let snapped = WindowArrangement.snap(window.frame, toScreen: screen, others: others)
         guard snapped != window.frame else { return }
-        window.setFrameOrigin(snapped.origin)
+        asPerson { window.setFrameOrigin(snapped.origin) }
         flashSnapFeedback()
     }
 
@@ -918,8 +970,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Move this note to `frame`, animated. Used by the Arrange command.
     func setArrangedFrame(_ frame: NSRect, animated: Bool = true) {
         guard let window = window else { return }
-        window.setFrame(frame, display: true, animate: animated)
-        recordFrame(frame, resized: false)
+        asPerson {
+            window.setFrame(frame, display: true, animate: animated)
+            recordFrame(frame, resized: false)
+        }
     }
 
     /// Current frame and whether the note is collapsed — the Arrange command
@@ -942,7 +996,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         if isAbandonedCapture {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self, self.isAbandonedCapture else { return }
-                self.discardAbandonedCapture()
+                self.discardAbandonedCapture(offeringUndo: true)
             }
             return
         }
@@ -980,11 +1034,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// the frame back to the persisted dimensions so a collapsed note never
     /// blows up to the full screen width.
     func windowDidChangeScreen(_ notification: Notification) {
-        guard let window = window else { return }
-        let storedWidth = CGFloat(geometry.width)
-        let storedHeight: CGFloat = geometry.collapsed
-            ? NoteWindowController.collapsedHeight
-            : CGFloat(geometry.height)
+        guard let window = window, !isPlacingItself else { return }
+        let storedWidth = standInFrame?.width ?? CGFloat(geometry.width)
+        let storedHeight = standInFrame?.height ?? layoutFrame.height
         var frame = window.frame
         if abs(frame.size.width - storedWidth) < 0.5 &&
            abs(frame.size.height - storedHeight) < 0.5 { return }
@@ -994,9 +1046,83 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         // The display arrangement just changed, so the stored geometry can
         // easily describe a spot that no longer exists — a monitor that was
         // unplugged. Clamping only at launch stranded the note until relaunch.
-        frame = NoteWindow.clampToVisibleScreen(frame)
+        let shown = NoteWindow.fit(frame, into: visibleScreenFrames())
+        guard NoteWindowController.isSame(shown, frame) else {
+            place(shown)
+            return
+        }
         window.setFrame(frame, display: true, animate: false)
         recordFrame(frame, resized: false)
+    }
+
+    /// The screens changed: a note whose frame no screen holds any more is shown
+    /// on one that exists, and one shown that way goes back to its own frame once
+    /// a screen holds it again. The layout is not touched either way.
+    @objc func screensDidChange() {
+        guard !isFadingOut else { return }
+        let wanted = layoutFrame
+        let shown = NoteWindow.fit(wanted, into: visibleScreenFrames())
+        let fits = NoteWindowController.isSame(shown, wanted)
+        if fits && standInFrame == nil { return }
+        place(shown)
+    }
+
+    /// Where the layout puts the window.
+    private var layoutFrame: NSRect {
+        NSRect(
+            x: geometry.x, y: geometry.y, width: geometry.width,
+            height: geometry.collapsed ? NoteWindowController.collapsedHeight : geometry.height
+        )
+    }
+
+    /// Show the window at `frame` without recording it as the person's choice.
+    /// A frame other than the layout's is a stand-in for it.
+    private func place(_ frame: NSRect) {
+        guard let window = window else { return }
+        let isStandIn = !NoteWindowController.isSame(frame, layoutFrame)
+        isPlacingItself = true
+        window.setFrame(frame, display: true, animate: false)
+        isPlacingItself = false
+        standInFrame = isStandIn ? window.frame : nil
+    }
+
+    /// The frame a collapse or expand ends in. On a stand-in it is a stand-in
+    /// too. Otherwise it is the person's own choice, even when the layout has no
+    /// screen: the person asked for the toggle, the system did not move the note.
+    private func setFrameAsToggled(_ frame: NSRect) {
+        guard let window = window else { return }
+        if standInFrame != nil {
+            isPlacingItself = true
+            window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
+            isPlacingItself = false
+            standInFrame = window.frame
+        } else {
+            asPerson {
+                window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
+                recordFrame(frame, resized: true)
+            }
+        }
+    }
+
+    private var layoutFitsScreens: Bool {
+        NoteWindow.isGrabbable(layoutFrame, on: visibleScreenFrames())
+    }
+
+    /// A move or resize that comes from the person, not from the system.
+    private var isPlacedByPerson: Bool {
+        personActionDepth > 0
+            || isPersonDraggingOrResizing?() ?? (NSEvent.pressedMouseButtons != 0 || window?.inLiveResize == true)
+    }
+
+    private func asPerson(_ move: () -> Void) {
+        personActionDepth += 1
+        defer { personActionDepth -= 1 }
+        move()
+    }
+
+    private static func isSame(_ a: NSRect, _ b: NSRect) -> Bool {
+        abs(a.minX - b.minX) < 0.5 && abs(a.minY - b.minY) < 0.5
+            && abs(a.width - b.width) < 0.5 && abs(a.height - b.height) < 0.5
     }
 
     // MARK: - NSTextFieldDelegate (title)
@@ -1020,8 +1146,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         return false
     }
 
-    private func updateDateLabel() {
-        dateLabel.stringValue = relativeDateString(for: clock.now())
+    /// Shows when the note was last changed: now while it is being edited,
+    /// otherwise its saved date.
+    private func updateDateLabel(editedNow: Bool = true) {
+        dateLabel.stringValue = relativeDateString(for: editedNow ? clock.now() : note.updatedAt)
     }
 
     private func relativeDateString(for date: Date) -> String {
@@ -1040,7 +1168,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
     private func performToggleCollapse() {
         guard let window = window else { return }
+        // The bar and the note share their top edge, and the layout's origin is
+        // the bottom edge: it moves by the height the body adds or takes away.
+        let bodyHeight = CGFloat(geometry.height) - NoteWindowController.collapsedHeight
         geometry.collapsed.toggle()
+        geometry.y += Double(geometry.collapsed ? bodyHeight : -bodyHeight)
         layoutStore.set(geometry, for: note.id)
         var frame = window.frame
         if geometry.collapsed {
@@ -1049,6 +1181,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             if let responder = window.firstResponder as? NSView, responder.isDescendant(of: bodyContainer) {
                 window.makeFirstResponder(nil)
             }
+            window.initialFirstResponder = nil
             preCollapseHeight = frame.size.height
             // Focus has left the body: an outside edit held back while the
             // person typed is folded in now, as it is when the window loses key.
@@ -1056,7 +1189,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
             refreshCollapsedTitle()
             titleLabel.isHidden = false
-            dragZone.reportsSingleClick = true
+            dragZone.isCollapsed = true
             bodyContainer.isHidden = true
             bodyHeightZeroConstraint.isActive = true
 
@@ -1066,10 +1199,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             let newHeight = NoteWindowController.collapsedHeight
             frame.origin.y += frame.size.height - newHeight
             frame.size.height = newHeight
-            window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
+            setFrameAsToggled(frame)
         } else {
             titleLabel.isHidden = true
-            dragZone.reportsSingleClick = false
+            dragZone.isCollapsed = false
             bodyContainer.isHidden = false
             bodyHeightZeroConstraint.isActive = false
 
@@ -1081,9 +1214,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             frame.size.height = newHeight
             // A collapsed note dragged near the bottom edge would otherwise
             // expand straight off the screen, leaving only its title bar.
-            frame = NoteWindow.clampToVisibleScreen(frame)
-            window.setFrame(frame, display: true, animate: !Appearance.reduceMotion)
-            recordFrame(frame, resized: true)
+            frame = NoteWindow.clamp(frame, into: visibleScreenFrames())
+            setFrameAsToggled(frame)
+            window.initialFirstResponder = textView
             window.makeFirstResponder(textView)
         }
         updateExpandButtonIcon()
@@ -1133,7 +1266,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             // so a content-only edit has to refresh it too.
             refreshCollapsedTitle()
             editor.replaceText(note.content)
-            updateDateLabel()
+            updateDateLabel(editedNow: false)
         }
     }
 

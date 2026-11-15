@@ -11,6 +11,7 @@ import XCTest
     private var clock: ManualClock!
     private var scheduler: TestScheduler!
     private var desk: DeskController!
+    private var undo: UndoCenter!
     private var welcomeID: UUID!
 
     override func setUp() async throws {
@@ -22,8 +23,9 @@ import XCTest
         scheduler = TestScheduler(clock: clock)
         store = NoteStore(rootURL: root, clock: clock)
         isolated = IsolatedSettings()
+        undo = UndoCenter(clock: clock)
         desk = DeskController(
-            store: store, settings: isolated.settings, clock: clock, undo: UndoCenter(clock: clock),
+            store: store, settings: isolated.settings, clock: clock, undo: undo,
             recovery: RecoveryFiles(settings: isolated.settings, store: store, clock: clock),
             scheduler: scheduler,
             layout: DeviceLayoutStore(url: root.appendingPathComponent("layout.json"), scheduler: TestScheduler())
@@ -69,6 +71,24 @@ import XCTest
         }
     }
 
+    // MARK: - Ticking is not typing
+
+    func testATickedBoxDoesNotTakeCommandZAwayFromAnUndoOffer() throws {
+        let controller = try openWelcome()
+        var other = Note.makeNew(frame: NSRect(x: 40, y: 40, width: 240, height: 200), now: clock.now())
+        other.content = "to archive"
+        store.save(other)
+        desk.archiveNote(other)
+        defer { undo.dismiss() }
+        XCTAssertTrue(undo.hasPendingOffer)
+
+        try perform(.collapse)
+        XCTAssertEqual(checked(controller), [.collapse])
+        undo.undoLastAction(nil)
+
+        XCTAssertNotNil(store.loadActive().first { $0.id == other.id }, "the app's own edit counted as the person typing")
+    }
+
     // MARK: - One event, one box
 
     private func assertOnlyTicks(_ step: WelcomeNote.Step, file: StaticString = #filePath, line: UInt = #line) throws {
@@ -109,7 +129,7 @@ import XCTest
         controller.toggleCollapse()
 
         let bar = try XCTUnwrap(controller.window?.contentView.flatMap { find(CenteredTitleLabel.self, in: $0) })
-        XCTAssertEqual(bar.accessibilityLabel(), "Welcome, 1 of 4 tasks done, collapsed note, click to expand")
+        XCTAssertEqual(bar.accessibilityLabel(), "Welcome, 1 of 4 tasks done, collapsed note, press to expand")
     }
 
     func testCollapsingAnyOtherNoteCountsToo() throws {

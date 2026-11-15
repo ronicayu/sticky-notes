@@ -43,6 +43,44 @@ import XCTest
         XCTAssertEqual(retried, 1)
     }
 
+    private func typeIntoSomeNote() {
+        NotificationCenter.default.post(name: NSText.didChangeNotification, object: NSTextView())
+    }
+
+    func testCommandZGoesToTheTextOnceThePersonTypesAfterTheOffer() {
+        let center = UndoCenter(clock: clock)
+        var ran = 0
+        center.offerUndoForLabelRemoval("work") { ran += 1 }
+        defer { center.dismiss() }
+
+        typeIntoSomeNote()
+        center.undoLastAction(nil)
+
+        XCTAssertEqual(ran, 0, "⌘Z undid the offer instead of the typing")
+        XCTAssertTrue(center.hasPendingOffer, "the offer was spent by a ⌘Z that was meant for the typing")
+    }
+
+    func testTypingBeforeTheOfferDoesNotTakeCommandZAwayFromIt() {
+        let center = UndoCenter(clock: clock)
+        var ran = 0
+        typeIntoSomeNote()
+        center.offerUndoForLabelRemoval("work") { ran += 1 }
+
+        center.undoLastAction(nil)
+
+        XCTAssertEqual(ran, 1)
+    }
+
+    func testANoticeWithNothingToUndoNeverTakesCommandZ() {
+        let center = UndoCenter(clock: clock)
+        center.tellDeletedElsewhere()
+        defer { center.dismiss() }
+
+        center.undoLastAction(nil)
+
+        XCTAssertTrue(center.hasPendingOffer, "⌘Z dismissed a message that had nothing to undo")
+    }
+
     func testDismissingDropsTheOffer() {
         let center = UndoCenter(clock: clock)
         center.offerUndoForHiding(count: 1, label: nil) { XCTFail("undone after dismiss") }

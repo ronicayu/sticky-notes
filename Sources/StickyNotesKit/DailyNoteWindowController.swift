@@ -16,10 +16,15 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
 
     private var state: DailyNoteState
 
+    /// Brings the app to the front when the person opens the note. The desk
+    /// sets it, so one replacement covers every window.
+    var activateApp: () -> Void = { NSApp.activate(ignoringOtherApps: true) }
+
     private let dragZone: NoteDragZone
     private let dateLabel: CenteredTitleLabel
     private let closeButton: NSButton
     private let collapseButton: NSButton
+    private let colorButton: NSButton
     private let backgroundView: HoverTrackingView
     /// The Markdown editor this window hosts. Its pasted images go to the same
     /// attachments folder as everyone else's, although the daily note itself is
@@ -91,6 +96,11 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
             tooltip: "Collapse / expand"
         )
 
+        colorButton = DailyNoteWindowController.makeChromeButton(
+            symbol: "paintpalette",
+            tooltip: "Change color"
+        )
+
         editor = MarkdownEditorController(store: store, clock: clock, options: .daily)
 
         scrollView = NSScrollView()
@@ -110,6 +120,11 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
         closeButton.action = #selector(hideNote)
         collapseButton.target = self
         collapseButton.action = #selector(toggleCollapse)
+        colorButton.target = self
+        colorButton.action = #selector(showColorMenu)
+        colorButton.setAccessibilityRole(.menuButton)
+        colorButton.setAccessibilityLabel("Color")
+        colorButton.setAccessibilityValue(state.color.displayName)
         dragZone.delegate = self
 
         dailyDocument.isEditing = { [weak self] in
@@ -133,7 +148,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
         // already opened at the right height so this is just sizing the
         // scroll view side of things.
         if state.collapsed { applyCollapse(true, animated: false) }
-        dragZone.reportsSingleClick = state.collapsed
+        dragZone.isCollapsed = state.collapsed
     }
 
     private static func makeChromeButton(symbol: String, tooltip: String) -> NSButton {
@@ -171,6 +186,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
         backgroundView.addSubview(dateLabel)
         backgroundView.addSubview(closeButton)
         backgroundView.addSubview(collapseButton)
+        backgroundView.addSubview(colorButton)
         backgroundView.addSubview(scrollView)
 
         window.contentView = content
@@ -186,7 +202,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
             dragZone.heightAnchor.constraint(equalToConstant: DailyNoteWindowController.chromeHeight),
 
             dateLabel.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 30),
-            dateLabel.trailingAnchor.constraint(equalTo: collapseButton.leadingAnchor, constant: -8),
+            dateLabel.trailingAnchor.constraint(equalTo: colorButton.leadingAnchor, constant: -8),
             dateLabel.topAnchor.constraint(equalTo: dragZone.topAnchor),
             dateLabel.bottomAnchor.constraint(equalTo: dragZone.bottomAnchor),
 
@@ -199,6 +215,11 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
             collapseButton.centerYAnchor.constraint(equalTo: dragZone.centerYAnchor),
             collapseButton.widthAnchor.constraint(equalToConstant: 13),
             collapseButton.heightAnchor.constraint(equalToConstant: 13),
+
+            colorButton.trailingAnchor.constraint(equalTo: collapseButton.leadingAnchor, constant: -8),
+            colorButton.centerYAnchor.constraint(equalTo: dragZone.centerYAnchor),
+            colorButton.widthAnchor.constraint(equalToConstant: 13),
+            colorButton.heightAnchor.constraint(equalToConstant: 13),
 
             scrollView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 6),
             scrollView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -6),
@@ -223,7 +244,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
     @objc private func applyAppearanceColors() {
         backgroundView.layer?.backgroundColor = NSColor(hex: state.color.bodyHex)?.cgColor
         dateLabel.textColor = Appearance.chromeInk
-        for button in [closeButton, collapseButton] {
+        for button in [closeButton, collapseButton, colorButton] {
             button.contentTintColor = Appearance.chromeInk
         }
         editor.applyColors()
@@ -275,8 +296,31 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
         DailyNote.saveState(state, settings: settings)
     }
 
+    var color: NoteColor { state.color }
+
+    @objc private func showColorMenu() {
+        let menu = NSMenu()
+        for color in NoteColor.allCases {
+            let item = NSMenuItem(title: color.displayName, action: #selector(pickColor(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = color.rawValue
+            item.image = NoteWindowController.colorSwatch(for: color)
+            if color == state.color { item.state = .on }
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: colorButton.bounds.minX, y: colorButton.bounds.maxY + 4), in: colorButton)
+    }
+
+    @objc private func pickColor(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let color = NoteColor(rawValue: raw) else { return }
+        setColor(color)
+    }
+
     func setColor(_ color: NoteColor) {
+        guard color != state.color else { return }
         state.color = color
+        colorButton.setAccessibilityValue(color.displayName)
         backgroundView.layer?.backgroundColor = NSColor(hex: color.bodyHex)?.cgColor
         DailyNote.saveState(state, settings: settings)
     }
@@ -300,16 +344,21 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
     ///   deliberate enough act to create the file, so it shows up in Obsidian
     ///   whether or not they end up typing. Pass false for the launch-time
     ///   restore: that isn't a fresh choice, and it runs unattended on every
-    ///   Mac, which is the shape of thing that collides.
+    ///   Mac, which is the shape of thing that collides. It also does not take
+    ///   key status or activate the app: the person is working in something else.
     func show(userInitiated: Bool = true) {
         // Re-resolve in case the day rolled over while hidden (the
         // belt-and-suspenders companion to the midnight timer and wake
         // observer — covers a reopen that races ahead of either).
         dailyDocument.rolloverIfNeeded(now: clock.now())
         if userInitiated { dailyDocument.createTodaysFileIfMissing() }
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if userInitiated {
+            showWindow(nil)
+            window?.makeKeyAndOrderFront(nil)
+            activateApp()
+        } else {
+            window?.orderFront(nil)
+        }
         persistVisibility(true)
     }
 
@@ -321,9 +370,24 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
 
     // MARK: - Collapse / expand
 
-    @objc private func toggleCollapse() {
+    var isCollapsed: Bool { state.collapsed }
+
+    /// Open the find bar over the body, for ⌘F. A collapsed note shows no body.
+    func showFindBar() {
+        guard !state.collapsed, let window = window else { return }
+        window.makeFirstResponder(textView)
+        let show = NSMenuItem()
+        show.tag = NSTextFinder.Action.showFindInterface.rawValue
+        textView.performTextFinderAction(show)
+    }
+
+    @objc func toggleCollapse() {
         let target = !state.collapsed
         if target {
+            // Take focus out of the hidden body so typing cannot reach text nobody can see.
+            if let responder = window?.firstResponder as? NSView, responder.isDescendant(of: scrollView) {
+                window?.makeFirstResponder(nil)
+            }
             // Capture the live expanded height so a later expand restores it.
             if let frame = window?.frame {
                 preCollapseHeight = frame.size.height
@@ -331,7 +395,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
             }
         }
         state.collapsed = target
-        dragZone.reportsSingleClick = target
+        dragZone.isCollapsed = target
         applyCollapse(target, animated: true)
         DailyNote.saveState(state, settings: settings)
     }
@@ -339,11 +403,6 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
     /// Re-apply styling after the shared text size changes.
     func restyleForTextSize() {
         editor.applyTextSize()
-    }
-
-    func dragZoneDidClick() {
-        guard DailyNote.loadState(settings: settings).collapsed else { return }
-        dragZoneDidDoubleClick()
     }
 
     func dragZoneDidEndDrag(suppressSnapping: Bool) {

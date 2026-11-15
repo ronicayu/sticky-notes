@@ -9,6 +9,9 @@ struct Toast {
     let undoTitle: String
     let expiry: Date
     let undo: () -> Void
+    /// False for a message with nothing to take back, whose "OK" is only a way
+    /// to dismiss it. ⌘Z is not its to take.
+    let takesUndoShortcut: Bool
 
     /// How long a toast stays up. Long enough to notice and react to, short
     /// enough not to become furniture.
@@ -19,6 +22,16 @@ struct Toast {
         self.undoTitle = undoTitle
         self.expiry = now.addingTimeInterval(Toast.lifetime)
         self.undo = undo
+        self.takesUndoShortcut = true
+    }
+
+    /// A message to read, dismissed with "OK".
+    init(notice message: String, now: Date) {
+        self.message = message
+        self.undoTitle = "OK"
+        self.expiry = now.addingTimeInterval(Toast.lifetime)
+        self.undo = {}
+        self.takesUndoShortcut = false
     }
 
     func hasExpired(at now: Date) -> Bool { now >= expiry }

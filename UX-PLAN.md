@@ -75,6 +75,8 @@ Borderless windows give no hint they resize. Show a subtle drag-dots glyph in th
 ### 3.4 Collapsed-note ergonomics
 18px is a hostile click target and the only affordance is knowing to double-click. Make a **single click on a collapsed note's bar expand it** (drag still drags — distinguish click from drag by movement threshold, which `NoteDragZone.mouseDown` can do since it owns the event). Double-click keeps toggling both ways. Raise collapsed height to 22px to match the expanded strip; migrate nothing — it's display-only.
 
+> **Reversed 2026-11-15 (owner):** single-click expand is gone. People click a collapsed note to pick it up and move it, and it opened under them. Double-click toggles both ways; the collapsed bar's tooltip says so, and VoiceOver's press still expands.
+
 ### 3.5 Delete dead code while in there
 `ColorPickerBar` in `NoteChrome.swift` is never constructed. Remove it.
 

@@ -39,6 +39,7 @@ import KeyboardShortcuts
         self.undo = undo
         self.noteMenu = NoteMenu(
             keyNote: { [weak desk] in desk?.focusedController() },
+            keyDaily: { [weak desk] in desk?.focusedDailyNote() },
             canCycle: { [weak desk] in desk?.canCycleNotes ?? false },
             cycle: { [weak desk] step in desk?.cycleNotes(by: step) }
         )
@@ -202,7 +203,7 @@ import KeyboardShortcuts
         menu.addItem(notesItem)
 
         menu.addItem(.separator())
-        add("Settings…  ⌘,", #selector(StorageCoordinator.openSettings), target: storage, to: menu)
+        add("Settings…", #selector(StorageCoordinator.openSettings), target: storage, key: ",", to: menu)
         add("Show Storage Folder", #selector(StorageCoordinator.revealStorage), target: storage, to: menu)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

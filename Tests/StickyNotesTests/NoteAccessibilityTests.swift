@@ -102,6 +102,19 @@ import XCTest
         XCTAssertEqual(all(LabelChipView.self, in: controller).map(\.labelName), ["home", "work", "later"])
     }
 
+    func testTypingAfterALabelRemovalLeavesCommandZToTheText() throws {
+        let controller = try open(labels: ["home", "work"])
+        let chip = try XCTUnwrap(all(LabelChipView.self, in: controller).first { $0.labelName == "work" })
+        defer { undo.dismiss() }
+
+        chip.performClick(nil)
+        controller.textView.string = "typo"
+        controller.textView.didChangeText()
+        undo.undoLastAction(nil)
+
+        XCTAssertEqual(controller.labels, ["home"], "⌘Z put the label back instead of undoing the typing")
+    }
+
     func testTakingBackALabelRemovalTwiceDoesNotDuplicateTheLabel() throws {
         let controller = try open(labels: ["work"])
         var restore: (() -> Void)?
@@ -140,7 +153,7 @@ import XCTest
         XCTAssertFalse(bar.isHidden)
         XCTAssertTrue(bar.isAccessibilityElement())
         XCTAssertEqual(bar.accessibilityRole(), .button)
-        XCTAssertEqual(bar.accessibilityLabel(), "Groceries, collapsed note, click to expand")
+        XCTAssertEqual(bar.accessibilityLabel(), "Groceries, collapsed note, press to expand")
 
         XCTAssertTrue(bar.accessibilityPerformPress())
         XCTAssertFalse(controller.isCollapsed)
@@ -152,7 +165,7 @@ import XCTest
         controller.toggleCollapse()
         let bar = try XCTUnwrap(all(CenteredTitleLabel.self, in: controller).first)
 
-        XCTAssertEqual(bar.accessibilityLabel(), "Untitled, 1 of 2 tasks done, collapsed note, click to expand")
+        XCTAssertEqual(bar.accessibilityLabel(), "Untitled, 1 of 2 tasks done, collapsed note, press to expand")
     }
 
     func testTheDailyNoteTitleIsPlainText() {
@@ -178,14 +191,22 @@ import XCTest
         XCTAssertEqual(actions.map(\.name), ["Collapse note"])
         XCTAssertTrue(try XCTUnwrap(actions[0].handler)())
         XCTAssertTrue(controller.isCollapsed)
+        XCTAssertEqual(strip.toolTip, "Double-click to expand")
 
         actions = try XCTUnwrap(strip.accessibilityCustomActions())
         XCTAssertEqual(actions.map(\.name), ["Expand note"])
         XCTAssertTrue(try XCTUnwrap(actions[0].handler)())
         XCTAssertFalse(controller.isCollapsed)
+        XCTAssertNil(strip.toolTip)
     }
 
     // MARK: - Chrome buttons
+
+    /// The colour menu also holds the float level, so the hover text names both.
+    func testTheColorButtonTooltipNamesTheFloatLevelToo() throws {
+        let color = try button(labelled: "Color and float level", in: try open())
+        XCTAssertEqual(color.toolTip, "Color and float level")
+    }
 
     func testTheChromeButtonsSayWhatTheyDoAndTheColorButtonSaysTheColor() throws {
         let controller = try open()
