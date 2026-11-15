@@ -39,7 +39,7 @@ same Mac, so the merge and lineage rules stay. What only matters for two people 
 typing at once is not worth extra machinery: R8 and the two-Mac form of R10 are dropped, and F7/F8
 are fixed only through the shared document in 0.1, with no two-Mac-specific code.
 
-Phases 0–1 are foundations and must land first. Phases 2–4 are independent of each other.
+Phases 0–1 are foundations and must land first. Phases 2 and 3 are independent of each other.
 Phase 5 (distribution) needs only Phase 0's build-number change and an owner decision.
 
 ## Ground rules for the implementer
