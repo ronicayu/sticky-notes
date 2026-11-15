@@ -1,7 +1,7 @@
 # Model notes (v3)
 
 Code modelled: commit `c16cef1` (branch `masterpiece`, Phase 0 and 1 complete) with the fixes of N1-N6 (`414f4d9`,
-`5d21840`). Every file:line below is `git show c16cef1:<path>`; the fixes moved the lines of `ConflictResolver`,
+`5d21840`) and of the review (`12cd68b`). Every file:line below is `git show c16cef1:<path>`; the fixes moved the lines of `ConflictResolver`,
 `NoteStore`, `NoteDocument`, `DailyDocument`, `DeskController` and `WriteLineage` (now in `NoteStore.swift`). HEAD was `6838780` when the work began; later commits (to `83e94dc`) change
 geometry and comments in `NoteDocument.swift` and `DailyDocument.swift` and add layout pruning to
 `DeskController.reconcileOpenWindows`, which do not change a modelled transition. Re-checked at `9f58340`:
@@ -21,7 +21,7 @@ in `out-v3/`.
 | `DailyDocument.tla` | Model (b): today's daily note across midnight, this Mac plus the other Mac through iCloud |
 | `n-*.cfg`, `d-*.cfg`, `regress-*.cfg` | Configs; `regress-note-*` and `regress-daily-*` are the faithfulness configs (one per fixed bug, N1-N6 included) |
 | `note-doc-view.mjs`, `daily-doc-view.mjs` | Chart views |
-| `out-v4/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config on the fixed code (`out-v3/` is the run of `c16cef1`) |
+| `out-v5/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config on the fixed code (`out-v3/` is the run of `c16cef1`) |
 | `run-all.sh` | Reruns every config and the base check |
 
 ## Switch convention
@@ -33,7 +33,8 @@ in `out-v3/`.
   were `ALLOW_*` = TRUE for the code as it was; after the fixes they follow the same convention as the older
   switches: FALSE is the fixed code, TRUE brings the `c16cef1` behaviour back. The configs that showed each finding
   are now `regress-*` configs with the switch TRUE, and the plain config of the same chain has it FALSE.
-- Environment constants (`ALLOW_EXTERNAL_EDIT`, ...) only switch an actor on.
+- `ALLOW_OLD_RESTORE_KEEPS_BUFFER` (F1, `414f4d9`) and `ALLOW_OLD_STALE_STANDS_IN` (F2, `5d21840`) are the two regressions the review found.
+- Environment constants (`ALLOW_EXTERNAL_EDIT`, ...) only switch an actor on; `ALLOW_EXTERNAL_RESTORE` switches on `ExternalRestore`: an earlier own write is put back on purpose, and the tokens it re-adds count as typed by the person (a stale rewrite adds the tokens it removes to `extRemoved` instead).
 
 ## Abstractions
 
@@ -51,9 +52,10 @@ in `out-v3/`.
   `MergeIn`, `Opened`, daily `Adopt`) that lacks lines of what it showed (or of the newest write when it started
   from the file), and `brk` remembers that. Reads change nothing. `DropsOwn`: an own conflict version that is not
   the newest write is dropped while the file covers the newest write's text (`Covered`) or is an earlier write of
-  ours (`StaleFile`: the sweep judges the newest text in its place and writes it back). `MergeIn` keeps the
-  buffer, with no block, for a held-back outside body that is an earlier own write other than the newest, when the
-  buffer has unsaved edits. `ALLOW_OLD_LINEAGE_RESET` brings back the c16cef1 rules: a read ends the lineage unless
+  ours (`StaleFile`: if the newest text covers the file it stands in and is written back, `stands`; if not, the file may be a restore on purpose and the newest text is merged as one more version, `added`). `MergeIn` keeps the
+  buffer, with no block, for a held-back outside body that is an earlier own write other than the newest and that
+  the base covers (`ALLOW_OLD_RESTORE_KEEPS_BUFFER` drops the last condition), when the buffer has unsaved edits.
+  `ALLOW_OLD_STALE_STANDS_IN` makes the newest text stand in whether or not it covers the file. `ALLOW_OLD_LINEAGE_RESET` brings back the c16cef1 rules: a read ends the lineage unless
   the file holds the newest write, a quit ends it, nothing else does.
 - Provenance for `NoSpuriousConflictBlock`: a block under a divider is warranted when each side holds text the
   other lacks and one side's extra text is outside-authored (`Outside` = `x`, `y` / `b2`). Two versions of this
@@ -87,7 +89,7 @@ in `out-v3/`.
 | `Restore`, `DeleteForever`, `RestoreFromTrash`, `MonthPasses` | NoteStore.swift 518-530, 545-574, 580-590 |
 | `WindowHears` | `NoteStore.handleFileSystemEvent` 979-983 -> `NoteDocument.storeDidChange` 245-253 -> `externalChange` 257-297 -> `apply` (`WriteLineage.adopted`, the `Apply` of the model) |
 | `Reconcile` | `DeskController.reconcileOpenWindows` 379-403, `isGone` 409-415, `closeKeepingText` 420-425 -> `NoteDocument.close(.externalDeletion)` 614-623 |
-| `ConflictSweep` | `NoteStore.resolveConflict` with `beforeResolvingConflicts` (DeskController 39-41 -> `flushPendingSave`), `ConflictResolver.standingInForStaleFile` (`StaleFile`), `versionsToMerge` (`DropsOwn`) and `merge` (blank winner, N2); a failed write or flush arms `settleConflictRetry` (N6) |
+| `ConflictSweep` | `NoteStore.resolveConflict` with `beforeResolvingConflicts` (DeskController 39-41 -> `flushPendingSave`), `ConflictResolver.handlingStaleFile` (`StaleFile`, `stands`, `added`), `versionsToMerge` (`DropsOwn`) and `merge` (blank winner, N2); a failed write or flush arms `settleConflictRetry` (N6) |
 | persist cases | `save` 272-326 (`.gone` 305, `.failed(locationUnknown)` 295), `writeIfUnchanged` 330-349; `NoteDocument.persist` 486-525; `keepTextElsewhere` 544-564 via `whereIs` 372-394, `save(in:)` 414-425, `saveRecoveredCopy` 430-448 |
 | `ExternalEdit`, `ExternalMetaWrite`, `ObsidianStaleRewrite` | Obsidian or the other Mac writes the file |
 | `ExternalConflict`, `ICloudSelfConflict` | iCloud keeps a conflict version (`NSFileVersion`); self-conflict is hypothesis H1 of the first report |
@@ -106,7 +108,7 @@ in `out-v3/`.
 | `SwitchAway` | `blur` 367-369 |
 | `WatcherDelivers` | `storeDidChange` 381-401: flush + heal when due (387-388), `resolveConflictVersions` (flush must succeed, else or on a failed merge write `armConflictRetry`, N6), read, adopt or `externalChange` |
 | heal | `DailyNote.healDuplicates` (DailyDocument.swift 415-428) |
-| conflict merge | `DailyFile.resolveConflictsReporting` with `WriteLineage` (write recorded in `writeRecording`; `standingInForStaleFile`, `versionsToMerge`) |
+| conflict merge | `DailyFile.resolveConflictsReporting` with `WriteLineage` (write recorded in `writeRecording`; `handlingStaleFile`, `versionsToMerge`) |
 | `Upload`, `Download`, `Evict`, `SelfConflict`, `BEditsOnline`, `BEditsOffline`, `BCreatesOffline`, `BUploads` | iCloud Drive and the other Mac |
 
 ## Predictions and outcome

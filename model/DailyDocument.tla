@@ -172,7 +172,13 @@ ResolveConfWith(t, w) ==
     THEN IF ALLOW_OLD_NO_MERGE_RETRY THEN t ELSE [t EXCEPT !.unseen = TRUE]
   ELSE LET u == Rd(t, 2)
            disk == u.lf[2].c
-           cur == IF StaleFile(u, 2) THEN u.linNew[2] ELSE disk
+           \* An earlier write of ours put back: our newest text stands in for it when it covers the
+           \* file; if not, the file may be a restore made on purpose, so both texts are merged.
+           stands == StaleFile(u, 2) /\ Covered(disk, u.linNew[2])
+           added == StaleFile(u, 2) /\ ~stands
+           cur == IF stands THEN u.linNew[2]
+                  ELSE IF added THEN MergeVersions(disk, u.linNew[2], FALSE, TRUE).c
+                  ELSE disk
            dropOwn == DropsOwn(u, 2, u.conf)
            cleared == [u EXCEPT !.hasConf = FALSE, !.conf = <<>>, !.confKind = "none"]
            win == IF w /\ u.confKind = "other" THEN u.conf ELSE cur

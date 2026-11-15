@@ -32,6 +32,7 @@ CONSTANTS
   ALLOW_EXTERNAL_EDIT,            \* Obsidian / the other Mac appends a line to the file
   ALLOW_META_WRITE,               \* frontmatter-only rewrite: same text, new bytes
   ALLOW_OBSIDIAN_STALE_REWRITE,   \* Obsidian writes back an older copy of our text
+  ALLOW_EXTERNAL_RESTORE,         \* the other Mac puts an earlier write of ours back on purpose: the restored text counts as the person's
   ALLOW_ICLOUD_SELF_CONFLICT,     \* iCloud keeps an older write of THIS Mac as a conflict version
   ALLOW_OTHER_MAC_CONFLICT,       \* the other Mac, offline, edited an older copy: conflict version
   ALLOW_SWEEP,                    \* the conflict sweep runs
@@ -45,6 +46,8 @@ CONSTANTS
   \* --- findings N1-N6 of the re-run model, fixed after c16cef1 (TRUE = bring the c16cef1 behaviour back) ---
   ALLOW_OLD_OWN_COPY_BLOCK,       \* N1 (c16cef1): an outside rewrite back to an older copy of our text is appended as a conflict
   ALLOW_OLD_BLANK_WINNER_BLOCK,   \* N2: a blank file is not replaced by a conflict version that has text
+  ALLOW_OLD_RESTORE_KEEPS_BUFFER, \* 414f4d9: a held-back outside body equal to an earlier own write kept the buffer even when it added text the base lacks
+  ALLOW_OLD_STALE_STANDS_IN,      \* 5d21840: a file equal to an earlier own write was always replaced by our newest text in the sweep
   ALLOW_OLD_LINEAGE_RESET,        \* N4: the write lineage ends at a foreign read or a relaunch, so an older own save merges as a conflict
   ALLOW_OLD_LINEAGE_NEEDS_NEWEST, \* N5: an older own save is dropped only while the file is exactly our newest write
   ALLOW_OLD_CLOSE_REFUSED_UNREADABLE, \* N3: the person's close is refused for good while the note's file cannot be read
@@ -171,6 +174,7 @@ MarkPersisted(t) == [t EXCEPT !.base = t.buf, !.unsaved = FALSE, !.stranded = FA
 MergeIn(t, ext, known) ==
   LET r == IF ALLOW_OLD_UNBASED_MERGE THEN MergeVersions(t.buf, ext, ALLOW_OLD_SUBSTRING_MERGE, ~ALLOW_OLD_BLANK_WINNER_BLOCK)
            ELSE IF ~ALLOW_OLD_OWN_COPY_BLOCK /\ t.buf # t.base /\ ext \in t.lin /\ ext # t.linNew
+                   /\ (ALLOW_OLD_RESTORE_KEEPS_BUFFER \/ Covered(ext, t.base))
              THEN [c |-> t.buf, blk |-> FALSE, sp |-> FALSE]      \* N1: an earlier write of ours put back adds nothing (not the newest: a merge may have put another writer's text in it)
            ELSE ThreeWay(t.base, t.buf, ext)
   IN [Adopted(t, t.buf, r.c) EXCEPT !.buf = r.c, !.base = ext, !.hasPend = FALSE, !.pend = <<>>,
@@ -456,7 +460,13 @@ ConflictSweep ==
             /\ (conflictWins => s.confKind = "ext")  \* an older own save is never the newest
             /\ LET t == Rd(flushed.st)
                    dropOwn == DropsOwn(t, t.conflict)
-                   cur == IF StaleFile(t) THEN t.linNew ELSE t.disk
+                   \* The file is an earlier write of ours. If our newest text covers it, that text stands in
+                   \* for it; if not, it may be a restore made on purpose, so both texts are merged.
+                   stands == StaleFile(t) /\ (ALLOW_OLD_STALE_STANDS_IN \/ Covered(t.disk, t.linNew))
+                   added == StaleFile(t) /\ ~stands
+                   cur == IF stands THEN t.linNew
+                          ELSE IF added THEN MergeVersions(t.disk, t.linNew, ALLOW_OLD_SUBSTRING_MERGE, ~ALLOW_OLD_BLANK_WINNER_BLOCK).c
+                          ELSE t.disk
                    w == IF conflictWins THEN t.conflict ELSE cur
                    l == IF conflictWins THEN cur ELSE t.conflict
                    r == IF dropOwn \/ t.conflict = cur THEN [c |-> cur, blk |-> FALSE, sp |-> FALSE]
@@ -492,6 +502,17 @@ ObsidianStaleRewrite ==
   /\ s' = [s EXCEPT !.disk = s.prev, !.diskOwn = FALSE, !.unseen = TRUE, !.mtimeOld = FALSE,
                     !.fp = IF s.fp = "ok" THEN "stale" ELSE s.fp,
                     !.extRemoved = s.extRemoved \cup (Toks(s.disk) \ Toks(s.prev))]
+
+\* The other Mac (or Obsidian's undo) puts an earlier write of ours back on purpose. Unlike a
+\* stale rewrite, the text it re-adds counts as the person's: losing it is a loss.
+ExternalRestore ==
+  /\ ALLOW_EXTERNAL_RESTORE /\ s.loc = {"active"}
+  /\ \E e \in s.lin :
+       /\ e # s.disk /\ e # s.linNew
+       /\ s' = [s EXCEPT !.disk = e, !.diskOwn = FALSE, !.unseen = TRUE, !.mtimeOld = FALSE,
+                         !.fp = IF s.fp = "ok" THEN "stale" ELSE s.fp,
+                         !.typed = s.typed \cup (Toks(e) \ Toks(s.disk)),
+                         !.extRemoved = s.extRemoved \cup (Toks(s.disk) \ Toks(e))]
 
 \* The other Mac, offline, edited an older copy: iCloud keeps one version as the file
 \* and the other as an unresolved conflict version.
@@ -535,7 +556,7 @@ Next ==
   \/ CloseNote \/ PanelArchive \/ Quit \/ Relaunch \/ Restore \/ DeleteForever
   \/ RestoreFromTrash \/ MonthPasses
   \/ WindowHears \/ Reconcile \/ ConflictSweep
-  \/ ExternalEdit \/ ExternalMetaWrite \/ ObsidianStaleRewrite \/ ExternalConflict
+  \/ ExternalEdit \/ ExternalMetaWrite \/ ObsidianStaleRewrite \/ ExternalRestore \/ ExternalConflict
   \/ ICloudSelfConflict \/ ExternalMove \/ FileVanishes \/ FileReturns
   \/ DiskFills \/ DiskFrees \/ PlaceholderAppears \/ PlaceholderGoes
 
