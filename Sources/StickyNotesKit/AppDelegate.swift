@@ -51,6 +51,10 @@ import AppKit
     /// URL handling has to be registered before launch finishes, or a URL that
     /// launched the app is delivered before anyone is listening.
     public func applicationWillFinishLaunching(_ notification: Notification) {
+        // A read of a file that is only in iCloud then fails at once instead of
+        // freezing the app until it has downloaded; every reader treats that as
+        // "not here yet".
+        DatalessFiles.refuseMaterializingOnThisThread()
         capture.registerURLHandlerAndServices()
         Appearance.startObserving()
     }

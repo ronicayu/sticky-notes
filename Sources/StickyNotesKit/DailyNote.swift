@@ -237,6 +237,7 @@ enum DailyNote {
     static func healDuplicates(
         in directory: URL,
         now: Date = Date(),
+        dataless: DatalessGuard = DatalessGuard(),
         dispose: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) },
         write: (URL, String, Fingerprint) -> Bool = { DailyFile.replaceFile(at: $0, with: $1, expecting: $2) != nil }
     ) -> Int {
@@ -255,9 +256,11 @@ enum DailyNote {
             let original = directory
                 .appendingPathComponent(base)
                 .appendingPathExtension(duplicate.pathExtension)
+            // A file that is not downloaded is left alone: the pair is healed once both
+            // are here, and reading one now would wait for the download.
             guard fm.fileExists(atPath: original.path),
-                  let duplicateBody = try? String(contentsOf: duplicate, encoding: .utf8),
-                  let originalData = try? Data(contentsOf: original),
+                  let duplicateBody = dataless.readText(duplicate),
+                  case let .bytes(originalData) = dataless.read(original),
                   let originalBody = String(data: originalData, encoding: .utf8)
             else { continue }
 
@@ -324,9 +327,11 @@ enum DailyNote {
     /// Load the template body for `date`, expanding the supported subset of
     /// Obsidian Daily Notes / Templates tokens. Returns nil when no template
     /// is configured or the file can't be read.
-    static func renderedTemplate(for date: Date, fileURL: URL, settings: Settings) -> String? {
+    static func renderedTemplate(
+        for date: Date, fileURL: URL, settings: Settings, dataless: DatalessGuard = DatalessGuard()
+    ) -> String? {
         guard let templateURL = resolvedTemplateURL(settings: settings),
-              let raw = try? String(contentsOf: templateURL, encoding: .utf8) else { return nil }
+              let raw = dataless.readText(templateURL) else { return nil }
         return expandTokens(in: raw, for: date, fileURL: fileURL)
     }
 

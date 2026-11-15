@@ -17,11 +17,14 @@ final class DailyFile: NoteRepository {
     var otherVersionsRemover: (URL) -> Void = NoteStore.systemRemoveOtherVersions(of:)
     private let clock: AppClock
     private let id = UUID()
+    /// Which files are in iCloud and not on this Mac; such a file is never read.
+    let dataless = DatalessGuard()
     /// This Mac's name as a conflict version's saving computer is compared with it.
     lazy var computerName: String? = NoteStore.systemComputerName
 
     init(clock: AppClock) {
         self.clock = clock
+        dataless.now = { clock.now() }
     }
 
     func note(body: String, updatedAt: Date? = nil) -> Note {
@@ -43,11 +46,20 @@ final class DailyFile: NoteRepository {
         case missing
         /// There is a file, or one waiting in iCloud, and it cannot be read.
         case unreadable
+        /// The file is in iCloud and not on this Mac. It was not read; its download
+        /// has been asked for.
+        case notDownloaded
         case file(Data, String)
     }
 
     private func read(_ url: URL) -> OnDisk {
-        guard let data = try? Data(contentsOf: url) else {
+        let data: Data
+        switch dataless.read(url) {
+        case let .bytes(bytes):
+            data = bytes
+        case .notDownloaded:
+            return .notDownloaded
+        case .unreadable:
             let present = FileManager.default.fileExists(atPath: url.path) || Self.hasICloudPlaceholder(for: url)
             return present ? .unreadable : .missing
         }
@@ -67,6 +79,8 @@ final class DailyFile: NoteRepository {
             switch read(url) {
             case .unreadable:
                 return .failed(SaveError.unreadableOnDisk)
+            case .notDownloaded:
+                return .failed(SaveError.notDownloadedYet)
             case let .file(data, body):
                 let current = Fingerprint(of: data)
                 if current != expected {
@@ -105,9 +119,10 @@ final class DailyFile: NoteRepository {
     /// does, so it vouches for nothing; a template the person asked for is their own
     /// write (`asMerge: false`).
     static func replaceFile(
-        at url: URL, with body: String, expecting expected: Fingerprint, at date: Date = Date(), asMerge: Bool = true
+        at url: URL, with body: String, expecting expected: Fingerprint, at date: Date = Date(), asMerge: Bool = true,
+        dataless: DatalessGuard = DatalessGuard()
     ) -> Fingerprint? {
-        guard let data = try? Data(contentsOf: url), Fingerprint(of: data) == expected else { return nil }
+        guard case let .bytes(data) = dataless.read(url), Fingerprint(of: data) == expected else { return nil }
         return try? writeRecording(Data(body.utf8), to: url, at: date, asMerge: asMerge)
     }
 
@@ -173,7 +188,7 @@ final class DailyFile: NoteRepository {
         var conflictNotes: [ConflictResolver.Candidate] = []
         var unreadable = Set<Int>()
         for (index, version) in conflicts.enumerated() {
-            guard let raw = try? String(contentsOf: version.url, encoding: .utf8) else {
+            guard let raw = dataless.readText(version.url) else {
                 unreadable.insert(index)
                 continue
             }
@@ -305,6 +320,16 @@ final class DailyDocument {
         get { file.otherVersionsRemover }
         set { file.otherVersionsRemover = newValue }
     }
+    /// Says whether a file is dataless, which is never read. A test names the files.
+    var isDataless: (URL) -> Bool {
+        get { file.dataless.isDataless }
+        set { file.dataless.isDataless = newValue }
+    }
+    /// Asks iCloud for a file. A test replaces it to see which were asked for.
+    var startDownload: (URL) -> Void {
+        get { file.dataless.startDownload }
+        set { file.dataless.startDownload = newValue }
+    }
     /// This Mac's name, which a conflict version's saving computer is compared with.
     var computerName: String? {
         get { file.computerName }
@@ -386,7 +411,7 @@ final class DailyDocument {
         // to `fileExists`: iCloud replaces it with a hidden `.<name>.icloud`
         // stub until something asks for the download.
         if FileManager.default.fileExists(atPath: url.path) || DailyFile.hasICloudPlaceholder(for: url) {
-            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+            file.dataless.request(url)
             adopt("", unavailable: true)
             // The watcher covers the usual case; this is the backstop for a read
             // that fails for a reason no file event reports.
@@ -398,7 +423,7 @@ final class DailyDocument {
             return
         }
         // No file yet. The template seeds the buffer; the file stays uncreated.
-        adopt(DailyNote.renderedTemplate(for: day, fileURL: url, settings: settings) ?? "", unavailable: false)
+        adopt(DailyNote.renderedTemplate(for: day, fileURL: url, settings: settings, dataless: file.dataless) ?? "", unavailable: false)
     }
 
     /// `fingerprint` is that of the file `body` was read from; nil when the
@@ -497,9 +522,10 @@ final class DailyDocument {
     private func healDuplicates(now: Date) {
         guard let url = url else { return }
         lastDuplicateSweep = now
+        let dataless = file.dataless
         DailyNote.healDuplicates(
-            in: url.deletingLastPathComponent(), now: now,
-            write: { DailyFile.replaceFile(at: $0, with: $1, expecting: $2, at: now) != nil }
+            in: url.deletingLastPathComponent(), now: now, dataless: dataless,
+            write: { DailyFile.replaceFile(at: $0, with: $1, expecting: $2, at: now, dataless: dataless) != nil }
         )
     }
 
@@ -589,7 +615,7 @@ final class DailyDocument {
     func templateDidChange() {
         guard let url = url, !isUnavailable,
               Self.isBlank(body), document.pendingExternal == nil,
-              let templated = DailyNote.renderedTemplate(for: day, fileURL: url, settings: settings)
+              let templated = DailyNote.renderedTemplate(for: day, fileURL: url, settings: settings, dataless: file.dataless)
         else { return }
         // The buffer can be behind the file by the watcher's delay. Text on disk
         // is the note, not a blank to fill: take it in, and write no template.

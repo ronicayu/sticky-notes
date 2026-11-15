@@ -531,7 +531,29 @@ final class NoteStore {
     /// Everything here is main-queue only: `FileWatcher` reports changes on
     /// the main queue, so the invalidation and the reads that repopulate it
     /// can't interleave.
-    private var cache: [String: [Note]] = [:]
+    private var cache: [String: CachedDirectory] = [:]
+
+    /// The notes read from one folder, each with the file it came from, so a change
+    /// to one file replaces just that entry.
+    private struct CachedDirectory {
+        struct Entry {
+            let url: URL
+            var note: Note
+        }
+        var entries: [Entry] = []
+        /// Files in the folder that were not read because they are dataless. The
+        /// folder's listing lacks their notes until they are read.
+        var skipped: [URL] = []
+
+        var notes: [Note] { entries.map(\.note) }
+    }
+
+    /// Every label of the active and archived notes, sorted: what the label menu
+    /// and the `#` completion ask for on every keystroke. Dropped with the cache,
+    /// and when a save changes a note's labels. Not kept while a folder's listing
+    /// lacks notes that are not downloaded, or their labels would be missing from
+    /// it until something else dropped it.
+    private var labelIndex: [String]?
 
     /// Directory paths whose `pathIndex` entries are known to be
     /// complete, because we've read every file in them. Lets a lookup miss be
@@ -559,12 +581,31 @@ final class NoteStore {
     private let clock: AppClock
     private let scheduler: Scheduler
 
+    /// Which files are in iCloud and not on this Mac, and which of those were asked
+    /// for. A file like that is never read on the main thread: the read would wait
+    /// for the download.
+    let dataless = DatalessGuard()
+    /// Says whether a file is dataless. A test names the files that count.
+    var isDataless: (URL) -> Bool {
+        get { dataless.isDataless }
+        set { dataless.isDataless = newValue }
+    }
+    /// Asks iCloud for a file. A test replaces it to see which were asked for.
+    var startDownload: (URL) -> Void {
+        get { dataless.startDownload }
+        set { dataless.startDownload = newValue }
+    }
+    /// Called with the file just before it is read from disk, for a test or a
+    /// benchmark that watches the reads.
+    var willReadFile: (URL) -> Void = { _ in }
+
     /// No default root: a store that quietly opens the user's real storage is
     /// how a test ends up writing to it. Production gets its root from `Settings`.
     init(rootURL: URL, clock: AppClock = SystemClock(), scheduler: Scheduler = MainScheduler()) {
         self.rootURL = rootURL
         self.clock = clock
         self.scheduler = scheduler
+        dataless.now = { clock.now() }
         ensureDirectories()
         migrateJSONNotes()
         startWatching()
@@ -640,10 +681,10 @@ final class NoteStore {
             // A save touches exactly one known file, so patch the cache rather
             // than dropping it. Debounced saves fire on every keystroke; throwing
             // the tree away each time would make the cache useless while typing.
-            upsertInCache(note, dir: activeURL)
+            upsertInCache(note, at: url, dir: activeURL)
             notifyObservers(.saved(note.id))
         case let .conflict(onDisk, _):
-            upsertInCache(onDisk, dir: activeURL)
+            upsertInCache(onDisk, at: url, dir: activeURL)
         case .gone, .failed:
             break
         }
@@ -661,7 +702,12 @@ final class NoteStore {
             break
         case .nothing, .fingerprint:
             if FileManager.default.fileExists(atPath: url.path) {
-                guard let current = readSnapshot(url) else { return .failed(SaveError.unreadableOnDisk) }
+                let current: NoteSnapshot
+                switch readFile(url) {
+                case let .snapshot(snapshot): current = snapshot
+                case .notDownloaded: return .failed(SaveError.notDownloadedYet)
+                case .unreadable: return .failed(SaveError.unreadableOnDisk)
+                }
                 if case let .fingerprint(expected) = expectation, current.fingerprint == expected {
                     break
                 }
@@ -717,14 +763,20 @@ final class NoteStore {
         }
         // A note renamed on another Mac and still downloading is listed under a
         // name that carries nothing of this note, so it can only be told from a
-        // deleted one by a placeholder being there at all.
-        return unknown || holdsICloudPlaceholder() ? .unknown : .missing
+        // deleted one by a placeholder, or a file not downloaded, being there at all.
+        return unknown || holdsUndownloadedFile() ? .unknown : .missing
     }
 
-    private func holdsICloudPlaceholder() -> Bool {
+    /// Whether any folder holds a note's file that is in iCloud and not on this Mac:
+    /// a `.name.icloud` placeholder, or a file that keeps its name and is dataless.
+    private func holdsUndownloadedFile() -> Bool {
         [activeURL, archiveURL, trashURL].contains { dir in
             let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-            return names.contains { $0.hasPrefix(".") && $0.hasSuffix(".icloud") }
+            return names.contains { name in
+                if name.hasPrefix(".") && name.hasSuffix(".icloud") { return true }
+                return name.hasSuffix(".\(NoteStore.fileExtension)")
+                    && dataless.isDataless(dir.appendingPathComponent(name))
+            }
         }
     }
 
@@ -810,7 +862,7 @@ final class NoteStore {
         let dir = archived ? archiveURL : activeURL
         if let cached = cache[dirKey(dir)] {
             // Last match: a directory scan lets the last file with an id win the path index.
-            return cached.last { $0.id == id }
+            return cached.entries.last { $0.note.id == id }?.note
         }
         guard let url = existingURL(for: id, in: dir) else { return nil }
         return read(url)
@@ -855,10 +907,14 @@ final class NoteStore {
     /// Union of every label across active + archived notes, normalized and
      /// sorted alphabetically. Used by autocomplete + the chrome label menu.
     func allLabels() -> [String] {
+        if let labelIndex { return labelIndex }
         var seen = Set<String>()
         for note in loadActive() { seen.formUnion(note.labels) }
         for note in loadArchived() { seen.formUnion(note.labels) }
-        return seen.sorted()
+        let labels = seen.sorted()
+        let complete = [activeURL, archiveURL].allSatisfy { cache[dirKey($0)]?.skipped.isEmpty == true }
+        labelIndex = complete ? labels : nil
+        return labels
     }
 
     /// "Delete permanently" moves the file to `.trash/` instead of unlinking
@@ -1008,6 +1064,7 @@ final class NoteStore {
         for root in [rootURL, newRoot] { WriteLineage.forgetFiles(under: NoteStore.lineageKey(root)) }
         invalidateCache()
 
+        awaitDownloads(in: rootURL, includingPlaceholders: false)
         // Heals duplicate ids the way every load does, so each note is copied once.
         for dir in [activeURL, archiveURL, trashURL] { _ = loadAll(from: dir) }
         let source = switchSource(report: &report)
@@ -1102,27 +1159,38 @@ final class NoteStore {
     /// before it goes on without them.
     var downloadWait: TimeInterval = 5
 
-    /// Ask for every placeholder in the new root, and wait a bounded time for them.
+    /// Ask for every placeholder and every dataless note in `root`, and wait a
+    /// bounded time for them. A switch has to read the notes it copies, which
+    /// nothing else on the main thread may do with a file that is not downloaded.
     /// What stays undownloaded is handled by name; see `switchDestination`.
-    private func awaitDownloads(in root: URL) {
+    /// `includingPlaceholders` is false for the root being left: a placeholder
+    /// there is counted as not readable, as it always was.
+    private func awaitDownloads(in root: URL, includingPlaceholders: Bool = true) {
         let fm = FileManager.default
-        func placeholders() -> [URL] {
+        func undownloaded() -> [URL] {
             var found: [URL] = []
             for sub in ["notes", "archive", ".trash", Attachments.directoryName] {
                 guard let walker = fm.enumerator(at: root.appendingPathComponent(sub, isDirectory: true), includingPropertiesForKeys: nil)
                 else { continue }
-                for case let url as URL in walker where NoteStore.isICloudPlaceholder(url) {
-                    found.append(url.deletingLastPathComponent().appendingPathComponent(NoteStore.name(ofPlaceholder: url)))
+                for case let url as URL in walker {
+                    if NoteStore.isICloudPlaceholder(url) {
+                        if includingPlaceholders {
+                            found.append(url.deletingLastPathComponent().appendingPathComponent(NoteStore.name(ofPlaceholder: url)))
+                        }
+                    } else if url.pathExtension == NoteStore.fileExtension || sub == Attachments.directoryName,
+                              dataless.isDataless(url) {
+                        found.append(url)
+                    }
                 }
             }
             return found
         }
-        var waiting = placeholders()
+        var waiting = undownloaded()
         guard !waiting.isEmpty else { return }
-        for url in waiting { try? fm.startDownloadingUbiquitousItem(at: url) }
+        for url in waiting { dataless.request(url) }
         let deadline = Date().addingTimeInterval(downloadWait)
         while Date() < deadline {
-            waiting = waiting.filter { !fm.fileExists(atPath: $0.path) }
+            waiting = waiting.filter { !fm.fileExists(atPath: $0.path) || dataless.isDataless($0) }
             if waiting.isEmpty { return }
             Thread.sleep(forTimeInterval: 0.1)
         }
@@ -1463,6 +1531,7 @@ final class NoteStore {
 
     private func invalidateCache() {
         cache.removeAll()
+        labelIndex = nil
         indexedDirs.removeAll()
         // The file may be back — a rename, or a sync agent restoring it.
         confirmedDeletedIds.removeAll()
@@ -1478,15 +1547,17 @@ final class NoteStore {
 
     /// Replace-or-append a note in a warm cache. A cold cache is left cold —
     /// a single note is not a directory listing.
-    private func upsertInCache(_ note: Note, dir: URL) {
-        guard var notes = cache[dirKey(dir)] else { return }
+    private func upsertInCache(_ note: Note, at url: URL, dir: URL) {
+        guard var directory = cache[dirKey(dir)] else { return }
         // The last match, the one `loadNote` answers with and a save writes to.
-        if let index = notes.lastIndex(where: { $0.id == note.id }) {
-            notes[index] = note
+        if let index = directory.entries.lastIndex(where: { $0.note.id == note.id }) {
+            if directory.entries[index].note.labels != note.labels { labelIndex = nil }
+            directory.entries[index].note = note
         } else {
-            notes.append(note)
+            directory.entries.append(.init(url: url, note: note))
+            if !note.labels.isEmpty { labelIndex = nil }
         }
-        cache[dirKey(dir)] = notes
+        cache[dirKey(dir)] = directory
     }
 
     private func ensureDirectories() {
@@ -1589,7 +1660,7 @@ final class NoteStore {
                 // and may be another note's.
                 let placeholder = dir.appendingPathComponent(".\(name).icloud")
                 if !FileManager.default.fileExists(atPath: placeholder.path) { return url }
-            } else if readSnapshot(url)?.note.id == note.id {
+            } else if case let .snapshot(snapshot) = readFile(url), snapshot.note.id == note.id {
                 return url
             }
         }
@@ -1963,20 +2034,34 @@ final class NoteStore {
     }
 
     private func loadAll(from dir: URL) -> [Note]? {
-        if let cached = cache[dirKey(dir)] { return cached }
+        if var cached = cache[dirKey(dir)] {
+            if !cached.skipped.isEmpty {
+                readSkippedFiles(in: &cached)
+                cache[dirKey(dir)] = cached
+            }
+            return cached.notes
+        }
 
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
             return nil
         }
-        var notes: [Note] = []
+        var directory = CachedDirectory()
         var seen = Set<UUID>()
         var sawDuplicate = false
         for url in files where url.pathExtension == NoteStore.fileExtension {
-            guard let note = read(url) else { continue }
-            if !seen.insert(note.id).inserted { sawDuplicate = true }
-            pathIndex[note.id] = url
-            knownIds.insert(note.id)
-            notes.append(note)
+            switch readFile(url) {
+            case .notDownloaded:
+                directory.skipped.append(url)
+                continue
+            case .unreadable:
+                continue
+            case let .snapshot(snapshot):
+                let note = snapshot.note
+                if !seen.insert(note.id).inserted { sawDuplicate = true }
+                pathIndex[note.id] = url
+                knownIds.insert(note.id)
+                directory.entries.append(.init(url: url, note: note))
+            }
         }
         // Two files with one id, as Obsidian's "Make a copy" leaves: only one of
         // them would take edits, archiving or deleting.
@@ -1988,9 +2073,31 @@ final class NoteStore {
                 return fresh
             }
         }
-        cache[dirKey(dir)] = notes
-        indexedDirs.insert(dirKey(dir))
-        return notes
+        cache[dirKey(dir)] = directory
+        labelIndex = nil
+        // A file that is not downloaded may be any note, so a miss is not an answer.
+        if directory.skipped.isEmpty { indexedDirs.insert(dirKey(dir)) }
+        return directory.notes
+    }
+
+    /// Read the files a listing left out for want of a download, for those that
+    /// have arrived since.
+    private func readSkippedFiles(in directory: inout CachedDirectory) {
+        var waiting: [URL] = []
+        for url in directory.skipped {
+            switch readFile(url) {
+            case .notDownloaded:
+                waiting.append(url)
+            case .unreadable:
+                continue
+            case let .snapshot(snapshot):
+                pathIndex[snapshot.note.id] = url
+                knownIds.insert(snapshot.note.id)
+                directory.entries.append(.init(url: url, note: snapshot.note))
+                labelIndex = nil
+            }
+        }
+        directory.skipped = waiting
     }
 
     private func read(_ url: URL) -> Note? {
@@ -2003,14 +2110,46 @@ final class NoteStore {
     /// File reads so far. A test reads it to prove an operation touched no disk.
     private(set) var readCount = 0
 
+    /// The bytes of a file in the store's folders, unless it is dataless. The one
+    /// place the store reads a note file from disk.
+    private func readBytes(_ url: URL) -> DatalessGuard.Read {
+        dataless.read(url) {
+            readCount += 1
+            willReadFile(url)
+        }
+    }
+
+    private enum FileRead {
+        case snapshot(NoteSnapshot)
+        /// The file is in iCloud and not on this Mac. It was not read, and its
+        /// download has been asked for. Nothing is known about what it holds.
+        case notDownloaded
+        /// Missing, unreadable or not a note.
+        case unreadable
+    }
+
     /// One read of the file, so the fingerprint is of the bytes the note was parsed from.
-    private func readSnapshot(_ url: URL) -> NoteSnapshot? {
-        readCount += 1
-        guard let data = try? Data(contentsOf: url) else { return nil }
+    /// A dataless file is not read: that would wait for the download, on whatever
+    /// thread asks.
+    private func readFile(_ url: URL) -> FileRead {
+        let data: Data
+        switch readBytes(url) {
+        case let .bytes(read): data = read
+        case .notDownloaded: return .notDownloaded
+        case .unreadable: return .unreadable
+        }
         let note = String(data: data, encoding: .utf8).flatMap {
             parseMarkdown($0, fallbackId: idFromFilename(url) ?? stableId(for: url))
         }
-        return note.map { NoteSnapshot(note: $0, fingerprint: Fingerprint(of: data)) }
+        guard let note else { return .unreadable }
+        return .snapshot(NoteSnapshot(note: note, fingerprint: Fingerprint(of: data)))
+    }
+
+    /// The note in the file, or nil when it cannot be had now: unreadable, or not
+    /// downloaded yet. A caller that must tell the two apart uses `readFile`.
+    private func readSnapshot(_ url: URL) -> NoteSnapshot? {
+        if case let .snapshot(snapshot) = readFile(url) { return snapshot }
+        return nil
     }
 
     /// Write a note, retrying once. Most failures here are transient — a sync
@@ -2123,6 +2262,8 @@ final class NoteStore {
                     url: url, error: MigrationError.unreadableConflictVersion, date: clock.now(), kind: .migration))
             case .failed(let error):
                 report.failures.append(StorageFailure(url: url, error: error, date: clock.now(), kind: .migration))
+            case .waitingForDownload:
+                break
             }
         }
     }
@@ -2138,6 +2279,9 @@ final class NoteStore {
         /// is not in the note.
         case convertedWithoutSomeCopies
         case failed(MigrationError)
+        /// The file is in iCloud and not on this Mac. Not a failure: it is converted
+        /// once it has arrived.
+        case waitingForDownload
     }
 
     private func migrateJSONNote(
@@ -2145,7 +2289,12 @@ final class NoteStore {
         in dir: URL,
         markdown: inout [UUID: (url: URL, snapshot: NoteSnapshot)]
     ) -> Conversion {
-        guard let data = try? Data(contentsOf: url) else { return .failed(.unreadable) }
+        let data: Data
+        switch readBytes(url) {
+        case let .bytes(read): data = read
+        case .notDownloaded: return .waitingForDownload
+        case .unreadable: return .failed(.unreadable)
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let note: Note
@@ -2163,7 +2312,7 @@ final class NoteStore {
         var folded: [ConflictVersionHandle] = []
         var missing: [ConflictVersionHandle] = []
         for conflict in conflictVersionsProvider(url) {
-            if let conflictData = try? Data(contentsOf: conflict.url),
+            if case let .bytes(conflictData) = readBytes(conflict.url),
                let conflictNote = try? decoder.decode(Note.self, from: conflictData) {
                 versions.append(conflictNote)
                 folded.append(conflict)

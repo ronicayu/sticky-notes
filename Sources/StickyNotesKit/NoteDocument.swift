@@ -511,7 +511,9 @@ final class NoteDocument {
             case let .failed(error):
                 switch error as? SaveError {
                 case .unreadableOnDisk?, .locationUnknown?: fileCannotBeRead = true
-                case nil: fileCannotBeRead = false
+                // A wait that the download ends: closing the window now has no
+                // reason to write a recovery copy, and the text stays unsaved.
+                case .notDownloadedYet?, nil: fileCannotBeRead = false
                 }
                 scheduleRetry()
                 return false

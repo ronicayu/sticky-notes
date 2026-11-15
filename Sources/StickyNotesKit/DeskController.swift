@@ -13,6 +13,8 @@ import AppKit
     private let undo: UndoCenter
     private let recovery: RecoveryFiles
     private let scheduler: Scheduler
+    /// Today's file is listed without a window, and must not be read while it is in iCloud only.
+    private let dataless = DatalessGuard()
 
     private(set) var windowControllers: [UUID: NoteWindowController] = [:]
     private(set) var notesHidden = false
@@ -716,7 +718,7 @@ import AppKit
         }
         let now = clock.now()
         let url = DailyNote.resolvedURL(for: now, settings: settings)
-        let body = url.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+        let body = url.flatMap { dataless.readText($0) } ?? ""
         return DailyNote.candidate(
             body: body, day: Calendar.current.startOfDay(for: now),
             modified: url.flatMap(Self.modificationDate(of:)), color: color

@@ -32,6 +32,10 @@ enum SaveError: Error {
     /// The folder could not be listed, or the note's file may be waiting in
     /// iCloud: nothing says the note is gone, so nothing is judged about it.
     case locationUnknown
+    /// The note's file is in iCloud and not on this Mac yet, so it cannot be
+    /// checked, and writing over it unseen could lose what it holds. The download
+    /// has been asked for; a later try finds the file.
+    case notDownloadedYet
 }
 
 enum SaveResult {
