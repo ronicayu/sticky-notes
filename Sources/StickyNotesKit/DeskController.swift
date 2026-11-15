@@ -136,6 +136,11 @@ import AppKit
         windowControllers.values.first { $0.window?.isKeyWindow == true }
     }
 
+    /// The daily note, when its window is key.
+    func focusedDailyNote() -> DailyNoteWindowController? {
+        dailyNoteController?.window?.isKeyWindow == true ? dailyNoteController : nil
+    }
+
     /// The visible note windows in a fixed order (oldest note first, then the
     /// daily note), which is the order Next Note and Previous Note walk.
     func cyclableWindows() -> [NSWindow] {

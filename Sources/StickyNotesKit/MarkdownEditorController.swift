@@ -21,7 +21,7 @@ final class SlashReplacement: NSObject {
     struct Options {
         var verticalInset: CGFloat
         var lineFragmentPadding: CGFloat?
-        /// Turns off smart insert, text replacement, spelling correction and the find bar.
+        /// Turns off smart insert, text replacement and spelling correction.
         var quietSubstitutions = false
         /// Enter continues a list item and Tab indents it.
         var listEditing = false
@@ -32,7 +32,9 @@ final class SlashReplacement: NSObject {
         static let daily = Options(
             verticalInset: 4,
             lineFragmentPadding: TodoTextView.leadingPaddingForCheckbox,
-            quietSubstitutions: true
+            quietSubstitutions: true,
+            listEditing: true,
+            slashMenu: true
         )
     }
 
@@ -92,8 +94,8 @@ final class SlashReplacement: NSObject {
         textView.insertionPointColor = MarkdownStyler.bodyTextColor
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
-        textView.usesFindBar = !options.quietSubstitutions
-        textView.isIncrementalSearchingEnabled = !options.quietSubstitutions
+        textView.usesFindBar = true
+        textView.isIncrementalSearchingEnabled = true
         if options.quietSubstitutions {
             textView.smartInsertDeleteEnabled = false
             textView.isAutomaticTextReplacementEnabled = false
@@ -299,6 +301,7 @@ final class SlashReplacement: NSObject {
 
     /// Body editor key handling.
     /// - While the label list is up, arrows, Enter, Tab and Escape drive it.
+    /// - Escape otherwise closes the find bar, then ends editing.
     /// - Up on the first line hands over to the host (the title).
     /// - Enter inside a bullet/ordered/checkbox item continues the list, or
     ///   strips the marker if the item is empty, exiting the list.
@@ -325,6 +328,10 @@ final class SlashReplacement: NSObject {
             }
         }
 
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            return handleEscape()
+        }
+
         if commandSelector == #selector(NSResponder.moveUp(_:)), let handOver = onMoveUpFromFirstLine {
             let selection = textView.selectedRange()
             let str = textView.string as NSString
@@ -346,6 +353,21 @@ final class SlashReplacement: NSObject {
             return self.textView.indentSelection(outdent: true)
         }
         return false
+    }
+
+    /// Escape with no label list open. Left to AppKit it would pop the system
+    /// word-completion list, so it closes the find bar if one is up and
+    /// otherwise ends editing. An input method owns Escape while it composes.
+    private func handleEscape() -> Bool {
+        guard !textView.hasMarkedText() else { return false }
+        if let scrollView = textView.enclosingScrollView, scrollView.isFindBarVisible {
+            let hide = NSMenuItem()
+            hide.tag = NSTextFinder.Action.hideFindInterface.rawValue
+            textView.performTextFinderAction(hide)
+        } else {
+            textView.window?.makeFirstResponder(nil)
+        }
+        return true
     }
 
     // MARK: - Lists

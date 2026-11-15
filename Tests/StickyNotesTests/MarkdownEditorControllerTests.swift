@@ -37,6 +37,95 @@ import XCTest
         editor.textView(editor.textView, doCommandBy: #selector(NSResponder.insertNewline(_:)))
     }
 
+    // MARK: - The daily note's editing
+
+    func testTheDailyEditorContinuesATaskListOnEnter() {
+        let editor = makeEditor(options: .daily)
+        type("- [ ] one", into: editor)
+
+        XCTAssertTrue(pressEnter(in: editor))
+
+        XCTAssertEqual(editor.textView.string, "- [ ] one\n- [ ] ")
+    }
+
+    func testTheDailyEditorIndentsAListItemOnTab() {
+        let editor = makeEditor(options: .daily)
+        type("- one", into: editor)
+
+        XCTAssertTrue(editor.textView(editor.textView, doCommandBy: #selector(NSResponder.insertTab(_:))))
+
+        XCTAssertEqual(editor.textView.string, "  - one")
+    }
+
+    func testTheDailyEditorOffersTheSlashMenuAndTheFindBar() {
+        let editor = makeEditor(options: .daily)
+
+        XCTAssertTrue(MarkdownEditorController.Options.daily.slashMenu)
+        XCTAssertTrue(editor.textView.usesFindBar)
+    }
+
+    // MARK: - Escape
+
+    private func editorInAWindow(_ options: MarkdownEditorController.Options = .note)
+        -> (editor: MarkdownEditorController, window: NSWindow) {
+        let editor = makeEditor("some text", options: options)
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.documentView = editor.textView
+        let window = NSWindow(
+            contentRect: scroll.frame, styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = scroll
+        window.makeFirstResponder(editor.textView)
+        return (editor, window)
+    }
+
+    private func pressEscape(in editor: MarkdownEditorController) -> Bool {
+        editor.textView(editor.textView, doCommandBy: #selector(NSResponder.cancelOperation(_:)))
+    }
+
+    func testEscapeEndsEditingInsteadOfOfferingWordCompletions() {
+        for options in [MarkdownEditorController.Options.note, .daily] {
+            let (editor, window) = editorInAWindow(options)
+            XCTAssertTrue(window.firstResponder === editor.textView)
+
+            XCTAssertTrue(pressEscape(in: editor), "Escape fell through to AppKit's completion list")
+
+            XCTAssertFalse(window.firstResponder === editor.textView)
+            XCTAssertEqual(editor.textView.string, "some text")
+        }
+    }
+
+    func testEscapeClosesTheFindBarBeforeItEndsEditing() throws {
+        let (editor, window) = editorInAWindow()
+        let scroll = try XCTUnwrap(editor.textView.enclosingScrollView)
+        let show = NSMenuItem()
+        show.tag = NSTextFinder.Action.showFindInterface.rawValue
+        editor.textView.performTextFinderAction(show)
+        XCTAssertTrue(scroll.isFindBarVisible)
+        window.makeFirstResponder(editor.textView)
+
+        XCTAssertTrue(pressEscape(in: editor))
+        XCTAssertFalse(scroll.isFindBarVisible)
+        XCTAssertTrue(window.firstResponder === editor.textView, "the first Escape also ended editing")
+
+        XCTAssertTrue(pressEscape(in: editor))
+        XCTAssertFalse(window.firstResponder === editor.textView)
+    }
+
+    func testEscapeWithTheLabelListOpenOnlyClosesTheList() {
+        let (editor, window) = editorInAWindow()
+        editor.labelProvider = { ["work"] }
+        type("#wo", into: editor)
+        XCTAssertTrue(editor.isShowingLabelCompletion)
+        window.makeFirstResponder(editor.textView)
+
+        XCTAssertTrue(pressEscape(in: editor))
+
+        XCTAssertFalse(editor.isShowingLabelCompletion)
+        XCTAssertTrue(window.firstResponder === editor.textView)
+    }
+
     // MARK: - Label completion
 
     private func editorOfferingLabels() -> MarkdownEditorController {
@@ -181,7 +270,7 @@ import XCTest
     }
 
     func testListEditingIsOffWhereTheHostDidNotAskForIt() {
-        let editor = makeEditor(options: .daily)
+        let editor = makeEditor(options: .init(verticalInset: 4))
         type("- milk", into: editor)
 
         XCTAssertFalse(pressEnter(in: editor))

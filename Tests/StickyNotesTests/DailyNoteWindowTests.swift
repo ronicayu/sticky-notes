@@ -17,6 +17,7 @@ import XCTest
     private var scheduler: TestScheduler!
     private var settings: Settings { isolated.settings }
     private var controllers: [DailyNoteWindowController] = []
+    private var topMenus: [NSMenu] = []
 
     private let pattern = "Daily/{YYYY}-{MM}-{DD}.md"
 
@@ -158,5 +159,97 @@ import XCTest
 
         XCTAssertTrue(controller.flushPendingSave())
         XCTAssertEqual(try String(contentsOf: url(), encoding: .utf8), "half a sentence")
+    }
+
+    // MARK: - Colour, find and the window shortcuts
+
+    private func chromeButton(_ label: String, in controller: DailyNoteWindowController) -> NSButton? {
+        func find(in view: NSView) -> NSButton? {
+            if let button = view as? NSButton, button.accessibilityLabel() == label { return button }
+            return view.subviews.lazy.compactMap { find(in: $0) }.first
+        }
+        return controller.window?.contentView.flatMap { find(in: $0) }
+    }
+
+    /// The Note menu as the app builds it, acting on `controller` as if its window were key.
+    private func menu(for controller: DailyNoteWindowController) -> (NoteMenu, NSMenu) {
+        let noteMenu = NoteMenu(keyNote: { nil }, keyDaily: { controller }, keyWindow: { controller.window })
+        let menu = noteMenu.makeMenu()
+        // Items are only validated once their menu hangs off another menu.
+        let item = NSMenuItem()
+        item.submenu = menu
+        let top = NSMenu()
+        top.addItem(item)
+        topMenus.append(top)
+        return (noteMenu, menu)
+    }
+
+    private func perform(_ title: String, in menu: NSMenu) throws {
+        menu.update()
+        let index = try XCTUnwrap(menu.items.firstIndex { $0.title == title }, "no menu item titled \(title)")
+        XCTAssertTrue(menu.items[index].isEnabled, "\(title) is disabled")
+        menu.performActionForItem(at: index)
+    }
+
+    func testTheWindowHasAColourButtonAndPickingAColourIsSaved() throws {
+        let controller = makeController()
+        let button = try XCTUnwrap(chromeButton("Color", in: controller), "the window has no colour button")
+        XCTAssertNotNil(button.action)
+        XCTAssertEqual(DailyNote.loadState(settings: settings).color, .yellow)
+
+        controller.setColor(.blue)
+
+        XCTAssertEqual(controller.color, .blue)
+        XCTAssertEqual(button.accessibilityValue() as? String, NoteColor.blue.displayName)
+        XCTAssertEqual(DailyNote.loadState(settings: settings).color, .blue)
+    }
+
+    func testTheColourShortcutsChangeTheDailyNote() throws {
+        let controller = makeController()
+        let (noteMenu, menu) = menu(for: controller)
+
+        try perform(NoteColor.pink.displayName, in: menu)
+
+        XCTAssertEqual(DailyNote.loadState(settings: settings).color, .pink)
+        withExtendedLifetime(noteMenu) {}
+    }
+
+    func testFindAndCollapseAreAvailableInTheDailyNoteButLabelsAndFloatAreNot() throws {
+        let controller = makeController()
+        let scroll = try XCTUnwrap(controller.textView.enclosingScrollView)
+        let (noteMenu, menu) = menu(for: controller)
+        menu.update()
+        func enabled(_ title: String) throws -> Bool {
+            try XCTUnwrap(menu.items.first { $0.title == title }).isEnabled
+        }
+        XCTAssertTrue(try enabled("Find in Note"))
+        XCTAssertFalse(try enabled("Labels…"))
+        XCTAssertFalse(try enabled("Float on Top"))
+
+        try perform("Find in Note", in: menu)
+        XCTAssertTrue(scroll.isFindBarVisible)
+
+        try perform("Collapse", in: menu)
+        XCTAssertTrue(controller.isCollapsed)
+        XCTAssertTrue(DailyNote.loadState(settings: settings).collapsed)
+        menu.update()
+        XCTAssertFalse(try enabled("Find in Note"), "a collapsed note shows no body to search")
+        withExtendedLifetime(noteMenu) {}
+    }
+
+    func testCommandWHidesTheDailyNoteLikeItsCloseButton() throws {
+        let controller = makeController()
+        controller.show(userInitiated: false)
+        XCTAssertTrue(DailyNote.loadState(settings: settings).visible)
+        let (noteMenu, menu) = menu(for: controller)
+        menu.update()
+        let close = try XCTUnwrap(menu.items.first { $0.keyEquivalent == "w" })
+        XCTAssertEqual(close.title, "Close")
+
+        try perform("Close", in: menu)
+
+        XCTAssertEqual(controller.window?.isVisible, false)
+        XCTAssertFalse(DailyNote.loadState(settings: settings).visible)
+        withExtendedLifetime(noteMenu) {}
     }
 }
