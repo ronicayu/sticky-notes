@@ -32,6 +32,7 @@ import AppKit
         self.store = store
         self.settings = settings
         self.clock = clock
+        store.switchRecordsURL = settings.localRootURL.appendingPathComponent("storage-switch-records.json")
         recovery = RecoveryFiles(settings: settings, store: store, clock: clock)
         undo = UndoCenter(clock: clock)
         desk = DeskController(store: store, settings: settings, clock: clock, undo: undo, recovery: recovery)

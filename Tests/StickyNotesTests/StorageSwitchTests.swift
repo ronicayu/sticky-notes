@@ -317,6 +317,172 @@ final class StorageSwitchTests: XCTestCase {
         XCTAssertEqual(rewritten, "![a](../attachments/x-2.png) ![b](../attachments/x.png)")
     }
 
+    // MARK: - Files of the new root that are not downloaded
+
+    private func placeholder(for fileName: String, inRoot rootName: String, folder sub: String) throws {
+        let dir = folder(rootName).appendingPathComponent(sub, isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data().write(to: dir.appendingPathComponent(".\(fileName).icloud"))
+    }
+
+    func testANoteWhoseFileIsStillDownloadingInAnotherFolderIsNotWrittenAgain() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        store.downloadWait = 0
+        let note = makeNote("archived on the other Mac")
+        store.save(note)
+        let name = try XCTUnwrap(markdownFiles("a", "notes").first).url.lastPathComponent
+        try placeholder(for: name, inRoot: "b", folder: "archive")
+
+        let report = store.reconfigure(rootURL: folder("b"))
+
+        XCTAssertEqual(try files("b", "notes", holding: note.id), 0, "the note would be active and archived once it arrives")
+        XCTAssertEqual(report.notReadable, 1)
+        XCTAssertEqual(report.notes, 0)
+        XCTAssertEqual(try files("a", "notes", holding: note.id), 1, "the old root keeps it")
+    }
+
+    func testANoteWhoseFileIsStillDownloadingInTheSameFolderIsNotWrittenBesideIt() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        store.downloadWait = 0
+        let note = makeNote("here and there")
+        store.save(note)
+        let name = try XCTUnwrap(markdownFiles("a", "notes").first).url.lastPathComponent
+        try placeholder(for: name, inRoot: "b", folder: "notes")
+
+        let report = store.reconfigure(rootURL: folder("b"))
+
+        XCTAssertEqual(try markdownFiles("b", "notes").count, 0)
+        XCTAssertEqual(report.notReadable, 1)
+    }
+
+    func testAnIdInAGeneratedNameIsEnoughToHoldBackANote() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        store.downloadWait = 0
+        let note = makeNote("renamed elsewhere")
+        store.save(note)
+        let name = try XCTUnwrap(markdownFiles("a", "notes").first).url.lastPathComponent
+        let suffix = String(name.dropFirst(name.count - 10))
+        try placeholder(for: "2030-01-01 000000\(suffix)", inRoot: "b", folder: "archive")
+
+        let report = store.reconfigure(rootURL: folder("b"))
+
+        XCTAssertEqual(report.notReadable, 1)
+        XCTAssertEqual(try markdownFiles("b", "notes").count, 0)
+    }
+
+    func testAnAttachmentNameThatIsStillDownloadingIsTakenSoTheIncomingFileIsRenamed() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        store.downloadWait = 0
+        try addAttachment("shot.png", bytes: "from a", to: store)
+        let note = makeNote("see \(imageLink("shot.png"))")
+        store.save(note)
+        try placeholder(for: "shot.png", inRoot: "b", folder: "attachments")
+
+        store.reconfigure(rootURL: folder("b"))
+
+        XCTAssertEqual(try bytes(of: "../attachments/shot-2.png", in: "b"), "from a")
+        XCTAssertFalse(fm.fileExists(atPath: folder("b").appendingPathComponent("attachments/shot.png").path))
+        XCTAssertEqual(try danglingLinks("b"), [])
+        XCTAssertTrue(try XCTUnwrap(markdownFiles("b", "notes").first).text.contains("../attachments/shot-2.png"))
+    }
+
+    // MARK: - Coming back to a root
+
+    private func edit(_ store: NoteStore, _ id: UUID, archived: Bool = false, _ change: (inout Note) -> Void) throws {
+        var note = try XCTUnwrap(store.loadNote(id: id, archived: archived))
+        change(&note)
+        note.updatedAt = Date()
+        XCTAssertNotNil(store.save(note))
+    }
+
+    func testATextEditedOnTheMiddleRootComesBackWholeWithNoConflictedCopy() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        let note = makeNote("P\nQ")
+        store.save(note)
+
+        store.reconfigure(rootURL: folder("b"))
+        try edit(store, note.id) { $0.content = "P2\nQ" }
+        store.reconfigure(rootURL: folder("a"))
+
+        XCTAssertEqual(store.loadActive().map(\.content), ["P2\nQ"])
+    }
+
+    func testALabelRemovedOnTheMiddleRootIsStillGoneBackOnTheFirst() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        var note = makeNote("text")
+        note.labels = ["keep", "drop"]
+        store.save(note)
+
+        store.reconfigure(rootURL: folder("b"))
+        try edit(store, note.id) { $0.labels = ["keep"] }
+        store.reconfigure(rootURL: folder("a"))
+
+        XCTAssertEqual(store.loadActive().map(\.labels), [["keep"]])
+    }
+
+    func testANoteArchivedOnTheMiddleRootIsArchivedBackWithNoDateInvolved() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        let note = makeNote("archive me")
+        store.save(note)
+        // The first root's copy was written after anything the middle root can do.
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(7_200)],
+                             ofItemAtPath: XCTUnwrap(markdownFiles("a", "notes").first).url.path)
+
+        store.reconfigure(rootURL: folder("b"))
+        store.archive(try XCTUnwrap(store.loadNote(id: note.id)))
+        store.reconfigure(rootURL: folder("a"))
+
+        XCTAssertEqual(store.loadArchived().map(\.id), [note.id])
+        XCTAssertEqual(try files("a", "notes", holding: note.id), 0)
+    }
+
+    func testChangesOnBothRootsAreMerged() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        let note = makeNote("P\nQ")
+        store.save(note)
+
+        store.reconfigure(rootURL: folder("b"))
+        try edit(store, note.id) { $0.content = "P\nQ\nwritten on b" }
+        let otherMac = NoteStore(rootURL: folder("a"))
+        try edit(otherMac, note.id) { $0.content = "P\nQ\nwritten on the other Mac" }
+        store.reconfigure(rootURL: folder("a"))
+
+        let content = try XCTUnwrap(store.loadActive().first).content
+        XCTAssertTrue(content.contains("written on b"), content)
+        XCTAssertTrue(content.contains("written on the other Mac"), content)
+    }
+
+    func testWhatOnlyTheOtherRootChangedIsKeptWithoutAConflictedCopy() throws {
+        let store = NoteStore(rootURL: folder("a"))
+        let note = makeNote("P\nQ")
+        store.save(note)
+
+        store.reconfigure(rootURL: folder("b"))
+        let otherMac = NoteStore(rootURL: folder("a"))
+        try edit(otherMac, note.id) { $0.content = "P\nwritten on the other Mac" }
+        store.reconfigure(rootURL: folder("a"))
+
+        XCTAssertEqual(store.loadActive().map(\.content), ["P\nwritten on the other Mac"])
+    }
+
+    func testWhatARootHeldWhenItWasLeftIsRememberedOutsideEveryRootAndAcrossRelaunches() throws {
+        let records = root.appendingPathComponent("records.json")
+        let store = NoteStore(rootURL: folder("a"))
+        store.switchRecordsURL = records
+        let note = makeNote("P\nQ")
+        store.save(note)
+        store.reconfigure(rootURL: folder("b"))
+        XCTAssertTrue(fm.fileExists(atPath: records.path))
+        XCTAssertNil(try tree("a").keys.first { $0.contains("records") })
+
+        let relaunched = NoteStore(rootURL: folder("b"))
+        relaunched.switchRecordsURL = records
+        try edit(relaunched, note.id) { $0.content = "P2\nQ" }
+        relaunched.reconfigure(rootURL: folder("a"))
+
+        XCTAssertEqual(relaunched.loadActive().map(\.content), ["P2\nQ"])
+    }
+
     // MARK: - Leaving the old root alone, and what is said
 
     func testTheRootThatWasLeftIsByteForByteWhatItWas() throws {

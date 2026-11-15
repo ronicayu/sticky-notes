@@ -75,6 +75,14 @@ struct StorageSwitchReport: Equatable {
     var couldNotCopy = 0
 
     var isEmpty: Bool { self == StorageSwitchReport() }
+
+    mutating func count(_ folder: NoteStore.Folder) {
+        switch folder {
+        case .active: notes += 1
+        case .archive: archived += 1
+        case .trash: trashed += 1
+        }
+    }
 }
 
 /// What one run of the JSON-to-Markdown conversion did.
@@ -680,6 +688,13 @@ final class NoteStore {
         for dir in [activeURL, archiveURL, trashURL] { _ = loadAll(from: dir) }
         let source = switchSource(report: &report)
         let oldAttachments = attachmentsURL
+        var records = loadSwitchRecords()
+        let leftKey = dirKey(rootURL)
+        let sinceArrival = records[leftKey] ?? [:]
+        // What this root holds as it is left: if it still does when the person
+        // comes back, nobody has touched it in between.
+        records[leftKey] = Dictionary(
+            source.map { ($0.note.id.uuidString, NoteStore.signature($0.note, $0.folder)) }, uniquingKeysWith: { first, _ in first })
 
         rootURL = newRoot
         pathIndex.removeAll()
@@ -687,15 +702,102 @@ final class NoteStore {
         // when it was last used, says nothing about what is in them now.
         invalidateCache()
         ensureDirectories()
+        awaitDownloads(in: newRoot)
         migrateJSONNotes()
 
         let links = copyAttachments(from: oldAttachments, report: &report)
         var destination = switchDestination()
-        for entry in source { place(entry, rewritingLinksWith: links, into: &destination, report: &report) }
+        let sinceDeparture = records[dirKey(newRoot)] ?? [:]
+        for entry in source {
+            place(entry, rewritingLinksWith: links, into: &destination, report: &report,
+                  unchangedSinceArrival: sinceArrival[entry.note.id.uuidString] == NoteStore.signature(entry.note, entry.folder),
+                  sinceDeparture: sinceDeparture)
+        }
+        records[dirKey(newRoot)] = switchDestination().copies.reduce(into: [:]) { result, pair in
+            if let note = pair.value.lazy.compactMap({ self.readMain($0.url) }).first, let copy = pair.value.first {
+                result[pair.key.uuidString] = NoteStore.signature(note, copy.folder)
+            }
+        }
+        saveSwitchRecords(records)
 
         startWatching()
         notifyChange(.reset)
+        // The sweep that was waiting on the root just left is gone; the new one has its own.
+        let sweep = UncheckedSendable { [weak self] in self?.resolveConflictsInBackground() }
+        DispatchQueue.main.async { sweep.value() }
         return report
+    }
+
+    // MARK: - What a root held when it was left
+
+    /// Where a switch remembers what each root held when it was left, so that
+    /// coming back can tell a note nobody touched from one that was changed.
+    /// Outside every storage root; nil keeps the records in memory only.
+    var switchRecordsURL: URL?
+    private var switchRecordsCache: [String: [String: String]]?
+
+    private func loadSwitchRecords() -> [String: [String: String]] {
+        if let switchRecordsCache { return switchRecordsCache }
+        let loaded = switchRecordsURL
+            .flatMap { try? Data(contentsOf: $0) }
+            .flatMap { try? JSONDecoder().decode([String: [String: String]].self, from: $0) } ?? [:]
+        switchRecordsCache = loaded
+        return loaded
+    }
+
+    private func saveSwitchRecords(_ records: [String: [String: String]]) {
+        switchRecordsCache = records
+        guard let url = switchRecordsURL, let data = try? JSONEncoder().encode(records) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// The text, title and labels of a note and the folder it is in.
+    private static func signature(_ note: Note, _ folder: Folder) -> String {
+        let name: String
+        switch folder {
+        case .active: name = "active"
+        case .archive: name = "archive"
+        case .trash: name = "trash"
+        }
+        return "\(name):\(contentHash(note))"
+    }
+
+    // MARK: - Files not downloaded yet
+
+    /// How long a switch waits for files of the new root that are still in iCloud
+    /// before it goes on without them.
+    var downloadWait: TimeInterval = 5
+
+    /// Ask for every placeholder in the new root, and wait a bounded time for them.
+    /// What stays undownloaded is handled by name; see `switchDestination`.
+    private func awaitDownloads(in root: URL) {
+        let fm = FileManager.default
+        func placeholders() -> [URL] {
+            var found: [URL] = []
+            for sub in ["notes", "archive", ".trash", Attachments.directoryName] {
+                guard let walker = fm.enumerator(at: root.appendingPathComponent(sub, isDirectory: true), includingPropertiesForKeys: nil)
+                else { continue }
+                for case let url as URL in walker where NoteStore.isICloudPlaceholder(url) {
+                    found.append(url.deletingLastPathComponent().appendingPathComponent(NoteStore.name(ofPlaceholder: url)))
+                }
+            }
+            return found
+        }
+        var waiting = placeholders()
+        guard !waiting.isEmpty else { return }
+        for url in waiting { try? fm.startDownloadingUbiquitousItem(at: url) }
+        let deadline = Date().addingTimeInterval(downloadWait)
+        while Date() < deadline {
+            waiting = waiting.filter { !fm.fileExists(atPath: $0.path) }
+            if waiting.isEmpty { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+
+    /// `.name.icloud` stands for `name`.
+    private static func name(ofPlaceholder url: URL) -> String {
+        String(url.deletingPathExtension().lastPathComponent.dropFirst())
     }
 
     private var attachmentsURL: URL { rootURL.appendingPathComponent(Attachments.directoryName, isDirectory: true) }
@@ -732,15 +834,26 @@ final class NoteStore {
         return entries
     }
 
-    private func switchDestination() -> [UUID: [DestinationCopy]] {
+    /// What the new root holds. A file that cannot be read, or a placeholder that
+    /// has not downloaded, may be any note: it is kept by name, not forgotten.
+    private func switchDestination() -> (copies: [UUID: [DestinationCopy]], unreadable: Set<String>) {
         var copies: [UUID: [DestinationCopy]] = [:]
+        var unreadable = Set<String>()
         for folder in [Folder.active, .archive, .trash] {
             let files = (try? FileManager.default.contentsOfDirectory(at: directory(of: folder), includingPropertiesForKeys: nil)) ?? []
-            for url in files where url.pathExtension == NoteStore.fileExtension {
-                if let note = readMain(url) { copies[note.id, default: []].append(DestinationCopy(folder: folder, url: url)) }
+            for url in files {
+                if url.pathExtension == NoteStore.fileExtension {
+                    if let note = readMain(url) {
+                        copies[note.id, default: []].append(DestinationCopy(folder: folder, url: url))
+                    } else {
+                        unreadable.insert(url.lastPathComponent)
+                    }
+                } else if NoteStore.isICloudPlaceholder(url) {
+                    unreadable.insert(NoteStore.name(ofPlaceholder: url))
+                }
             }
         }
-        return copies
+        return (copies, unreadable)
     }
 
     private static func isICloudPlaceholder(_ url: URL) -> Bool {
@@ -748,28 +861,66 @@ final class NoteStore {
     }
 
     /// Put one note of the old root in the new one.
+    ///
+    /// `unchangedSinceArrival`: the old root's file is what the switch left in it
+    /// (or what the last switch away from it recorded), so it holds nothing the
+    /// new root lacks. `sinceDeparture`: what the new root held when it was left.
     private func place(
         _ entry: SwitchEntry,
         rewritingLinksWith links: [String: String],
-        into destination: inout [UUID: [DestinationCopy]],
-        report: inout StorageSwitchReport
+        into destination: inout (copies: [UUID: [DestinationCopy]], unreadable: Set<String>),
+        report: inout StorageSwitchReport,
+        unchangedSinceArrival: Bool,
+        sinceDeparture: [String: String]
     ) {
         // Retention runs from the deletion; one past it would be purged on the next launch.
         if entry.folder == .trash, isExpiredInTrash(entry.url) { return }
+        // The new root may already hold this note in a file that is not here yet.
+        // Nothing is lost by leaving it: the old root keeps its copy.
+        if NoteStore.couldBeUnreadableFile(of: entry, among: destination.unreadable) {
+            report.notReadable += 1
+            return
+        }
         var note = entry.note
         if !links.isEmpty { note.content = NoteStore.rewritingAttachmentLinks(in: note.content, using: links) }
 
-        let copies = destination[note.id] ?? []
+        let copies = destination.copies[note.id] ?? []
         var folder = entry.folder
         var target = copies.first { $0.folder == folder }
-        if target == nil, let other = copies.max(by: { placedDate(of: $0.url) < placedDate(of: $1.url) }) {
+        let primary = target ?? copies.max(by: { placedDate(of: $0.url) < placedDate(of: $1.url) })
+
+        if let primary, let held = readMain(primary.url) {
+            if unchangedSinceArrival {
+                // Nothing here the new root does not already have.
+                report.count(primary.folder)
+                return
+            }
+            if sinceDeparture[note.id.uuidString] == NoteStore.signature(held, primary.folder) {
+                // Only the old root changed it: its version replaces the other, whole.
+                var url = primary.url
+                if primary.folder != folder {
+                    let to = NoteStore.unusedURL(directory(of: folder).appendingPathComponent(primary.url.lastPathComponent))
+                    guard moveFile(from: primary.url, to: to) else { report.couldNotCopy += 1; return }
+                    url = to
+                    destination.copies[note.id] = copies.filter { $0.url != primary.url } + [DestinationCopy(folder: folder, url: to)]
+                }
+                if !replaceWhole(of: url, with: note, placed: entry.placed, folder: folder) {
+                    mergeCopy(of: note, into: url, placed: entry.placed, folder: folder)
+                }
+                report.count(folder)
+                return
+            }
+        }
+
+        // Both roots changed it, or nothing says which did.
+        if target == nil, let other = primary {
             if entry.placed >= placedDate(of: other.url) {
                 // The old root moved it last: the new root's copy follows.
                 let to = NoteStore.unusedURL(directory(of: folder).appendingPathComponent(other.url.lastPathComponent))
                 if moveFile(from: other.url, to: to) {
                     if folder == .trash { stampDeletionDate(on: to, at: entry.placed) }
                     target = DestinationCopy(folder: folder, url: to)
-                    destination[note.id] = copies.filter { $0.url != other.url } + [target!]
+                    destination.copies[note.id] = copies.filter { $0.url != other.url } + [target!]
                 }
             } else {
                 target = other
@@ -785,17 +936,35 @@ final class NoteStore {
             guard write(note, to: url) else { report.couldNotCopy += 1; return }
             if folder == .trash { stampDeletionDate(on: url, at: entry.placed) }
             pathIndex[note.id] = url
-            destination[note.id, default: []].append(DestinationCopy(folder: folder, url: url))
+            destination.copies[note.id, default: []].append(DestinationCopy(folder: folder, url: url))
         }
-        switch folder {
-        case .active: report.notes += 1
-        case .archive: report.archived += 1
-        case .trash: report.trashed += 1
-        }
+        report.count(folder)
+    }
+
+    /// Whether a file of the new root that could not be read may be the file of `entry`'s
+    /// note: it has the name a switch gives a copy, or carries the id as a generated name does.
+    private static func couldBeUnreadableFile(of entry: SwitchEntry, among names: Set<String>) -> Bool {
+        guard !names.isEmpty else { return false }
+        if names.contains(entry.url.lastPathComponent) { return true }
+        let suffix = String(entry.note.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
+        return names.contains { $0.hasSuffix("-\(suffix).\(fileExtension)") }
     }
 
     private func placedDate(of url: URL) -> Date {
         NoteStore.deletionDate(of: url) ?? .distantPast
+    }
+
+    /// Write `note` over the file at `url` as it is, keeping that file's own frontmatter.
+    private func replaceWhole(of url: URL, with note: Note, placed: Date, folder: Folder) -> Bool {
+        guard let onDisk = readSnapshot(url) else { return false }
+        var whole = note
+        whole.preserved = onDisk.note.preserved
+        if renderMarkdown(whole) != renderMarkdown(onDisk.note) {
+            guard case .saved = writeIfUnchanged(whole, to: url, expecting: .fingerprint(onDisk.fingerprint)) else { return false }
+        }
+        if folder == .trash { stampDeletionDate(on: url, at: placed) }
+        pathIndex[note.id] = url
+        return true
     }
 
     /// Merge `note` into the file already at `existing`: written over only if the
@@ -837,13 +1006,25 @@ final class NoteStore {
             String(url.resolvingSymlinksInPath().path.dropFirst(base.count + 1))
         }
 
+        // Names the new root holds but whose bytes are not here yet: taken, though they cannot be compared.
+        var taken = Set<String>()
         var bySize: [Int: [String]] = [:]
         if let existing = fm.enumerator(at: destinationDir, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) {
-            for case let url as URL in existing where !url.lastPathComponent.hasPrefix(".") {
+            for case let url as URL in existing {
+                if NoteStore.isICloudPlaceholder(url) {
+                    let folder = relativePath(url.deletingLastPathComponent(), under: destinationBase)
+                    taken.insert(folder.isEmpty ? NoteStore.name(ofPlaceholder: url)
+                                 : folder + "/" + NoteStore.name(ofPlaceholder: url))
+                    continue
+                }
+                guard !url.lastPathComponent.hasPrefix(".") else { continue }
                 let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
                 guard values?.isRegularFile == true else { continue }
                 bySize[values?.fileSize ?? -1, default: []].append(relativePath(url, under: destinationBase))
             }
+        }
+        func isTaken(_ url: URL) -> Bool {
+            fm.fileExists(atPath: url.path) || taken.contains(relativePath(url, under: destinationBase))
         }
 
         var links: [String: String] = [:]
@@ -865,8 +1046,13 @@ final class NoteStore {
             }
             var target = relative
             var candidate = destinationDir.appendingPathComponent(relative)
-            if fm.fileExists(atPath: candidate.path) {
-                candidate = NoteStore.unusedURL(candidate)
+            if isTaken(candidate) {
+                let base = candidate.deletingPathExtension()
+                var counter = 2
+                repeat {
+                    candidate = URL(fileURLWithPath: "\(base.path)-\(counter)").appendingPathExtension(candidate.pathExtension)
+                    counter += 1
+                } while isTaken(candidate)
                 target = relativePath(candidate, under: destinationBase)
                 report.attachmentsKeptBoth += 1
                 links[relative] = target
