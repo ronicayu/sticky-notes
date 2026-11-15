@@ -4,11 +4,17 @@ import Foundation
 /// frontmatter, so Obsidian and its plugins stay authoritative for formatting.
 /// A document edits it as a note whose body is the file's text.
 ///
-/// Saves are compare-and-swap, as for any note.
+/// Saves are compare-and-swap, as for any note, and the file keeps a write
+/// lineage in `WriteLineage` like `NoteStore` does for note files, so iCloud's
+/// older copies of this Mac's own saves are told apart from another Mac's text.
 final class DailyFile: NoteRepository {
     /// The file the document is on now; nil when no vault or pattern is set,
     /// in which case there is nowhere to write and nothing is kept.
     var url: URL?
+    /// The same seam `NoteStore` merges conflict versions through; a test
+    /// supplies its own, because real ones only exist inside iCloud.
+    var conflictVersionsProvider: (URL) -> [NoteStore.ConflictVersionHandle] = NoteStore.systemConflictVersions(of:)
+    var otherVersionsRemover: (URL) -> Void = NoteStore.systemRemoveOtherVersions(of:)
     private let clock: AppClock
     private let id = UUID()
 
@@ -44,6 +50,11 @@ final class DailyFile: NoteRepository {
             return present ? .unreadable : .missing
         }
         guard let body = String(data: data, encoding: .utf8) else { return .unreadable }
+        // A file that is not our newest write ends the lineage: from then on an
+        // older save of ours may hold the only copy of some text.
+        if !WriteLineage.isNewest(NoteStore.contentHash(note(body: body)), for: NoteStore.lineageKey(url)) {
+            WriteLineage.clear(NoteStore.lineageKey(url))
+        }
         return .file(data, body)
     }
 
@@ -77,6 +88,8 @@ final class DailyFile: NoteRepository {
 
     private func write(_ data: Data, to url: URL) throws -> Fingerprint {
         try data.write(to: url, options: .atomic)
+        let body = String(decoding: data, as: UTF8.self)
+        WriteLineage.record(NoteStore.contentHash(note(body: body)), for: NoteStore.lineageKey(url))
         return Fingerprint(of: data)
     }
 
@@ -96,6 +109,70 @@ final class DailyFile: NoteRepository {
 
     func archive(_ note: Note) {}
     func discardActive(_ note: Note) {}
+
+    // MARK: - Conflict versions
+
+    /// Merge the file's iCloud conflict versions into it, as `NoteStore` does
+    /// for a note: nothing is thrown away, except an older copy of this Mac's
+    /// own save while the file still holds its newest. A version that cannot be
+    /// read yet is left unresolved for a later sweep. Returns whether the file
+    /// was rewritten.
+    @discardableResult
+    func resolveConflicts() -> Bool {
+        guard let url = url else { return false }
+        let conflicts = conflictVersionsProvider(url)
+        guard !conflicts.isEmpty else { return false }
+        // Without the current file nothing can be judged, and resolving the
+        // versions now would discard the only readable copies.
+        guard case let .file(data, body) = read(url) else { return false }
+        let current = note(body: body, updatedAt: modificationDate(of: url))
+
+        var conflictNotes: [Note] = []
+        var unreadable = Set<Int>()
+        for (index, version) in conflicts.enumerated() {
+            guard let raw = try? String(contentsOf: version.url, encoding: .utf8) else {
+                unreadable.insert(index)
+                continue
+            }
+            conflictNotes.append(note(body: raw, updatedAt: modificationDate(of: version.url)))
+        }
+
+        // Cleared when the merged text did not reach the file: the versions may
+        // then hold the only copy of it.
+        var mergeLanded = true
+        defer {
+            if mergeLanded {
+                for (index, version) in conflicts.enumerated() where !unreadable.contains(index) {
+                    version.markResolved()
+                }
+                if unreadable.isEmpty { otherVersionsRemover(url) }
+            }
+        }
+
+        let key = NoteStore.lineageKey(url)
+        let versions = ConflictResolver.versionsToMerge(
+            current: current,
+            currentIsOurNewest: WriteLineage.isNewest(NoteStore.contentHash(current), for: key),
+            conflicts: conflictNotes,
+            isOurs: { WriteLineage.contains(NoteStore.contentHash($0), for: key) }
+        )
+        guard ConflictResolver.needsMerge(versions),
+              let merged = ConflictResolver.merge(versions, now: clock.now()),
+              merged.content != current.content else { return false }
+
+        // Only over the file this merge was computed from; if something wrote it
+        // since, the next sweep redoes the merge.
+        guard case let .file(latest, _) = read(url), latest == data,
+              (try? write(Data(merged.content.utf8), to: url)) != nil else {
+            mergeLanded = false
+            return false
+        }
+        return true
+    }
+
+    private func modificationDate(of url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? clock.now()
+    }
 }
 
 /// Today's daily note: which file it is, what the window shows, and the rules
@@ -150,6 +227,16 @@ final class DailyDocument {
     private var rolloverTask: ScheduledWork?
     private var rolloverRetry: ScheduledWork?
     private var lastDuplicateSweep = Date.distantPast
+
+    /// Where conflict versions of today's file come from. A test supplies its own.
+    var conflictVersionsProvider: (URL) -> [NoteStore.ConflictVersionHandle] {
+        get { file.conflictVersionsProvider }
+        set { file.conflictVersionsProvider = newValue }
+    }
+    var otherVersionsRemover: (URL) -> Void {
+        get { file.otherVersionsRemover }
+        set { file.otherVersionsRemover = newValue }
+    }
 
     /// True while the caret is in the note. See `NoteDocument.isEditing`.
     var isEditing: () -> Bool {
@@ -208,6 +295,8 @@ final class DailyDocument {
         // Before reading: a duplicate left by an earlier collision holds text
         // that belongs in the file about to be loaded.
         healDuplicates(now: now)
+        // Likewise iCloud's conflict versions: another Mac's text may be only there.
+        file.resolveConflicts()
 
         guard let url = url else {
             adopt("", unavailable: false)
@@ -276,6 +365,9 @@ final class DailyDocument {
         // A duplicate arrives as an ordinary new file in the folder watched.
         // Heal first so the read below picks up the merged text.
         healDuplicatesIfDue(now: clock.now())
+        // Not rate-limited like the folder sweep: it asks about one file, and a
+        // conflict version should be merged as soon as it arrives.
+        file.resolveConflicts()
         // A failed read means the file is mid-sync or undecodable, not empty:
         // treating it as empty would blank the buffer and then save that over
         // the real content. If we were waiting on a download, this is it.

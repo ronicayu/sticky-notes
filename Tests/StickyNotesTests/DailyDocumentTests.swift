@@ -737,4 +737,185 @@ final class DailyDocumentTests: XCTestCase {
 
         XCTAssertEqual(try text(), "one\nstill typing")
     }
+
+    // MARK: - Conflict versions
+
+    /// A stand-in for an `NSFileVersion`: a real file holding `body`.
+    private func conflictVersion(
+        _ body: String?, modified: Date? = nil, resolved: @escaping () -> Void = {}
+    ) throws -> NoteStore.ConflictVersionHandle {
+        let versionURL = vault.appendingPathComponent("version-\(UUID().uuidString).md")
+        if let body {
+            try body.write(to: versionURL, atomically: true, encoding: .utf8)
+            if let modified {
+                try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: versionURL.path)
+            }
+        }
+        return .init(url: versionURL, markResolved: resolved)
+    }
+
+    private func makeDocument(conflicts: [NoteStore.ConflictVersionHandle]) -> DailyDocument {
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.conflictVersionsProvider = { _ in conflicts }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        return document
+    }
+
+    /// Two Macs edited today's note inside the sync delay; one Mac's text lives
+    /// only in a hidden conflict version. (Model finding F9.)
+    func testADailyNoteConflictVersionIsMergedIn() throws {
+        try write("from this Mac")
+        var resolved = 0
+        var removed = false
+        let version = try conflictVersion("from the laptop\nsecond line") { resolved += 1 }
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.conflictVersionsProvider = { _ in [version] }
+        document.otherVersionsRemover = { _ in removed = true }
+
+        document.load()
+
+        XCTAssertTrue(document.body.contains("from this Mac"), document.body)
+        XCTAssertTrue(document.body.contains("from the laptop") && document.body.contains("second line"), document.body)
+        XCTAssertEqual(try text(), document.body, "the merge must reach the file")
+        XCTAssertEqual(resolved, 1)
+        XCTAssertTrue(removed)
+    }
+
+    func testAConflictVersionThatArrivesWhileTheNoteIsOpenIsMergedOnTheNextChange() throws {
+        try write("from this Mac")
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+
+        versions = [try conflictVersion("from the laptop")]
+        document.storeDidChange()
+
+        XCTAssertTrue(document.body.contains("from this Mac") && document.body.contains("from the laptop"), document.body)
+        XCTAssertEqual(try text(), document.body)
+    }
+
+    func testAConflictVersionMergedWhileTypingKeepsTheTypingAndTheVersion() throws {
+        try write("from this Mac")
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("from this Mac\nand typing")
+
+        versions = [try conflictVersion("from the laptop")]
+        document.storeDidChange()
+        scheduler.advance(by: 1)
+
+        let saved = try text()
+        XCTAssertTrue(
+            saved.contains("and typing") && saved.contains("from the laptop") && saved.contains("from this Mac"), saved
+        )
+    }
+
+    /// iCloud keeps this Mac's earlier saves as conflict versions. While the file
+    /// holds our newest save, such a copy holds only text since edited away.
+    func testAnOlderOwnDailySaveWithATypoFixedLaterIsDroppedWithNoDivider() throws {
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        var resolved = 0
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("teh cat\nsat down")
+        scheduler.advance(by: 1)
+        let typo = try conflictVersion("teh cat\nsat down") { resolved += 1 }
+        document.setBody("the cat\nsat down")
+        scheduler.advance(by: 1)
+
+        versions = [typo]
+        document.storeDidChange()
+
+        XCTAssertEqual(try text(), "the cat\nsat down")
+        XCTAssertEqual(document.body, "the cat\nsat down")
+        XCTAssertFalse(document.body.contains("Conflicted copy"))
+        XCTAssertEqual(resolved, 1, "the dropped version must still be marked resolved")
+    }
+
+    func testAnotherWritersVersionIsMergedEvenAfterThisMacSavedTheNote() throws {
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("the cat\nsat down")
+        scheduler.advance(by: 1)
+
+        versions = [try conflictVersion("a line from another Mac")]
+        document.storeDidChange()
+
+        XCTAssertTrue(document.body.contains("the cat") && document.body.contains("a line from another Mac"), document.body)
+        XCTAssertEqual(try text(), document.body)
+    }
+
+    /// Once another writer's text has replaced the file, our newest save is no
+    /// longer what it holds, so an older save of ours may hold the only copy of
+    /// something and is merged.
+    func testAnOlderOwnSaveIsMergedOnceAnotherWriterHasReplacedTheFile() throws {
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("morning notes\nlunch plan")
+        scheduler.advance(by: 1)
+        let older = try conflictVersion("morning notes\nlunch plan")
+        try write("evening notes only")
+        document.storeDidChange()
+
+        versions = [older]
+        document.storeDidChange()
+
+        XCTAssertTrue(document.body.contains("evening notes only"), document.body)
+        XCTAssertTrue(document.body.contains("lunch plan"), document.body)
+    }
+
+    func testAnUnreadableDailyVersionIsLeftUnresolved() throws {
+        try write("current text")
+        var resolved: [String] = []
+        var removed = false
+        let readable = try conflictVersion("from the laptop") { resolved.append("readable") }
+        let missing = try conflictVersion(nil) { resolved.append("missing") }
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.conflictVersionsProvider = { _ in [readable, missing] }
+        document.otherVersionsRemover = { _ in removed = true }
+
+        document.load()
+
+        XCTAssertEqual(resolved, ["readable"])
+        XCTAssertFalse(removed, "other versions were removed while one was still unread")
+        XCTAssertTrue(document.body.contains("from the laptop"), document.body)
+    }
+
+    func testAConflictVersionIsLeftAloneWhileTheNoteItselfCannotBeRead() throws {
+        try makeUnreadable()
+        var resolved = 0
+        let version = try conflictVersion("the only readable copy") { resolved += 1 }
+
+        let document = makeDocument(conflicts: [version])
+
+        XCTAssertTrue(document.isUnavailable)
+        XCTAssertEqual(resolved, 0)
+    }
+
+    func testAVersionThatAddsNothingChangesNothing() throws {
+        try write("one\ntwo")
+        var resolved = 0
+        let version = try conflictVersion("one") { resolved += 1 }
+        let before = try FileManager.default.attributesOfItem(atPath: try url().path)[.modificationDate] as? Date
+
+        let document = makeDocument(conflicts: [version])
+
+        XCTAssertEqual(document.body, "one\ntwo")
+        XCTAssertEqual(resolved, 1)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: try url().path)[.modificationDate] as? Date, before)
+    }
 }

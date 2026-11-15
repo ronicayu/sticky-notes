@@ -720,14 +720,17 @@ final class NoteStore {
         let markResolved: () -> Void
     }
 
-    var conflictVersionsProvider: (URL) -> [ConflictVersionHandle] = { url in
+    static func systemConflictVersions(of url: URL) -> [ConflictVersionHandle] {
         (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []).map { version in
             ConflictVersionHandle(url: version.url, markResolved: { version.isResolved = true })
         }
     }
-    var otherVersionsRemover: (URL) -> Void = { url in
+    static func systemRemoveOtherVersions(of url: URL) {
         try? NSFileVersion.removeOtherVersionsOfItem(at: url)
     }
+
+    var conflictVersionsProvider: (URL) -> [ConflictVersionHandle] = NoteStore.systemConflictVersions(of:)
+    var otherVersionsRemover: (URL) -> Void = NoteStore.systemRemoveOtherVersions(of:)
 
     private func recordWrite(_ note: Note, to url: URL) {
         WriteLineage.record(NoteStore.contentHash(note), for: NoteStore.lineageKey(url))
@@ -742,13 +745,13 @@ final class NoteStore {
     }
 
     /// The same file reaches us as `/var/...` and `/private/var/...`.
-    private static func lineageKey(_ url: URL) -> String {
+    static func lineageKey(_ url: URL) -> String {
         url.resolvingSymlinksInPath().path
     }
 
     /// Covers everything a merge keeps, so a version that differs from ours
     /// only in its title or labels is never taken for our own save.
-    private static func contentHash(_ note: Note) -> String {
+    static func contentHash(_ note: Note) -> String {
         let fields = [ConflictResolver.normalizedBody(note.content), note.title]
             + note.labels.sorted()
         let digest = SHA256.hash(data: Data(fields.joined(separator: "\u{0}").utf8))
