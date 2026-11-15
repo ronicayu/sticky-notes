@@ -114,7 +114,7 @@ WriteMerged(t, d, b) ==
 \* The document merges an outside version `ext` into the buffer (three-way against base).
 MergeIn(t, ext, known) ==
   LET r == IF ALLOW_OLD_UNBASED_MERGE THEN MergeVersions(t.buf, ext, FALSE, FALSE)
-           ELSE IF t.buf # t.base /\ ext \in Own(t, t.shown) /\ ext # t.linNew[t.shown]
+           ELSE IF t.buf # t.base /\ ext \in t.lin[t.shown] /\ ext # t.linNew[t.shown]
              THEN [c |-> t.buf, blk |-> FALSE, sp |-> FALSE]   \* N1: an older copy of our own text adds nothing
            ELSE ThreeWay(t.base, t.buf, ext)
   IN [Adopted(t, t.shown, t.buf, r.c) EXCEPT !.buf = r.c, !.base = ext, !.hasPend = FALSE, !.pend = <<>>,

@@ -50,7 +50,7 @@ CONSTANTS
   ALLOW_OLD_OWN_COPY_BLOCK,       \* N1 (c16cef1): an outside rewrite back to an older copy of our text is appended as a conflict
   ALLOW_OLD_BLANK_WINNER_BLOCK,   \* N2: a blank file is not replaced by a conflict version that has text
   ALLOW_OLD_RESTORE_KEEPS_BUFFER, \* 414f4d9: a held-back outside body equal to an earlier own write kept the buffer even when it added text the base lacks
-  ALLOW_OLD_CONFLICT_ANY_OWN,     \* 414f4d9: a conflict version equal to an earlier own write was dropped whoever saved it and whenever
+  ALLOW_OLD_CONFLICT_ANY_OWN,     \* 414f4d9 (review 2, C1): a conflict version equal to an earlier own write was dropped whoever saved it and whenever
   ALLOW_OLD_STALE_STANDS_IN,      \* 5d21840: a file equal to an earlier own write was always replaced by our newest text in the sweep
   ALLOW_OLD_LINEAGE_RESET,        \* N4: the write lineage ends at a foreign read or a relaunch, so an older own save merges as a conflict
   ALLOW_OLD_LINEAGE_NEEDS_NEWEST, \* N5: an older own save is dropped only while the file is exactly our newest write
@@ -141,7 +141,8 @@ Rd(t) == IF ALLOW_OLD_LINEAGE_RESET /\ t.lin # {} /\ t.disk # t.linNew THEN [t E
 NewestOwn(t) == t.lin # {} /\ t.disk = t.linNew
 
 \* Bodies a window saved. A body that only the store wrote, as a conflict merge (`linM`), holds text
-\* no window showed and vouches for nothing (WriteLineage `Entry.merged`). When iCloud keeps such a
+\* no window showed and vouches for nothing in the sweep (WriteLineage `Entry.merged`); the window,
+\* which only asks whether an outside body adds nothing to its base, counts those too (`MergeIn`). When iCloud keeps such a
 \* merge as a conflict version, it is merged again and may show as a block of two texts; the model
 \* does not count that block as spurious (it is the price of never dropping a merge's text).
 Own(t) == t.lin \ t.linM
@@ -185,7 +186,7 @@ MarkPersisted(t) == [t EXCEPT !.base = t.buf, !.unsaved = FALSE, !.stranded = FA
 \* `known`: its fingerprint is known, so the document adopts it.
 MergeIn(t, ext, known) ==
   LET r == IF ALLOW_OLD_UNBASED_MERGE THEN MergeVersions(t.buf, ext, ALLOW_OLD_SUBSTRING_MERGE, ~ALLOW_OLD_BLANK_WINNER_BLOCK)
-           ELSE IF ~ALLOW_OLD_OWN_COPY_BLOCK /\ t.buf # t.base /\ ext \in Own(t) /\ ext # t.linNew
+           ELSE IF ~ALLOW_OLD_OWN_COPY_BLOCK /\ t.buf # t.base /\ ext \in t.lin /\ ext # t.linNew
                    /\ (ALLOW_OLD_RESTORE_KEEPS_BUFFER \/ Covered(ext, t.base))
              THEN [c |-> t.buf, blk |-> FALSE, sp |-> FALSE]      \* N1: an earlier write of ours put back adds nothing (not the newest: a merge may have put another writer's text in it)
            ELSE ThreeWay(t.base, t.buf, ext)

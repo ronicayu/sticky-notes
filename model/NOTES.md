@@ -34,7 +34,7 @@ in `out-v3/`.
   switches: FALSE is the fixed code, TRUE brings the `c16cef1` behaviour back. The configs that showed each finding
   are now `regress-*` configs with the switch TRUE, and the plain config of the same chain has it FALSE.
 - `ALLOW_OLD_RESTORE_KEEPS_BUFFER` (F1, `414f4d9`) and `ALLOW_OLD_STALE_STANDS_IN` (F2, `5d21840`) are the two regressions the review found.
-- `ALLOW_OLD_CONFLICT_ANY_OWN` (`414f4d9`, F3): a conflict version equal to an earlier own write was dropped whoever saved it and whenever. Fixed: the model labels a deliberate restore that arrives as a conflict version `restore` and never drops it; in the code that is the version's date and saving computer.
+- `ALLOW_OLD_CONFLICT_ANY_OWN` (`414f4d9`, C1): a conflict version equal to an earlier own write was dropped whoever saved it and whenever. Fixed: the model labels a deliberate restore that arrives as a conflict version `restore` and never drops it; in the code that is the version's saving computer and, when it names none, its date.
 - `EXCUSE_STALE_BLOCK` is not an old behaviour but a design choice, TRUE everywhere except `n-probe-stale-block`: a block of two own texts after an earlier own file was kept next to our newest text is not counted as spurious.
 - Environment constants (`ALLOW_EXTERNAL_EDIT`, ...) only switch an actor on; `ALLOW_RESTORE_AS_CONFLICT` and `ALLOW_ICLOUD_OLDER_WINS` switch on `ExternalRestoreConflict` and `ICloudSelfConflictOlderWins` (iCloud keeps the older own save as the file and the newest as the conflict version); `ALLOW_EXTERNAL_RESTORE` switches on `ExternalRestore`: an earlier own write is put back on purpose, and the tokens it re-adds count as typed by the person (a stale rewrite adds the tokens it removes to `extRemoved` instead).
 
