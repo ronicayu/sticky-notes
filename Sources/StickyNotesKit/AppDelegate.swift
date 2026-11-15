@@ -62,16 +62,65 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     /// Saves are debounced, so quitting has to drain them before the process
     /// goes away — otherwise everything typed since the last pause is lost.
+    ///
+    /// A window whose save fails here (a full disk, a revoked permission) has
+    /// text that is about to exist nowhere. Each such buffer is written to a
+    /// recovery file outside the storage root; only if that fails too does the
+    /// person get to choose between staying open and losing it.
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        flushPendingSaves()
-        return .terminateNow
+        let unsaved = flushPendingSaves()
+        guard !unsaved.isEmpty else { return .terminateNow }
+        let unrecovered = unsaved.filter { !writeRecoveryFile(for: $0.bufferedNote) }
+        guard !unrecovered.isEmpty else { return .terminateNow }
+        switch unsavedNotesChoice(unrecovered.count) {
+        case .keepTrying: return .terminateCancel
+        case .quitAnyway: return .terminateNow
+        }
     }
 
-    func flushPendingSaves() {
-        for controller in windowControllers.values {
-            controller.flushPendingSave()
+    enum UnsavedNotesChoice { case keepTrying, quitAnyway }
+
+    /// Asks what to do about notes that could be saved nowhere. A test replaces it.
+    var unsavedNotesChoice: (_ count: Int) -> UnsavedNotesChoice = { count in
+        let alert = NSAlert()
+        alert.messageText = count == 1 ? "1 note couldn't be saved" : "\(count) notes couldn't be saved"
+        alert.informativeText = "Their text is not on disk and could not be copied elsewhere. Quitting now loses it."
+        alert.addButton(withTitle: "Keep Trying")
+        alert.addButton(withTitle: "Quit Anyway")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn ? .keepTrying : .quitAnyway
+    }
+
+    private static let recoveryStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HHmmss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    /// Where unsaved text goes when its note cannot be written: beside the
+    /// local storage, not in the folder that is failing.
+    var recoveryFolder: URL {
+        settings.localStorageRoot.appendingPathComponent("Recovered", isDirectory: true)
+    }
+
+    private func writeRecoveryFile(for note: Note) -> Bool {
+        let stamp = AppDelegate.recoveryStamp.string(from: clock.now())
+        let url = recoveryFolder.appendingPathComponent("\(note.id.uuidString) \(stamp).md")
+        do {
+            try FileManager.default.createDirectory(at: recoveryFolder, withIntermediateDirectories: true)
+            try noteStore.recoveryText(for: note).write(to: url, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            return false
         }
+    }
+
+    /// Drains every window's debounce. Returns the windows whose text did not reach disk.
+    func flushPendingSaves() -> [NoteWindowController] {
+        let unsaved = windowControllers.values.filter { !$0.flushPendingSave() }
         dailyNoteController?.flushPendingSave()
+        return unsaved
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -960,6 +1009,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
         controller.onArchived = { [weak self] archived in
             self?.offerUndoForArchive(of: archived)
+        }
+        controller.onCloseRefused = { [weak self] retry in
+            self?.toasts.show(Toast(
+                message: "Couldn't save — note kept open",
+                undoTitle: "Retry",
+                now: self?.clock.now() ?? Date(),
+                undo: retry
+            ))
         }
         windowControllers[note.id] = controller
         controller.showWindow(nil)

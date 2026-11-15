@@ -282,11 +282,11 @@ final class NoteStore {
         loadAll(from: archiveURL).sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    /// Served from the cache while it is warm, so a burst of observers asking
-    /// about their own note costs one directory read between them, not one each.
-    /// A cold cache reads just the one file. Either way the answer can be older
-    /// than the file by the watcher's delay; a caller that is about to write must
-    /// use `snapshot` or `save(_:expecting:)`, which look at the file itself.
+    /// Served from the cache while it is warm, which costs no disk read. A cold
+    /// cache reads just the one file and does not warm it; `loadActive` does.
+    /// Either way the answer can be older than the file by the watcher's delay;
+    /// a caller that is about to write must use `snapshot` or
+    /// `save(_:expecting:)`, which look at the file itself.
     func loadNote(id: UUID, archived: Bool = false) -> Note? {
         let dir = archived ? archiveURL : activeURL
         if let cached = cache[dirKey(dir)] {
@@ -501,7 +501,8 @@ final class NoteStore {
     /// a single note is not a directory listing.
     private func upsertInCache(_ note: Note, dir: URL) {
         guard var notes = cache[dirKey(dir)] else { return }
-        if let index = notes.firstIndex(where: { $0.id == note.id }) {
+        // The last match, the one `loadNote` answers with and a save writes to.
+        if let index = notes.lastIndex(where: { $0.id == note.id }) {
             notes[index] = note
         } else {
             notes.append(note)
@@ -777,6 +778,9 @@ final class NoteStore {
     private func read(_ url: URL) -> Note? {
         readSnapshot(url)?.note
     }
+
+    /// The file text for a note, for a recovery copy written outside the store.
+    func recoveryText(for note: Note) -> String { renderMarkdown(note) }
 
     /// File reads so far. A test reads it to prove an operation touched no disk.
     private(set) var readCount = 0

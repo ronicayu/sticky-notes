@@ -269,7 +269,9 @@ final class CompareAndSwapSaveTests: XCTestCase {
         withExtendedLifetime(controller) {}
     }
 
-    func testTypingInAWindowCostsNoDiskRead() throws {
+    /// Covers the synchronous part only: the watcher's echo of the save is a
+    /// `.reset`, which drops the cache and makes every window read again.
+    func testTheSynchronousPartOfAWindowsSaveReadsNoFiles() throws {
         let store = NoteStore(rootURL: root, format: .markdown)
         let shown = makeNote("on screen")
         store.save(shown)
@@ -284,6 +286,31 @@ final class CompareAndSwapSaveTests: XCTestCase {
 
         XCTAssertEqual(store.loadNote(id: shown.id)?.content, "on screen, edited")
         XCTAssertEqual(store.readCount, reads, "saving a window's own note read files")
+    }
+
+    // MARK: - Duplicate ids
+
+    /// Two files carrying one id: a directory scan lets the last win the path
+    /// index, so that is the file a save writes and the entry `loadNote` returns.
+    func testASaveReplacesTheSameCacheEntryLoadNoteAnswersWith() throws {
+        let note = makeNote("first")
+        NoteStore(rootURL: root, format: .markdown).save(note)
+        let active = root.appendingPathComponent("notes")
+        let original = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: active, includingPropertiesForKeys: nil
+        ).first)
+        let copy = active.appendingPathComponent("copy.md")
+        try String(contentsOf: original, encoding: .utf8)
+            .replacingOccurrences(of: "first", with: "stale copy")
+            .write(to: copy, atomically: true, encoding: .utf8)
+        let store = NoteStore(rootURL: root, format: .markdown)
+        XCTAssertEqual(store.loadActive().count, 2)
+
+        var edited = note
+        edited.content = "edited"
+        store.save(edited)
+
+        XCTAssertEqual(store.loadNote(id: note.id)?.content, "edited")
     }
 
     // MARK: - The sweep

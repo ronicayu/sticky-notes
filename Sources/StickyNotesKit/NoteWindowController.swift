@@ -8,6 +8,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// Called when the user archives this note, with everything needed to put
     /// it back exactly where it was.
     var onArchived: ((Note) -> Void)?
+    /// Called when closing was refused because the text could not be saved.
+    /// The argument runs the close again.
+    var onCloseRefused: ((_ retry: @escaping () -> Void) -> Void)?
 
     /// Labels currently on this note. Read by the app delegate to decide
     /// whether the window belongs on screen under the label filter.
@@ -562,7 +565,11 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             mergePendingExternalNote()
             // The text is on no disk: archiving would move a file that lacks
             // it, and closing would throw it away. Stay open; the retry is armed.
-            guard persist() else { return }
+            guard persist() else {
+                NSSound.beep()
+                onCloseRefused?({ [weak self] in self?.closeNote() })
+                return
+            }
             savingDisabled = true
             store.archive(note)
             onArchived?(note)
@@ -1310,8 +1317,13 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     @objc private func storeDidChange(_ notification: Notification) {
         // A save by this store is already in memory, and another note's save
         // is not about this file: neither is worth a disk read.
-        if case let .saved(id) = NoteStore.change(in: notification),
-           id != note.id || notification.object as AnyObject === store {
+        if case let .saved(id) = NoteStore.change(in: notification) {
+            if id == note.id, notification.object as AnyObject !== store,
+               let written = store.snapshot(id: id)?.note {
+                // Another store wrote this note. This store's cache cannot
+                // hold that write, so the file itself is the only place to look.
+                applyStoreVersion(written)
+            }
             return
         }
         handleStoreChange()
@@ -1319,6 +1331,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     @objc func handleStoreChange() {
         guard let updated = store.loadNote(id: note.id) else { return }
+        applyStoreVersion(updated)
+    }
+
+    private func applyStoreVersion(_ updated: Note) {
         // Our own write, echoed back by the watcher. Mid-burst this is the
         // text as of the last debounce, which is not an external edit.
         if updated.content == lastPersistedContent, updated.title == lastPersistedTitle { return }
@@ -1684,12 +1700,24 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// Write any debounced edit immediately. Saves are debounced by half a
     /// second, so quitting (or archiving) mid-sentence would otherwise drop
     /// everything typed since the last pause.
-    func flushPendingSave() {
-        guard saveWorkItem != nil, !savingDisabled else { return }
+    ///
+    /// Returns false when the text did not reach disk, so a caller that is
+    /// about to end the process can save it somewhere else.
+    @discardableResult
+    func flushPendingSave() -> Bool {
+        guard saveWorkItem != nil, !savingDisabled else { return true }
         saveWorkItem?.cancel()
         saveWorkItem = nil
         mergePendingExternalNote()
-        persist()
+        return persist()
+    }
+
+    /// The note as the window shows it now, which may be ahead of the file.
+    var bufferedNote: Note {
+        var buffered = note
+        buffered.content = textView.string
+        buffered.title = titleField.stringValue
+        return buffered
     }
 
     /// Tear down without persisting anything else. Used when the underlying

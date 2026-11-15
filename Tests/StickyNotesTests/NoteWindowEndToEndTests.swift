@@ -105,6 +105,65 @@ final class NoteWindowEndToEndTests: XCTestCase {
         XCTAssertEqual(try onDisk(controller).updatedAt, after, "flush rewrote an already-saved note")
     }
 
+    // MARK: - An outside edit through the watcher path
+
+    /// What Obsidian does: rewrite the file in place, behind the store's back.
+    private func writeOutside(_ controller: NoteWindowController, title: String = "Note", body: String) throws {
+        let file = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: store.activeURL, includingPropertiesForKeys: nil
+        ).first { $0.pathExtension == "md" })
+        try "---\nid: \(controller.noteId.uuidString)\ntitle: \"\(title)\"\nupdated: 2030-01-01T00:00:00Z\n---\n\(body)"
+            .write(to: file, atomically: true, encoding: .utf8)
+    }
+
+    func testAnOutsideWriteReachesAnIdleWindowThroughTheWarmCache() throws {
+        let controller = try openNote(content: "original")
+        _ = store.loadActive()
+
+        try writeOutside(controller, body: "rewritten in Obsidian")
+        store.handleFileSystemEvent()
+
+        XCTAssertEqual(controller.textView.string, "rewritten in Obsidian")
+    }
+
+    func testAnOutsideWriteDefersToUnsavedTypingAndBothSidesSurvive() throws {
+        let controller = try openNote(content: "original")
+        _ = store.loadActive()
+        type("original plus mine", into: controller)
+
+        try writeOutside(controller, body: "original\nfrom Obsidian")
+        store.handleFileSystemEvent()
+
+        XCTAssertEqual(controller.textView.string, "original plus mine", "typing was overwritten")
+        XCTAssertNotNil(controller.pendingExternalNote)
+        controller.flushPendingSave()
+        let content = try onDisk(controller).content
+        XCTAssertTrue(content.contains("original plus mine"), content)
+        XCTAssertTrue(content.contains("from Obsidian"), content)
+    }
+
+    /// An outside write ends the lineage, so an older save of ours that iCloud
+    /// kept as a conflict version is merged back rather than taken for text the
+    /// user has since edited away.
+    func testAnOutsideWriteEndsTheLineageSoAnOlderOwnVersionIsMerged() throws {
+        let controller = try openNote(content: "teh cat\nsat down")
+        type("the cat\nsat down", into: controller)
+        controller.flushPendingSave()
+        let older = root.appendingPathComponent("older.md")
+        try "---\nid: \(controller.noteId.uuidString)\nupdated: 1970-01-01T00:00:01Z\n---\nteh cat\nsat down\n"
+            .write(to: older, atomically: true, encoding: .utf8)
+        store.conflictVersionsProvider = { _ in [.init(url: older, markResolved: {})] }
+        store.otherVersionsRemover = { _ in }
+        _ = store.loadActive()
+
+        try writeOutside(controller, body: "the cat\nsat down\nfrom Obsidian")
+        store.handleFileSystemEvent()
+
+        let content = try onDisk(controller).content
+        XCTAssertTrue(content.contains("teh cat"), "the older version was dropped: \(content)")
+        XCTAssertTrue(content.contains("from Obsidian"), content)
+    }
+
     // MARK: - A write that does not land
 
     /// Makes every write into the notes folder fail, as a full disk or a

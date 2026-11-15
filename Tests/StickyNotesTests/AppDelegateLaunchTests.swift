@@ -87,6 +87,69 @@ final class AppDelegateLaunchTests: XCTestCase {
         XCTAssertEqual(app.noteWindowControllers.count, 2)
     }
 
+    // MARK: - Quitting while writes fail
+
+    private func setWritable(_ writable: Bool, _ url: URL) throws {
+        try FileManager.default.setAttributes(
+            [.posixPermissions: writable ? 0o755 : 0o555], ofItemAtPath: url.path
+        )
+    }
+
+    /// A launched app with one note holding unsaved typing, and a notes folder
+    /// that refuses every write.
+    private func launchWithUnsavedTypingAndFailingWrites() throws -> (AppDelegate, Note) {
+        let note = seed("Draft")
+        let app = makeDelegate()
+        app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        let controller = try XCTUnwrap(app.noteWindowControllers[note.id])
+        controller.textView.string = "typed just before quitting"
+        controller.textDidChange(
+            Notification(name: NSText.didChangeNotification, object: controller.textView)
+        )
+        try setWritable(false, store.activeURL)
+        addTeardownBlock { [store = store!] in try? self.setWritable(true, store.activeURL) }
+        return (app, note)
+    }
+
+    func testQuittingWhileSavesFailWritesTheTextToARecoveryFileAndQuits() throws {
+        let (app, note) = try launchWithUnsavedTypingAndFailingWrites()
+        var asked = false
+        app.unsavedNotesChoice = { _ in asked = true; return .keepTrying }
+
+        let reply = app.applicationShouldTerminate(NSApplication.shared)
+
+        XCTAssertEqual(reply, .terminateNow)
+        XCTAssertFalse(asked, "asked the person although the text was safely copied")
+        let files = try FileManager.default.contentsOfDirectory(at: app.recoveryFolder, includingPropertiesForKeys: nil)
+        let recovered = try XCTUnwrap(files.first { $0.lastPathComponent.hasPrefix(note.id.uuidString) })
+        XCTAssertTrue(try String(contentsOf: recovered, encoding: .utf8).contains("typed just before quitting"))
+        XCTAssertFalse(recovered.path.hasPrefix(root.path), "the recovery copy is inside the failing storage")
+    }
+
+    func testQuittingWhenTheRecoveryCopyFailsToo_KeepTryingCancelsTheQuit() throws {
+        let (app, _) = try launchWithUnsavedTypingAndFailingWrites()
+        try FileManager.default.createDirectory(at: app.recoveryFolder, withIntermediateDirectories: true)
+        try setWritable(false, app.recoveryFolder)
+        addTeardownBlock { try? self.setWritable(true, app.recoveryFolder) }
+        var counts: [Int] = []
+        app.unsavedNotesChoice = { counts.append($0); return .keepTrying }
+
+        XCTAssertEqual(app.applicationShouldTerminate(NSApplication.shared), .terminateCancel)
+        XCTAssertEqual(counts, [1])
+
+        app.unsavedNotesChoice = { _ in .quitAnyway }
+        XCTAssertEqual(app.applicationShouldTerminate(NSApplication.shared), .terminateNow)
+    }
+
+    func testQuittingWithEverythingSavedDoesNotAskAnything() throws {
+        _ = seed("Calm")
+        let app = makeDelegate()
+        app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        app.unsavedNotesChoice = { _ in XCTFail("asked about nothing"); return .keepTrying }
+
+        XCTAssertEqual(app.applicationShouldTerminate(NSApplication.shared), .terminateNow)
+    }
+
     func testASavedEditIsStampedWithTheInjectedClock() throws {
         let note = seed("Stamped")
         let controller = NoteWindowController(note: note, store: store, clock: clock, onClosed: { _ in })
