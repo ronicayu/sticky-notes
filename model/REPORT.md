@@ -10,11 +10,11 @@ This is the Definition of done item "the `model/` spec re-run against the new tr
 
 | ID | Problem | Rule | Severity | Fixed in |
 | --- | --- | --- | --- | --- |
-| N1 | Obsidian writes back an older copy of the note; after the person edited a line, that copy is appended as a "Conflicted copy" of the person's own text | NoSpuriousConflictBlock | Low-medium | `414f4d9`, `5d21840`, `12cd68b` |
+| N1 | Obsidian writes back an older copy of the note; after the person edited a line, that copy is appended as a "Conflicted copy" of the person's own text | NoSpuriousConflictBlock | Low-medium | `414f4d9`, `5d21840`, `12cd68b` for the traces above; a copy whose edited lines were saved keeps one divider on purpose (see "What is not fixed") |
 | N2 | A blank file next to a conflict version that has text gets a divider instead of the text | NoSpuriousConflictBlock | Low | `414f4d9` |
 | N3 | A window whose file cannot be read cannot be closed | CloseAlwaysWorks | Low | `414f4d9` |
 | N4 | The write lineage ends at any read of a file that is not our newest write, and at relaunch: an older save of this Mac then merges as a "Conflicted copy" | NoSpuriousConflictBlock | Low-medium (depends on iCloud self-conflicts, hypothesis H1) | `414f4d9`, `5d21840`, `12cd68b` |
-| N5 | The lineage vouches only while the file is exactly our newest write: one outside append in between, or an older own copy put back, turns an older own save into a "Conflicted copy" | NoSpuriousConflictBlock | Low | `414f4d9`, `5d21840`, `12cd68b` |
+| N5 | The lineage vouches only while the file is exactly our newest write: one outside append in between, or an older own copy put back, turns an older own save into a "Conflicted copy" | NoSpuriousConflictBlock | Low | `414f4d9`, `5d21840`, `12cd68b` for the traces above; a copy whose edited lines were saved keeps one divider on purpose (see "What is not fixed") |
 | N6 | A conflict merge that could not be written is retried only by the next file event | ConflictVersionsMerged | Low | `414f4d9` |
 
 The owner's original bug (a "Conflicted copy" while typing in a new note) had three paths in the first run. H1 (iCloud keeps an older save of this Mac, saved here before our next write) is fixed, and the pure single-Mac case gives no block: `n-owner-h1` holds (383 states), and so do the notes and daily tests of an older own save. H2 (the creation echo of a note created with text) is fixed: `n-conflicts-prefilled` holds. The third, Obsidian writing back an older copy (N1, N4, N5), is fixed for the traces of the first report: an older copy whose lines the window's last write or read already holds adds nothing, and our other earlier saves are dropped when our newest text is still there.
@@ -191,11 +191,11 @@ The first model run (cbbec66) found F1-F10, the run of `c16cef1` found N1-N6. Ea
 | F9 | Daily note: conflict versions never merged | 2dec071, 700a457 (flush before the sweep) |
 | F10 | Daily note: typing into the "waiting" placeholder is lost | 97c21ac, 5753639 (read-only while unavailable) |
 
-| N1 | An outside rewrite back to an older copy of our own text is appended as a conflict | `414f4d9`, `5d21840`, `12cd68b` |
+| N1 | An outside rewrite back to an older copy of our own text is appended as a conflict | `414f4d9`, `5d21840`, `12cd68b` for the traces above; a copy whose edited lines were saved keeps one divider on purpose (see "What is not fixed") |
 | N2 | A blank file is not replaced by a conflict version that has text | `414f4d9` |
 | N3 | A window whose file cannot be read cannot be closed | `414f4d9` |
 | N4 | The write lineage ends at a foreign read and at relaunch | `414f4d9`, `5d21840`, `12cd68b` |
-| N5 | The lineage vouches only while the file is exactly our newest write | `414f4d9`, `5d21840`, `12cd68b` |
+| N5 | The lineage vouches only while the file is exactly our newest write | `414f4d9`, `5d21840`, `12cd68b` for the traces above; a copy whose edited lines were saved keeps one divider on purpose (see "What is not fixed") |
 | N6 | A conflict merge that could not be written has no retry | `414f4d9` |
 
 Plan risks on the current code: R1, R2, R5 closed (F4, F6, F8); R3, R9 closed (F5, and N3 for an unreadable file); R4 closed (F7); R6, R7 closed (F10); R10 one-Mac form closed (write on first edit b63921f, discard to the Trash a9f5c10); R11 no loss; R15 closed (97c21ac: the rollover waits, `d-failure` holds); R8 dropped; R12, R14 not modelled; R13 unchanged ("latest outside version wins").
