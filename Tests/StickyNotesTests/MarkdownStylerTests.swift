@@ -262,6 +262,54 @@ import XCTest
         XCTAssertLessThan(elapsed, 0.5, "styling got quadratic again: \(elapsed)s")
     }
 
+    /// A character typed in the middle of a long note restyles a few paragraphs,
+    /// not the whole note. The bound compares with a full restyle on the same
+    /// machine, so it holds on a slow one too.
+    func testRestylingOneEditInALargeNoteCostsAFractionOfRestylingItAll() {
+        let source = (0..<400).map { i in
+            "## Section \(i)\n\nSome **bold** and *italic* with a [link](https://example.com) and `code`.\n\n- [ ] task \(i)\n"
+        }.joined(separator: "\n")
+        let storage = NSTextStorage(string: source)
+        let restyler = MarkdownRestyler()
+        restyler.restyleAll(storage)
+        let full = bestTime(runs: 3) { MarkdownStyler.apply(to: storage) }
+        restyler.restyleAll(storage)
+
+        let spot = (source as NSString).range(of: "task 200").location
+        var location = spot
+        let incremental = bestTime(runs: 5) {
+            storage.replaceCharacters(in: NSRange(location: location, length: 0), with: "x")
+            restyler.restyle(storage, edited: NSRange(location: location, length: 1), changeInLength: 1)
+            location += 1
+        }
+        XCTAssertEqual(restyler.fullCount, 2, "only the two explicit full restyles may have run")
+        XCTAssertLessThan(incremental, full / 5, "one edit took \(incremental)s against \(full)s for everything")
+    }
+
+    /// The URL detector, given a whole note, reported no links at all when one
+    /// address in it had a backtick in it.
+    func testOneOddAddressDoesNotStopOtherLinksFromBeingFound() {
+        let source = "see https://example.com`/a here\n\nand https://example.org/fine too"
+        let storage = styled(source)
+        let location = (source as NSString).range(of: "https://example.org/fine").location
+        XCTAssertEqual(
+            storage.attribute(.link, at: location, effectiveRange: nil) as? URL,
+            URL(string: "https://example.org/fine"))
+    }
+
+    /// swift-markdown places inline nodes on the continuation lines of a list item
+    /// too far right, by the width of the item's marker. That must not style the
+    /// paragraph that follows.
+    func testStylingOnAListContinuationLineDoesNotReachTheNextParagraph() {
+        let source = "- [x] a done task\nA **bold** word and *italic*\n\nnext paragraph stays plain"
+        let storage = styled(source)
+        let next = (source as NSString).range(of: "next paragraph stays plain")
+        storage.enumerateAttribute(.font, in: next) { value, range, _ in
+            XCTAssertEqual((value as? NSFont)?.fontDescriptor.symbolicTraits.intersection([.bold, .italic]), [],
+                           "styled the text at \(range)")
+        }
+    }
+
     func testALongMixedDocumentStylesWithoutCrashing() {
         let source = """
         # Heading

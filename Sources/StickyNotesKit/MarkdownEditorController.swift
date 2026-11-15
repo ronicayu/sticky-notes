@@ -16,7 +16,7 @@ final class SlashReplacement: NSObject {
 /// is elsewhere, list continuation, slash commands, label completion and
 /// checkbox toggling. It knows nothing about notes, files or windows; the host
 /// feeds it text and listens to `onTextChange`.
-@MainActor final class MarkdownEditorController: NSObject, NSTextViewDelegate, TodoTextViewDelegate {
+@MainActor final class MarkdownEditorController: NSObject, NSTextViewDelegate, NSTextStorageDelegate, TodoTextViewDelegate {
     /// What differs between the editors that host this. The rest is shared.
     struct Options {
         var verticalInset: CGFloat
@@ -52,6 +52,18 @@ final class SlashReplacement: NSObject {
     private let options: Options
     private let clock: AppClock
     private let markerLayout = HiddenMarkerLayoutDelegate()
+    let restyler = MarkdownRestyler()
+    /// What has changed in the text since it was last styled.
+    private enum PendingEdit: Equatable {
+        case none
+        case one(range: NSRange, changeInLength: Int)
+        /// More than one change: the slice a restyle would use is not known.
+        case several
+    }
+    private var pendingEdit = PendingEdit.none
+    /// The selection the hidden markers were last worked out for. Markers away
+    /// from it, and from what was restyled, are already right.
+    private var visibilitySelection: NSRange?
     private var labelPanel: LabelCompletionPanel?
     /// Character index of the `#` that opened the active completion, if any.
     private var labelTriggerStart: Int?
@@ -97,6 +109,7 @@ final class SlashReplacement: NSObject {
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
 
         textView.delegate = self
+        textStorage.delegate = self
         textView.todoDelegate = self
         layoutManager.delegate = markerLayout
         textView.attachmentHandler = { [weak store] pasteboard in
@@ -114,17 +127,76 @@ final class SlashReplacement: NSObject {
 
     /// Restyle the whole text and re-hide the markers the caret is not in.
     func restyle() {
-        MarkdownStyler.apply(to: textView)
-        refreshMarkerVisibility()
+        let restyled = restyler.restyleAll(textStorage)
+        pendingEdit = .none
+        rehideMarkers(restyled: restyled, edit: nil)
+    }
+
+    /// Restyle after the user changed the text: only the paragraphs around a single
+    /// edit, or everything when the change is not one edit.
+    private func restyleAfterEdit() {
+        guard case .one(let range, let delta) = pendingEdit else {
+            restyle()
+            return
+        }
+        pendingEdit = .none
+        let restyled = restyler.restyle(textStorage, edited: range, changeInLength: delta)
+        rehideMarkers(restyled: restyled, edit: (range, delta))
     }
 
     /// Hiding is a layout decision, so changing which markers are hidden has to
-    /// invalidate the glyphs the layout manager already generated.
+    /// invalidate the glyphs the layout manager already generated. Only the
+    /// paragraphs around the caret, around where it was, and the ones just
+    /// restyled can have changed; everywhere else the answer is still right.
     func refreshMarkerVisibility() {
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
-        let full = NSRange(location: 0, length: textStorage.length)
-        layoutManager.invalidateGlyphs(forCharacterRange: full, changeInLength: 0, actualCharacterRange: nil)
+        rehideMarkers(restyled: nil, edit: nil)
+    }
+
+    /// `restyled` is the text whose attributes were just rewritten, which lost
+    /// its hidden flags; `edit` is the change that came with it, so the old
+    /// caret can be found in the new text.
+    private func rehideMarkers(restyled: NSRange?, edit: (range: NSRange, changeInLength: Int)?) {
+        // An edit is in flight: the text has moved but its markers have not been
+        // restyled yet, and `textDidChange` will refresh once they have.
+        guard pendingEdit == .none else { return }
+        let selection = textView.selectedRange()
+        let dirty = dirtyRanges(selection: selection, restyled: restyled, edit: edit)
+        visibilitySelection = selection
+        for range in dirty ?? [NSRange(location: 0, length: textStorage.length)] {
+            MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: selection, within: range)
+            layoutManager.invalidateGlyphs(forCharacterRange: range, changeInLength: 0, actualCharacterRange: nil)
+        }
         layoutManager.ensureLayout(for: layoutManager.textContainers[0])
+    }
+
+    /// The text whose markers may need another look, or nil for all of it.
+    private func dirtyRanges(
+        selection: NSRange, restyled: NSRange?, edit: (range: NSRange, changeInLength: Int)?
+    ) -> [NSRange]? {
+        guard let previous = visibilitySelection else { return nil }
+        let text = textStorage.string as NSString
+        var before = previous
+        if let edit = edit {
+            let removedEnd = edit.range.location + edit.range.length - edit.changeInLength
+            func moved(_ position: Int) -> Int {
+                if position <= edit.range.location { return position }
+                return position >= removedEnd ? position + edit.changeInLength : edit.range.location
+            }
+            let start = moved(previous.location)
+            before = NSRange(location: start, length: max(0, moved(NSMaxRange(previous)) - start))
+        }
+        var ranges: [NSRange] = []
+        for around in [selection, before] {
+            let clamped = NSIntersectionRange(around, NSRange(location: 0, length: text.length))
+            let place = clamped.length == 0 ? NSRange(location: min(around.location, text.length), length: 0) : clamped
+            guard let paragraphs = MarkdownRestyler.slice(of: text, around: place) else { return nil }
+            ranges.append(paragraphs)
+        }
+        if let restyled = restyled {
+            if restyled.length >= text.length { return nil }
+            ranges.append(restyled)
+        }
+        return ranges
     }
 
     /// Repaint what depends on the system appearance. Note windows paint their
@@ -158,9 +230,22 @@ final class SlashReplacement: NSObject {
 
     func textDidChange(_ notification: Notification) {
         onTextChange?(textView.string)
-        restyle()
+        restyleAfterEdit()
         if options.slashMenu { detectSlashTrigger() }
         detectLabelTrigger()
+    }
+
+    /// Remembers what was edited, for the restyle that follows. The storage calls
+    /// this on the main thread, while it is still processing the edit, so nothing
+    /// here may change the text or its attributes.
+    nonisolated func textStorage(
+        _ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
+        range editedRange: NSRange, changeInLength delta: Int
+    ) {
+        guard editedMask.contains(.editedCharacters) else { return }
+        MainActor.assumeIsolated {
+            pendingEdit = pendingEdit == .none ? .one(range: editedRange, changeInLength: delta) : .several
+        }
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
