@@ -90,6 +90,11 @@ final class NoteDocument {
     /// found, so the text is on no disk and a retry may be a long time coming.
     private(set) var fileCannotBeRead = false
 
+    /// The last write was refused because the note's file is in iCloud and not on
+    /// this Mac. A kind of `fileCannotBeRead`, and one a closed window can still
+    /// archive, since moving the file needs none of its bytes.
+    private(set) var fileNotDownloaded = false
+
     private var retryAttempts = 0
     private var retryArmed = false
     private var armedRetryDelay: TimeInterval = 0
@@ -505,6 +510,7 @@ final class NoteDocument {
     private func persist() -> Bool {
         guard !isClosed else { return true }
         fileCannotBeRead = false
+        fileNotDownloaded = false
         for _ in 0..<Self.maxSaveAttempts {
             buffer.updatedAt = clock.now()
             switch repository.save(buffer, expecting: persistedFingerprint) {
@@ -512,7 +518,10 @@ final class NoteDocument {
                 switch error as? SaveError {
                 // A file that is not downloaded yet may not be for a long time (offline),
                 // so closing the window must still work: it writes a recovery copy.
-                case .unreadableOnDisk?, .locationUnknown?, .notDownloadedYet?: fileCannotBeRead = true
+                case .unreadableOnDisk?, .locationUnknown?: fileCannotBeRead = true
+                case .notDownloadedYet?:
+                    fileCannotBeRead = true
+                    fileNotDownloaded = true
                 case nil: fileCannotBeRead = false
                 }
                 scheduleRetry()
@@ -554,6 +563,7 @@ final class NoteDocument {
         retryAttempts = 0
         isStranded = false
         fileCannotBeRead = false
+        fileNotDownloaded = false
         persistedContent = buffer.content
         persistedTitle = buffer.title
         persistedLabels = buffer.labels

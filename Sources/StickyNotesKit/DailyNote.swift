@@ -132,14 +132,15 @@ enum DailyNote {
             .appendingPathComponent("StickyNotes/_daily.json")
     }
 
-    static func loadState(settings: Settings) -> DailyNoteState {
+    /// `dataless` guards the read of the old copy in the vault, which may be in iCloud only.
+    static func loadState(settings: Settings, dataless: DatalessGuard = DatalessGuard()) -> DailyNoteState {
         let url = stateURL(settings: settings)
         if let data = try? Data(contentsOf: url),
            let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) {
             return state
         }
         if let legacy = legacyStateURL(settings: settings),
-           let data = try? Data(contentsOf: legacy),
+           case let .bytes(data) = dataless.read(legacy),
            let state = try? JSONDecoder().decode(DailyNoteState.self, from: data) {
             saveState(state, settings: settings)
             // Only drop the old copy once the new one is definitely written,
@@ -215,17 +216,23 @@ enum DailyNote {
     /// stream also reports everything below the folder, which in a vault with the
     /// pattern at its root is the whole vault, our own note store included.
     static func watchFilter(for file: URL) -> @Sendable (String) -> Bool {
-        let folder = file.deletingLastPathComponent().resolvingSymlinksInPath().path
-        let name = file.lastPathComponent
-        let stem = file.deletingPathExtension().lastPathComponent
+        // Paths are compared as the volume does, without case, and the event's own
+        // path is only trimmed (the system reports real paths), not resolved: this
+        // runs on the watcher's queue for every event.
+        @Sendable func plain(_ path: String) -> String {
+            (path.hasPrefix("/private/") ? String(path.dropFirst(8)) : path).lowercased()
+        }
+        let folder = plain(file.deletingLastPathComponent().resolvingSymlinksInPath().path)
+        let name = file.lastPathComponent.lowercased()
+        let stem = file.deletingPathExtension().lastPathComponent.lowercased()
         let ext = file.pathExtension.lowercased()
         return { path in
-            let url = URL(fileURLWithPath: path)
-            guard url.deletingLastPathComponent().resolvingSymlinksInPath().path == folder else { return false }
-            let last = url.lastPathComponent
+            let ns = path as NSString
+            guard plain(ns.deletingLastPathComponent) == folder else { return false }
+            let last = ns.lastPathComponent.lowercased()
             if last == name || last == ".\(name).icloud" { return true }
-            guard url.pathExtension.lowercased() == ext else { return false }
-            return duplicateBase(of: url.deletingPathExtension().lastPathComponent) == stem
+            guard (last as NSString).pathExtension == ext else { return false }
+            return duplicateBase(of: (last as NSString).deletingPathExtension) == stem
         }
     }
 

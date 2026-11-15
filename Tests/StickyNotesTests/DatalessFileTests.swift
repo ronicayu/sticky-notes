@@ -303,6 +303,12 @@ private final class OnlyReader: @unchecked Sendable { var value: String? }
         controller.closeNote()
 
         XCTAssertNil(desk.windowControllers[note.id], "the window could not be closed while the file was not downloaded")
+        // The file went to the archive by its name alone, so the note does not come back
+        // later in the desk with the text it had before.
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.activeURL.path).filter { $0.hasSuffix(".md") }, [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.archiveURL.path).filter { $0.hasSuffix(".md") }.count, 1)
+        desk.reconcileOpenWindows()
+        XCTAssertNil(desk.windowControllers[note.id], "the closed note was opened again")
         let recovery = RecoveryFiles(settings: settings.settings, store: store, clock: clock).folder
         let kept = try FileManager.default.contentsOfDirectory(at: recovery, includingPropertiesForKeys: nil)
         XCTAssertTrue(
@@ -359,7 +365,7 @@ private final class OnlyReader: @unchecked Sendable { var value: String? }
 
     // MARK: - Labels
 
-    func testALabelOnlyADatalessNoteHasIsLeftOutForNowAndComesBack() throws {
+    func testALabelOnlyADatalessNoteHasIsKeptFromWhenItWasLastRead() throws {
         let plain = makeNote("plain", labels: ["work"])
         let away = makeNote("away", labels: ["travel"])
         store.save(plain)
@@ -370,12 +376,14 @@ private final class OnlyReader: @unchecked Sendable { var value: String? }
         markDataless(awayFile)
         store.handleFileSystemEvent()
         reads = []
-        XCTAssertEqual(store.allLabels(), ["work"])
-        XCTAssertEqual(store.allLabels(), ["work"])
+        XCTAssertEqual(store.allLabels(), ["travel", "work"], "a note not downloaded lost its label from the list")
+        let readsAfterFirst = reads.count
+        XCTAssertEqual(store.allLabels(), ["travel", "work"])
+        XCTAssertEqual(reads.count, readsAfterFirst, "the list was rebuilt from disk for a second ask")
         XCTAssertFalse(reads.contains(awayFile.lastPathComponent), "the dataless file was read to find its labels")
 
         markDownloaded(try file(of: away))
-        XCTAssertEqual(store.allLabels(), ["travel", "work"], "the labels of the arrived note were dropped for good")
+        XCTAssertEqual(store.allLabels(), ["travel", "work"])
     }
 
     // MARK: - Converting old JSON notes
@@ -416,6 +424,110 @@ private final class OnlyReader: @unchecked Sendable { var value: String? }
 
         XCTAssertTrue(report.failures.isEmpty, "\(report.failures)")
         XCTAssertNil(store.lastFailure)
+    }
+
+    func testASaveForANoteWhoseFileIsGoneIsUnknownNotGoneWhileAFileIsNotDownloaded() throws {
+        var note = makeNote("first")
+        store.save(note)
+        let fingerprint = try XCTUnwrap(store.snapshot(id: note.id)).fingerprint
+        let other = makeNote("another")
+        store.save(other)
+        markDataless(try file(of: other))
+        try FileManager.default.removeItem(at: file(of: note))
+        store.handleFileSystemEvent()
+
+        note.content = "first and more"
+        let result = store.save(note, expecting: fingerprint)
+
+        guard case let .failed(error) = result, case .locationUnknown? = error as? SaveError else {
+            return XCTFail("the note was called gone though a file that could be it is not downloaded: \(result)")
+        }
+    }
+
+    func testAJSONNoteIsNotConvertedWhileAMarkdownFileOfItsFolderIsNotDownloaded() throws {
+        let note = Note(
+            id: UUID(), title: "Old", content: "from json", width: 300, height: 220, color: .blue,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000), updatedAt: Date(timeIntervalSince1970: 1_700_000_500))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let json = store.activeURL.appendingPathComponent("\(note.id.uuidString).json")
+        try encoder.encode(note).write(to: json)
+        let twin = makeNote("maybe the twin")
+        store.save(twin)
+        markDataless(try file(of: twin))
+
+        let waiting = store.migrateJSONNotes()
+
+        XCTAssertEqual(waiting.migrated, 0, "converted while its twin might be in a file not downloaded")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: json.path))
+    }
+
+    // MARK: - A conflict version that arrives while the others are being resolved
+
+    func testAVersionThatArrivedAfterTheMergeIsNotRemovedUnmerged() throws {
+        store.offMain = .inline
+        let note = makeNote("shared line")
+        store.save(note)
+        func version(_ text: String) throws -> NoteStore.ConflictVersionHandle {
+            let url = root.appendingPathComponent("version-\(UUID().uuidString).md")
+            try "---\nid: \(note.id.uuidString)\nupdated: 1970-01-01T00:00:01Z\n---\n\(text)\n"
+                .write(to: url, atomically: true, encoding: .utf8)
+            return .init(url: url, markResolved: {})
+        }
+        let first = try version("shared line\nfrom the first version")
+        let late = try version("shared line\nfrom a version that arrived late")
+        var asked = 0
+        var removed = 0
+        store.conflictVersionsProvider = { _ in
+            asked += 1
+            return asked == 1 ? [first] : [first, late]
+        }
+        store.otherVersionsRemover = { _ in removed += 1 }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+
+        XCTAssertEqual(removed, 0, "the late version was removed with the others, never merged")
+    }
+
+    func testTheOtherVersionsAreRemovedWhenNoneArrivedLate() throws {
+        store.offMain = .inline
+        let note = makeNote("shared line")
+        store.save(note)
+        let url = root.appendingPathComponent("version.md")
+        try "---\nid: \(note.id.uuidString)\nupdated: 1970-01-01T00:00:01Z\n---\nshared line\nonly in the version\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        let only = NoteStore.ConflictVersionHandle(url: url, markResolved: {})
+        var removed = 0
+        store.conflictVersionsProvider = { _ in [only] }
+        store.otherVersionsRemover = { _ in removed += 1 }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+
+        XCTAssertEqual(removed, 1)
+    }
+
+    func testAConflictVersionThatWasNotDownloadedIsAskedForAgainAndMergedOnceItIsHere() throws {
+        let scheduler = TestScheduler(clock: clock)
+        let local = NoteStore(rootURL: root.appendingPathComponent("local", isDirectory: true), clock: clock, scheduler: scheduler, offMain: .inline)
+        defer { local.stopWatching() }
+        install(on: local)
+        let note = makeNote("shared line")
+        local.save(note)
+        let versionURL = root.appendingPathComponent("version.md")
+        try "---\nid: \(note.id.uuidString)\nupdated: 1970-01-01T00:00:01Z\n---\nshared line\nfrom the other Mac\n"
+            .write(to: versionURL, atomically: true, encoding: .utf8)
+        local.conflictVersionsProvider = { _ in [.init(url: versionURL, markResolved: {})] }
+        local.otherVersionsRemover = { _ in }
+        markDataless(versionURL)
+
+        XCTAssertEqual(local.resolveConflicts(), 0)
+        XCTAssertFalse(downloads.isEmpty, "the version's download was not asked for")
+        XCTAssertFalse(local.loadActive().first?.content.contains("from the other Mac") ?? true)
+
+        markDownloaded(versionURL)
+        scheduler.advance(by: NoteDocument.retryDelay + 0.1)
+
+        XCTAssertTrue(local.loadActive().first?.content.contains("from the other Mac") ?? false, "the version was never merged")
     }
 
     // MARK: - Switching storage waits for downloads

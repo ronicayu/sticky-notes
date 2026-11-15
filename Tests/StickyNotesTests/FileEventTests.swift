@@ -8,6 +8,16 @@ private final class ChangeLog: @unchecked Sendable {
     func append(_ change: NoteStore.Change) { changes.append(change) }
 }
 
+private final class ReadLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var all: [(String, Bool)] = []
+    func record(_ name: String, onMain: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        all.append((name, onMain))
+    }
+    var entries: [(String, Bool)] { lock.lock(); defer { lock.unlock() }; return all }
+}
+
 private final class Tally: @unchecked Sendable {
     private let lock = NSLock()
     private var total = 0
@@ -121,6 +131,26 @@ final class FileWatcherEventTests: XCTestCase {
         let reported = batches.flatMap { $0.changed.union($0.metadataOnly) }
         XCTAssertFalse(reported.contains { $0.contains("ours.md") }, "our own write came back as an event: \(reported)")
         XCTAssertTrue(reported.contains { $0.hasSuffix("theirs.md") })
+    }
+}
+
+@MainActor final class FileWatcherOwnWriteTests: XCTestCase {
+    func testAnOwnMarkedWriteThatTheLogDoesNotConfirmIsReportedAsAnotherWritersChange() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OwnWriteWatch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let reported = expectation(description: "the unconfirmed own write was reported")
+        let watcher = FileWatcher(debounce: 0.05, confirmsOwnWrite: { _ in false }) { events in
+            if events.changed.contains(where: { $0.hasSuffix("ours.md") }) { reported.fulfill() }
+        }
+        defer { watcher.stop() }
+        watcher.watch([folder])
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        try Data("ours".utf8).write(to: folder.appendingPathComponent("ours.md"), options: .atomic)
+
+        await fulfillment(of: [reported], timeout: 10)
     }
 }
 
@@ -352,9 +382,9 @@ final class FileWatcherEventTests: XCTestCase {
             return [version]
         }
         store.otherVersionsRemover = { _ in }
-        var reads: [(String, Bool)] = []
+        let reads = ReadLog()
         store.dataless.readData = { requested in
-            reads.append((requested.lastPathComponent, Thread.isMainThread))
+            reads.record(requested.lastPathComponent, onMain: Thread.isMainThread)
             return try Data(contentsOf: requested)
         }
         let merged = expectation(forNotification: NoteStore.didChange, object: store) {
@@ -368,40 +398,65 @@ final class FileWatcherEventTests: XCTestCase {
 
         XCTAssertLessThan(returned, 0.2, "the main thread waited for the version query")
         await fulfillment(of: [merged], timeout: 10)
-        XCTAssertEqual(asked.count, 1)
-        XCTAssertEqual(asked.countOffMain, 1)
-        let versionReads = reads.filter { $0.0 == URL(fileURLWithPath: version.url.path).lastPathComponent }
-        XCTAssertEqual(versionReads.map(\.1), [false], "the version file was read on the main thread: \(reads)")
+        XCTAssertEqual(asked.count, 2, "the sweep's question, and the one before the other versions are removed")
+        XCTAssertEqual(asked.countOffMain, 2)
+        let versionReads = reads.entries.filter { $0.0 == URL(fileURLWithPath: version.url.path).lastPathComponent }
+        XCTAssertEqual(versionReads.map(\.1), [false], "the version file was read on the main thread: \(reads.entries)")
         XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("only in the version"))
     }
 
-    func testAFileThatIsAlreadyBeingAskedAboutIsNotQueuedAgainBehindASlowDaemon() async throws {
+    /// Wait on the main run loop, which the off-main queue reports back to.
+    private func waitUntil(_ timeout: TimeInterval = 8, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+    }
+
+    func testAFileReportedAgainWhileItsQuestionIsPendingIsAskedOnceMoreNotOnEveryReport() async throws {
+        store.stopWatching()
         let note = seed("a note")
         let url = try file(of: note)
         let asked = Tally()
         store.conflictVersionsProvider = { _ in
             asked.record()
-            Thread.sleep(forTimeInterval: 0.4)
+            Thread.sleep(forTimeInterval: 0.3)
             return []
         }
         store.dataless.readData = { try Data(contentsOf: $0) }
 
         for _ in 0..<5 { store.handleFileSystemEvent(.init(changed: [url.path])) }
-        try await Task.sleep(nanoseconds: 800_000_000)
-        XCTAssertEqual(asked.count, 1, "the same file was queued again while its question was pending")
+        try await waitUntil { asked.count >= 2 }
+        try await Task.sleep(nanoseconds: 900_000_000)
+        XCTAssertEqual(asked.count, 2, "one question in flight, one more for the later reports, no more")
 
         store.handleFileSystemEvent(.init(changed: [url.path]))
-        try await Task.sleep(nanoseconds: 700_000_000)
-        XCTAssertEqual(asked.count, 2, "a later change was never asked about")
+        try await waitUntil { asked.count >= 3 }
+        XCTAssertEqual(asked.count, 3, "a later change was never asked about")
+    }
+
+    func testAnEventForAFileOutsideTheStoresFoldersIsIgnored() throws {
+        let note = seed("here")
+        _ = store.loadActive()
+        let readsBefore = store.readCount
+        let stranger = root.appendingPathComponent("elsewhere/\(try file(of: note).lastPathComponent)")
+
+        let seen = changes {
+            store.handleFileSystemEvent(.init(changed: [stranger.path]))
+            store.filesDidMaterialize([stranger])
+        }
+
+        XCTAssertEqual(seen, [])
+        XCTAssertEqual(store.readCount, readsBefore)
     }
 
     func testTheWholeFolderIsSweptAtMostOnceInTheIntervalForEventsThatNameNoFile() async throws {
+        store.stopWatching()
         _ = seed("a note")
         let asked = Tally()
         store.conflictVersionsProvider = { _ in asked.record(); return [] }
         store.dataless.readData = { try Data(contentsOf: $0) }
 
         store.handleFileSystemEvent(.init(everything: true))
+        try await waitUntil { asked.count >= 1 }
         try await Task.sleep(nanoseconds: 300_000_000)
         let first = asked.count
         store.handleFileSystemEvent(.init(everything: true))
@@ -411,7 +466,7 @@ final class FileWatcherEventTests: XCTestCase {
 
         clock.advance(by: 31)
         store.handleFileSystemEvent(.init(everything: true))
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await waitUntil { asked.count >= first * 2 }
         XCTAssertEqual(asked.count, first * 2)
     }
 }
@@ -507,6 +562,60 @@ final class FileWatcherEventTests: XCTestCase {
         XCTAssertEqual(asked.count, 2, "a check was armed with nothing waiting for it")
     }
 
+    func testAChangeOfAttributesAloneAsksForConflictsWithoutReadingTheFile() throws {
+        try writeToday("text")
+        let asked = Tally()
+        let document = makeDocument { _ in asked.record(); return [] }
+        document.load()
+        XCTAssertEqual(asked.count, 1)
+        let url = try XCTUnwrap(DailyNote.resolvedURL(for: clock.now(), settings: isolated.settings))
+        var reads = 0
+        document.isDataless = { _ in reads += 1; return false }
+
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
+        document.attributesDidChange()
+
+        XCTAssertEqual(asked.count, 2, "a conflict flagged as an attribute change was not looked for")
+        XCTAssertEqual(reads, 0, "the file was read for a change of attributes")
+        document.attributesDidChange()
+        XCTAssertEqual(asked.count, 2, "not rate-limited")
+        scheduler.advance(by: DailyDocument.conflictCheckInterval + 0.1)
+        XCTAssertEqual(asked.count, 3)
+        XCTAssertEqual(url.lastPathComponent.isEmpty, false)
+    }
+
+    func testTheWatchFilterIgnoresCaseAndTheTemporaryPrefix() {
+        let today = vault.appendingPathComponent("2026-11-15.md")
+        let accepts = DailyNote.watchFilter(for: today)
+        let real = today.resolvingSymlinksInPath().path
+        let upper = (real as NSString).deletingLastPathComponent.uppercased() + "/2026-11-15.MD"
+
+        XCTAssertTrue(accepts(upper), "a path that differs in case is the same file on this volume")
+        XCTAssertTrue(accepts(real))
+        if real.hasPrefix("/private/") {
+            XCTAssertTrue(accepts(String(real.dropFirst(8))), "/var and /private/var are one folder")
+        }
+    }
+
+    func testADatalessLegacyStateFileIsNotReadAndStaysWhereItIs() throws {
+        let legacyFolder = vault.appendingPathComponent("StickyNotes", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacyFolder, withIntermediateDirectories: true)
+        let legacy = legacyFolder.appendingPathComponent("_daily.json")
+        var state = DailyNoteState.defaultState
+        state.positionX = 777
+        try JSONEncoder().encode(state).write(to: legacy)
+        let guardrail = DatalessGuard()
+        var present = false
+        guardrail.isDataless = { _ in !present }
+        guardrail.startDownload = { _ in }
+
+        XCTAssertEqual(DailyNote.loadState(settings: isolated.settings, dataless: guardrail).positionX, DailyNoteState.defaultState.positionX)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+
+        present = true
+        XCTAssertEqual(DailyNote.loadState(settings: isolated.settings, dataless: guardrail).positionX, 777)
+    }
+
     func testTheMainThreadDoesNotWaitForASlowConflictQuery() async throws {
         try writeToday("text")
         let asked = Tally()
@@ -577,5 +686,44 @@ final class ICloudPrefetchTrackerTests: XCTestCase {
         ]
 
         XCTAssertEqual(tracker.look(at: items, under: root).toRequest, [url("archive/kept.md")])
+    }
+}
+
+/// Our own writes are dropped only while the file still looks as we left it.
+final class OwnWriteLogTests: XCTestCase {
+    private var folder: URL!
+
+    override func setUpWithError() throws {
+        folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OwnWriteLog-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    func testAFileAsWeLeftItIsConfirmedAndAChangedOneIsNot() throws {
+        let log = OwnWriteLog()
+        let file = folder.appendingPathComponent("a.md")
+        try Data("ours".utf8).write(to: file, options: .atomic)
+        log.record(file)
+        let path = file.resolvingSymlinksInPath().path
+
+        XCTAssertTrue(log.confirms(path))
+
+        // Another writer replaces it a moment later, with a different length.
+        try Data("theirs, and longer".utf8).write(to: file, options: .atomic)
+        XCTAssertFalse(log.confirms(path), "a later writer's change was taken for our own write")
+    }
+
+    func testAFileWeNeverWroteIsNotConfirmedAndAMissingOneIs() throws {
+        let log = OwnWriteLog()
+        let file = folder.appendingPathComponent("b.md")
+        try Data("x".utf8).write(to: file)
+
+        XCTAssertFalse(log.confirms(file.resolvingSymlinksInPath().path))
+        try FileManager.default.removeItem(at: file)
+        XCTAssertTrue(log.confirms(file.resolvingSymlinksInPath().path), "our own move or removal was reported back")
     }
 }

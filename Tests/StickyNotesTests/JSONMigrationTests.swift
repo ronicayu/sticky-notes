@@ -820,7 +820,7 @@ final class JSONMigrationTests: XCTestCase {
 
     func testSwitchingToARootWhoseCopyHasAConflictVersionKeepsAllThreeTexts() throws {
         let id = UUID()
-        let store = NoteStore(rootURL: root.appendingPathComponent("local", isDirectory: true))
+        let store = NoteStore(rootURL: root.appendingPathComponent("local", isDirectory: true), offMain: .inline)
         store.save(makeNote("shared\nonly in the local copy", id: id))
         let icloudRoot = root.appendingPathComponent("icloud", isDirectory: true)
         let icloud = NoteStore(rootURL: icloudRoot)

@@ -81,10 +81,15 @@ final class FileWatcher: @unchecked Sendable {
         }
         private let target = WeakWatcher()
         private let accepts: (@Sendable (String) -> Bool)?
+        private let confirmsOwnWrite: (@Sendable (String) -> Bool)?
 
-        init(_ watcher: FileWatcher, accepts: (@Sendable (String) -> Bool)?) {
+        init(
+            _ watcher: FileWatcher, accepts: (@Sendable (String) -> Bool)?,
+            confirmsOwnWrite: (@Sendable (String) -> Bool)?
+        ) {
             target.watcher = watcher
             self.accepts = accepts
+            self.confirmsOwnWrite = confirmsOwnWrite
         }
 
         /// Called on the stream's queue.
@@ -94,7 +99,13 @@ final class FileWatcher: @unchecked Sendable {
                 guard let path = paths[index] as? String else { continue }
                 // The filter is about paths; "anything may have changed" has none.
                 switch FileWatcher.verdict(path: path, flags: flags[index]) {
-                case .ignore: break
+                case .ignore:
+                    // Our own write, unless the file no longer looks as we left it.
+                    if flags[index] & UInt32(kFSEventStreamEventFlagOwnEvent) != 0,
+                       let confirmsOwnWrite, path.hasSuffix(".md"), !confirmsOwnWrite(path),
+                       accepts?(path) ?? true {
+                        events.changed.insert(path)
+                    }
                 case let .changed(path): if accepts?(path) ?? true { events.changed.insert(path) }
                 case let .metadataOnly(path): if accepts?(path) ?? true { events.metadataOnly.insert(path) }
                 case .everything: events.everything = true
@@ -112,16 +123,22 @@ final class FileWatcher: @unchecked Sendable {
     private var gathered = Events()
     private let debounce: TimeInterval
     private let accepts: (@Sendable (String) -> Bool)?
+    private let confirmsOwnWrite: (@Sendable (String) -> Bool)?
     private let onChange: (Events) -> Void
 
     /// `accepts` is asked, on the stream's queue, about each changed path, so a watcher
     /// on a folder that holds much else hears only about its own files.
+    /// `confirmsOwnWrite` is asked about an event marked as our own write of a `.md`
+    /// file, and says whether the file still looks as we left it; if not, the event is
+    /// reported as another writer's.
     init(
         debounce: TimeInterval = 0.25, accepts: (@Sendable (String) -> Bool)? = nil,
+        confirmsOwnWrite: (@Sendable (String) -> Bool)? = nil,
         onChange: @escaping (Events) -> Void
     ) {
         self.debounce = debounce
         self.accepts = accepts
+        self.confirmsOwnWrite = confirmsOwnWrite
         self.onChange = onChange
     }
 
@@ -136,7 +153,7 @@ final class FileWatcher: @unchecked Sendable {
         guard !directories.isEmpty else { return }
 
         let paths = directories.map { $0.path } as CFArray
-        let sink = EventSink(self, accepts: accepts)
+        let sink = EventSink(self, accepts: accepts, confirmsOwnWrite: confirmsOwnWrite)
         var context = FSEventStreamContext(
             version: 0,
             info: Unmanaged.passUnretained(sink).toOpaque(),

@@ -107,6 +107,7 @@ final class DailyFile: NoteRepository {
         _ data: Data, to url: URL, at date: Date, asMerge: Bool = false
     ) throws -> Fingerprint {
         try data.write(to: url, options: .atomic)
+        OwnWriteLog.shared.record(url)
         let body = String(decoding: data, as: UTF8.self)
         WriteLineage.record(body: body, at: date, merged: asMerge, for: NoteStore.lineageKey(url))
         return Fingerprint(of: data)
@@ -198,10 +199,8 @@ final class DailyFile: NoteRepository {
                 // Both go to iCloud's daemons, which may be slow to answer.
                 let resolved = conflicts.enumerated().filter { !unreadable.contains($0.offset) }.map(\.element)
                 let removeOthers = unreadable.isEmpty ? otherVersionsRemover : nil
-                offMain.ask({
-                    for version in resolved { version.markResolved() }
-                    removeOthers?(url)
-                }, then: {})
+                NoteStore.finishVersions(
+                    resolved, of: url, removingOthersWith: removeOthers, asking: conflictVersionsProvider, on: offMain)
             }
         }
 
@@ -477,6 +476,18 @@ final class DailyDocument {
         refreshFromDisk(forcingConflictCheck: false)
     }
 
+    /// Only the attributes of today's file changed. iCloud flags a conflict that way,
+    /// so the check for conflict versions is asked for (rate-limited, off the main
+    /// thread) without reading the file, unless the note is waiting for its download.
+    func attributesDidChange() {
+        guard url != nil else { return }
+        if isUnavailable {
+            storeDidChange()
+        } else {
+            checkConflictVersions(force: false)
+        }
+    }
+
     private func refreshFromDisk(forcingConflictCheck: Bool) {
         guard url != nil else { return }
         // A duplicate arrives as an ordinary new file in the folder watched.
@@ -570,8 +581,13 @@ final class DailyDocument {
         guard let url = url else { return }
         lastDuplicateSweep = now
         let dataless = file.dataless
+        let offMain = offMain
         DailyNote.healDuplicates(
             in: url.deletingLastPathComponent(), now: now, dataless: dataless,
+            // Moving a file to the Trash is a call to other processes: not on the main thread.
+            dispose: { duplicate in
+                offMain.ask({ try? FileManager.default.trashItem(at: duplicate, resultingItemURL: nil) }, then: { _ in })
+            },
             write: { DailyFile.replaceFile(at: $0, with: $1, expecting: $2, at: now, dataless: dataless) != nil }
         )
     }

@@ -555,6 +555,10 @@ final class NoteStore {
     /// it until something else dropped it.
     private var labelIndex: [String]?
 
+    /// The labels each file had when it was last read, by `fileKey`, so a note that
+    /// is not downloaded keeps its labels in the list instead of dropping out of it.
+    private var knownLabels: [String: [String]] = [:]
+
     /// Directory paths whose `pathIndex` entries are known to be
     /// complete, because we've read every file in them. Lets a lookup miss be
     /// trusted instead of triggering another full scan — without it, saving
@@ -601,8 +605,12 @@ final class NoteStore {
 
     /// No default root: a store that quietly opens the user's real storage is
     /// how a test ends up writing to it. Production gets its root from `Settings`.
-    init(rootURL: URL, clock: AppClock = SystemClock(), scheduler: Scheduler = MainScheduler()) {
+    init(
+        rootURL: URL, clock: AppClock = SystemClock(), scheduler: Scheduler = MainScheduler(),
+        offMain: OffMain = .background
+    ) {
         self.rootURL = rootURL
+        self.offMain = offMain
         self.clock = clock
         self.scheduler = scheduler
         dataless.now = { clock.now() }
@@ -663,6 +671,9 @@ final class NoteStore {
                     break
                 }
             }
+            // A note that was renamed, or moved by the other Mac, may be in a file that is
+            // not downloaded: nothing says it is gone.
+            if !found, holdsUndownloadedFile() { return .failed(SaveError.locationUnknown) }
             if !found {
                 // Really gone. Remember that, or every subsequent keystroke
                 // pays for another full scan of the notes directory.
@@ -911,9 +922,12 @@ final class NoteStore {
         var seen = Set<String>()
         for note in loadActive() { seen.formUnion(note.labels) }
         for note in loadArchived() { seen.formUnion(note.labels) }
+        // Notes not downloaded yet: what they had when last read, if they were.
+        for dir in [activeURL, archiveURL] {
+            for url in cache[dirKey(dir)]?.skipped ?? [] { seen.formUnion(knownLabels[fileKey(url)] ?? []) }
+        }
         let labels = seen.sorted()
-        let complete = [activeURL, archiveURL].allSatisfy { cache[dirKey($0)]?.skipped.isEmpty == true }
-        labelIndex = complete ? labels : nil
+        labelIndex = labels
         return labels
     }
 
@@ -1054,6 +1068,8 @@ final class NoteStore {
 
         // Before anything is read: an event from the root being left must not
         // run a sweep or a reload while it is being copied from.
+        sweepTimer?.invalidate()
+        sweepTimer = nil
         watcher?.stop()
         watcher = nil
         storageGeneration += 1
@@ -1064,6 +1080,7 @@ final class NoteStore {
         for root in [rootURL, newRoot] { WriteLineage.forgetFiles(under: NoteStore.lineageKey(root)) }
         invalidateCache()
 
+        knownLabels.removeAll()
         awaitDownloads(in: rootURL, includingPlaceholders: false)
         // Heals duplicate ids the way every load does, so each note is copied once.
         for dir in [activeURL, archiveURL, trashURL] { _ = loadAll(from: dir) }
@@ -1114,6 +1131,8 @@ final class NoteStore {
     /// this itself when it goes away; a test whose store lives as long as the
     /// test object, which XCTest keeps until the run ends, calls it in tearDown.
     func stopWatching() {
+        sweepTimer?.invalidate()
+        sweepTimer = nil
         watcher?.stop()
         watcher = nil
     }
@@ -1192,7 +1211,9 @@ final class NoteStore {
         while Date() < deadline {
             waiting = waiting.filter { !fm.fileExists(atPath: $0.path) || dataless.isDataless($0) }
             if waiting.isEmpty { return }
-            Thread.sleep(forTimeInterval: 0.1)
+            // The main run loop keeps turning while the switch waits, so the app does
+            // not freeze; a switch is the person's own action and this is a bounded wait.
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
         }
     }
 
@@ -1553,8 +1574,10 @@ final class NoteStore {
         if let index = directory.entries.lastIndex(where: { $0.note.id == note.id }) {
             if directory.entries[index].note.labels != note.labels { labelIndex = nil }
             directory.entries[index].note = note
+            knownLabels[fileKey(url)] = note.labels
         } else {
             directory.entries.append(.init(url: url, note: note))
+            knownLabels[fileKey(url)] = note.labels
             if !note.labels.isEmpty { labelIndex = nil }
         }
         cache[dirKey(dir)] = directory
@@ -1581,15 +1604,18 @@ final class NoteStore {
             notifyChange(.reset)
             return
         }
-        let reported = events.changed.union(events.metadataOnly).map { URL(fileURLWithPath: $0) }
-        let reportedNotes = reported.filter { $0.pathExtension == NoteStore.fileExtension }
+        // A report that comes late, such as the end of a download in a root that was
+        // left, is not about this store's folders and must not touch them.
+        let changedHere = events.changed.map { URL(fileURLWithPath: $0) }.filter(isInStoreFolder)
+        let attributesHere = events.metadataOnly.map { URL(fileURLWithPath: $0) }.filter(isInStoreFolder)
+        let reportedNotes = (changedHere + attributesHere).filter { $0.pathExtension == NoteStore.fileExtension }
         // A change of attributes alone says nothing about a note, unless its file was
         // not downloaded: the download ending shows as one.
-        let touched = events.changed.map { URL(fileURLWithPath: $0) }.filter { $0.pathExtension == NoteStore.fileExtension }
-            + events.metadataOnly.map { URL(fileURLWithPath: $0) }.filter(isAwaitingDownload)
+        let touched = changedHere.filter { $0.pathExtension == NoteStore.fileExtension }
+            + attributesHere.filter(isAwaitingDownload)
         // A conflict is flagged on the file, which looks like a change of attributes.
         if !reportedNotes.isEmpty { resolveConflictsInBackground(files: reportedNotes) }
-        if events.changed.contains(where: { $0.hasSuffix(".json") }) { noticeOlderVersionFiles() }
+        if changedHere.contains(where: { $0.pathExtension == "json" }) { noticeOlderVersionFiles() }
         guard !touched.isEmpty else { return }
         if let ids = refreshCache(forChangedFiles: touched) {
             notifyObservers(.external(ids))
@@ -1604,6 +1630,11 @@ final class NoteStore {
         for url in urls where url.pathExtension == NoteStore.fileExtension { events.changed.insert(url.path) }
         guard !events.isEmpty else { return }
         handleFileSystemEvent(events)
+    }
+
+    private func isInStoreFolder(_ url: URL) -> Bool {
+        let folder = dirKey(url.deletingLastPathComponent())
+        return [activeURL, archiveURL, trashURL].contains { dirKey($0) == folder }
     }
 
     private func isAwaitingDownload(_ url: URL) -> Bool {
@@ -1653,10 +1684,11 @@ final class NoteStore {
                 directory.entries.insert(.init(url: url, note: note), at: min(position ?? directory.entries.count, directory.entries.count))
                 pathIndex[note.id] = url
                 knownIds.insert(note.id)
+                knownLabels[key] = note.labels
             case .notDownloaded:
                 directory.skipped.append(url)
             case .unreadable:
-                break
+                knownLabels[key] = nil
             }
             cache[dir] = directory
         }
@@ -1688,7 +1720,7 @@ final class NoteStore {
     }
 
     private func startWatching() {
-        watcher = FileWatcher { [weak self] events in
+        watcher = FileWatcher(confirmsOwnWrite: { OwnWriteLog.shared.confirms($0) }) { [weak self] events in
             guard let self = self else { return }
             // Conflict copies arrive as ordinary file changes. Merging only at
             // launch left the other Mac's edits invisible — and diverging
@@ -1696,7 +1728,23 @@ final class NoteStore {
             self.handleFileSystemEvent(events)
         }
         watcher?.watch([activeURL, archiveURL, trashURL])
+        // A conflict is flagged on the file, which the watcher may not report: a sweep
+        // of everything now and then, asked off the main thread, finds it anyway.
+        sweepTimer?.invalidate()
+        let weak = WeakStore(self)
+        sweepTimer = Timer.scheduledTimer(withTimeInterval: NoteStore.periodicSweepInterval, repeats: true) { _ in
+            // The timer runs on the main run loop, where the store lives.
+            weak.store?.resolveConflictsIfDue()
+        }
     }
+
+    private final class WeakStore: @unchecked Sendable {
+        weak var store: NoteStore?
+        init(_ store: NoteStore) { self.store = store }
+    }
+
+    private static let periodicSweepInterval: TimeInterval = 60
+    private var sweepTimer: Timer?
 
     /// Returns the on-disk URL for a note that already exists in the given
     /// directory, or nil if not found. Looks up the cached path and falls back
@@ -1885,11 +1933,22 @@ final class NoteStore {
         if named == nil { lastConflictSweep = clock.now() }
         // iCloud touches a file after each write, so a file that is already being
         // asked about is not queued again behind a daemon that may be slow.
+        // One that changes again meanwhile is asked about once more when the
+        // question in flight has finished, so the change is not lost.
         var named = named
         var keys: [String] = []
         if let asked = named {
-            let fresh = asked.filter { conflictChecksPending.insert(fileKey($0)).inserted }
-            keys = fresh.map(fileKey)
+            var fresh: [URL] = []
+            for url in asked {
+                let key = fileKey(url)
+                if conflictChecksPending[key] != nil {
+                    conflictRechecks[key] = url
+                } else {
+                    conflictChecksPending[key] = url
+                    fresh.append(url)
+                    keys.append(key)
+                }
+            }
             named = fresh
             if fresh.isEmpty {
                 completion?(0)
@@ -1901,8 +1960,13 @@ final class NoteStore {
         let isDataless = UncheckedSendable(dataless.isDataless)
         let readData = UncheckedSendable(dataless.readData)
         let merge = UncheckedSendable { [weak self] (found: [(url: URL, versions: [PrefetchedVersion])]) in
-            self?.conflictChecksPending.subtract(keys)
-            guard let self, self.storageGeneration == generation else { completion?(0); return }
+            guard let self else { completion?(0); return }
+            for key in keys { self.conflictChecksPending.removeValue(forKey: key) }
+            let again = keys.compactMap { self.conflictRechecks.removeValue(forKey: $0) }
+            defer {
+                if !again.isEmpty, self.storageGeneration == generation { self.resolveConflictsInBackground(files: again) }
+            }
+            guard self.storageGeneration == generation else { completion?(0); return }
             var prefetched: [URL: [PrefetchedVersion]] = [:]
             for entry in found {
                 prefetched[entry.url] = entry.versions
@@ -1934,11 +1998,13 @@ final class NoteStore {
         }, then: { merge.value($0.value) })
     }
 
-    /// Files whose conflict versions are being asked for now.
-    private var conflictChecksPending = Set<String>()
+    /// Files whose conflict versions are being asked for now, and those that were
+    /// reported again meanwhile.
+    private var conflictChecksPending: [String: URL] = [:]
+    private var conflictRechecks: [String: URL] = [:]
 
     /// Where questions for iCloud's daemons are asked; see `OffMain`.
-    var offMain: OffMain = .background
+    var offMain: OffMain
 
     /// A conflict version of a file as `resolveConflict` needs it. Production
     /// builds these from `NSFileVersion`; tests supply their own, because real
@@ -2070,6 +2136,8 @@ final class NoteStore {
         var unreadable = Set<Int>()
         for (index, version) in conflicts.enumerated() {
             let versionRead = prefetched?[index].read ?? readBytes(version.url)
+            // Asked for; the sweep comes back for it, as for a merge that could not be written.
+            if versionRead.isNotDownloaded { needsRetry = true }
             guard case let .bytes(data) = versionRead, var note = note(from: data, at: version.url) else {
                 unreadable.insert(index)
                 continue
@@ -2090,10 +2158,8 @@ final class NoteStore {
                 // Both go to iCloud's daemons, which may be slow to answer.
                 let resolved = conflicts.enumerated().filter { !unreadable.contains($0.offset) }.map(\.element)
                 let removeOthers = unreadable.isEmpty ? otherVersionsRemover : nil
-                offMain.ask({
-                    for version in resolved { version.markResolved() }
-                    removeOthers?(url)
-                }, then: {})
+                let provider = conflictVersionsProvider
+                NoteStore.finishVersions(resolved, of: url, removingOthersWith: removeOthers, asking: provider, on: offMain)
             }
         }
 
@@ -2149,6 +2215,21 @@ final class NoteStore {
         }
     }
 
+    /// Mark the merged versions resolved and, when all of them were, remove the rest.
+    /// This runs later, off the main thread, so a version that arrived since the merge
+    /// is looked for again first: it was never merged, and removing it would lose it.
+    static func finishVersions(
+        _ resolved: [ConflictVersionHandle], of url: URL, removingOthersWith remover: ((URL) -> Void)?,
+        asking provider: @escaping (URL) -> [ConflictVersionHandle], on offMain: OffMain
+    ) {
+        let merged = Set(resolved.map { $0.url.path })
+        offMain.ask({
+            for version in resolved { version.markResolved() }
+            guard let remover else { return }
+            if provider(url).allSatisfy({ merged.contains($0.url.path) }) { remover(url) }
+        }, then: {})
+    }
+
     private var conflictRetries: [String: ScheduledWork] = [:]
     private var conflictRetryAttempts: [String: Int] = [:]
 
@@ -2202,6 +2283,7 @@ final class NoteStore {
                 pathIndex[note.id] = url
                 knownIds.insert(note.id)
                 directory.entries.append(.init(url: url, note: note))
+                knownLabels[fileKey(url)] = note.labels
             }
         }
         // Two files with one id, as Obsidian's "Make a copy" leaves: only one of
@@ -2235,6 +2317,7 @@ final class NoteStore {
                 pathIndex[snapshot.note.id] = url
                 knownIds.insert(snapshot.note.id)
                 directory.entries.append(.init(url: url, note: snapshot.note))
+                knownLabels[fileKey(url)] = snapshot.note.labels
                 labelIndex = nil
             }
         }
@@ -2326,6 +2409,7 @@ final class NoteStore {
         }
         recordSuccess()
         recordWrite(note, to: url, merged: asMerge)
+        OwnWriteLog.shared.record(url)
         return .success(Fingerprint(of: data))
     }
 
@@ -2336,6 +2420,7 @@ final class NoteStore {
         WriteLineage.forget(NoteStore.lineageKey(to))
         do {
             try fm.moveItem(at: from, to: to)
+            OwnWriteLog.shared.record(to)
             WriteLineage.forget(NoteStore.lineageKey(from))
             recordSuccess()
             return true
@@ -2381,6 +2466,10 @@ final class NoteStore {
         let ordered = files.sorted { $0.lastPathComponent < $1.lastPathComponent }
         let legacy = ordered.filter { $0.pathExtension == "json" }
         guard !legacy.isEmpty else { return }
+        // A Markdown file that is not downloaded may be the converted twin of one of
+        // these, which would then be converted again under a second file with its id.
+        // The conversion waits until the folder is whole.
+        if ordered.contains(where: { $0.pathExtension == NoteStore.fileExtension && dataless.blocks($0) }) { return }
 
         // A note with an id that already has a Markdown file in this folder is
         // a conversion an earlier run did not finish, or a copy that came back.

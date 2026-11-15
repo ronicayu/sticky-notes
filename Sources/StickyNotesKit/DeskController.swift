@@ -215,9 +215,15 @@ import AppKit
             // The note is gone and nothing can take its text, or its file cannot
             // be read: a retry would only fail again, so the person's close takes
             // the way out that reconcile and quit use.
+            let notDownloaded = controller.fileNotDownloaded
+            let note = controller.bufferedNote
             if controller.isStranded || controller.fileCannotBeRead,
                self.closeKeepingText(of: controller, alwaysWriteRecoveryFile: controller.fileCannotBeRead) {
                 self.windowControllers.removeValue(forKey: controller.noteId)
+                // The person closed the note, and the text is in the recovery file. The
+                // file itself is moved to the archive, which needs none of its bytes, so
+                // the note does not come back later with the text it had before.
+                if notDownloaded { self.store.archive(note) }
                 return
             }
             self.undo.offerRetryAfterRefusedClose(retry)
@@ -398,7 +404,7 @@ import AppKit
 
         // The daily note has no labels; only "hide all" applies to it, and
         // its own state.visible flag decides whether it should come back.
-        setVisible(dailyNoteController?.window, !notesHidden && DailyNote.loadState(settings: settings).visible)
+        setVisible(dailyNoteController?.window, !notesHidden && DailyNote.loadState(settings: settings, dataless: dataless).visible)
     }
 
     private func setVisible(_ window: NSWindow?, _ visible: Bool) {
@@ -680,7 +686,7 @@ import AppKit
 
     func restoreDailyNoteIfNeeded() {
         guard canShowDailyNote else { return }
-        let state = DailyNote.loadState(settings: settings)
+        let state = DailyNote.loadState(settings: settings, dataless: dataless)
         guard state.visible else { return }
         if dailyNoteController == nil {
             dailyNoteController = makeDailyNoteController()
@@ -709,7 +715,7 @@ import AppKit
     /// daily note is set up.
     func dailyCandidate() -> Note? {
         guard canShowDailyNote else { return nil }
-        let color = DailyNote.loadState(settings: settings).color
+        let color = DailyNote.loadState(settings: settings, dataless: dataless).color
         if let document = dailyNoteController?.dailyDocument {
             return DailyNote.candidate(
                 body: document.isUnavailable ? "" : document.body, day: document.day,
