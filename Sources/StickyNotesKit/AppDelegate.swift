@@ -56,6 +56,9 @@ import AppKit
         desk.restoreActiveNotes()
         desk.startObserving()
         menuBar.startObservingStorageHealth()
+        // After the windows are up: asking about every file's conflict versions
+        // is slow, and the notes are already on screen.
+        store.resolveConflictsInBackground()
 
         storage.startPrefetching()
         desk.restoreDailyNoteIfNeeded()

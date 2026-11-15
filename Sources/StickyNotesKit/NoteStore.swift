@@ -111,6 +111,12 @@ enum WriteLineage {
     }
 }
 
+/// A value handed to another queue that only that queue reads.
+private struct UncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 final class NoteStore {
     static let didChange = Notification.Name("NoteStore.didChange")
 
@@ -218,7 +224,6 @@ final class NoteStore {
         migrateJSONNotes()
         startWatching()
         purgeExpiredTrash()
-        resolveConflicts()
     }
 
     /// Writes whatever is on disk over. For a note this process is creating, or
@@ -624,6 +629,7 @@ final class NoteStore {
     /// left alone.
     @discardableResult
     func reconfigure(rootURL newRoot: URL) -> Bool {
+        storageGeneration += 1
         let active = loadActive()
         let archived = loadArchived()
 
@@ -867,21 +873,65 @@ final class NoteStore {
     /// merged. Called on launch and whenever the watcher reports a change.
     @discardableResult
     func resolveConflicts() -> Int {
-        var resolved = 0
-        var changedIds = Set<UUID>()
+        var files: [URL] = []
         for dir in [activeURL, archiveURL] {
-            guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+            guard let listed = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
                 continue
             }
-            for url in files where url.pathExtension == NoteStore.fileExtension {
-                if let id = resolveConflict(at: url) {
-                    resolved += 1
-                    changedIds.insert(id)
-                }
+            files += listed.filter { $0.pathExtension == NoteStore.fileExtension }
+        }
+        return resolveConflicts(at: files)
+    }
+
+    private func resolveConflicts(at files: [URL]) -> Int {
+        var resolved = 0
+        var changedIds = Set<UUID>()
+        for url in files {
+            if let id = resolveConflict(at: url) {
+                resolved += 1
+                changedIds.insert(id)
             }
         }
         if resolved > 0 { notifyChange(.external(changedIds)) }
         return resolved
+    }
+
+    /// Bumped when the storage moves, so a sweep that was looking at the old root
+    /// is dropped instead of applied to the new one.
+    private var storageGeneration = 0
+
+    /// Merge the conflict versions of every note, without holding up the caller.
+    /// Asking `NSFileVersion` about each file is a round trip to another process,
+    /// so only that question runs on a utility queue. What it finds is merged on
+    /// the main queue, where the store lives and where `beforeResolvingConflicts`
+    /// lets an open window write first, and observers hear `.external(ids)` for
+    /// the notes that changed. `completion` gets the number of files merged.
+    func resolveConflictsInBackground(completion: ((Int) -> Void)? = nil) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let generation = storageGeneration
+        // This is the sweep; the watcher's own, a moment later, would only repeat it on the main queue.
+        lastConflictSweep = clock.now()
+        let folders = [activeURL, archiveURL]
+        let provider = UncheckedSendable(conflictVersionsProvider)
+        let merge = UncheckedSendable { [weak self] (urls: [URL]) in
+            guard let self, self.storageGeneration == generation else { completion?(0); return }
+            let merged = self.resolveConflicts(at: urls)
+            completion?(merged)
+        }
+        DispatchQueue.global(qos: .utility).async {
+            var withConflicts: [URL] = []
+            for dir in folders {
+                guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+                    continue
+                }
+                for url in files where url.pathExtension == NoteStore.fileExtension
+                    && !provider.value(url).isEmpty {
+                    withConflicts.append(url)
+                }
+            }
+            let found = withConflicts
+            DispatchQueue.main.async { merge.value(found) }
+        }
     }
 
     /// A conflict version of a file as `resolveConflict` needs it. Production
