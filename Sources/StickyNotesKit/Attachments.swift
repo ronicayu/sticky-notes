@@ -78,13 +78,15 @@ enum Attachments {
         let name = (reference as NSString).lastPathComponent
             .replacingOccurrences(of: "[", with: "\\[")
             .replacingOccurrences(of: "]", with: "\\]")
-        // A bare space or paren in the destination stops it being a link at
-        // all — here and in Obsidian. Dropped files keep their original name,
-        // so we can't assume it's clean.
-        let destination = reference.addingPercentEncoding(
-            withAllowedCharacters: destinationAllowed
-        ) ?? reference
+        let destination = linkDestination(reference)
         return isImage ? "![\(name)](\(destination))" : "[\(name)](\(destination))"
+    }
+
+    /// A bare space or paren in the destination stops it being a link at
+    /// all — here and in Obsidian. Dropped files keep their original name,
+    /// so we can't assume it's clean.
+    static func linkDestination(_ reference: String) -> String {
+        reference.addingPercentEncoding(withAllowedCharacters: destinationAllowed) ?? reference
     }
 
     private static let destinationAllowed = CharacterSet.urlPathAllowed

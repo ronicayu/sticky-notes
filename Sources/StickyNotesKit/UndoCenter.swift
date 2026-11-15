@@ -47,6 +47,12 @@ import AppKit
         toasts.show(Toast(message: "Note was deleted — your typing is in Trash", undoTitle: "OK", now: clock.now(), undo: {}))
     }
 
+    /// What a switch of storage carried over. One message, nothing to undo.
+    func tellStorageMoved(_ report: StorageSwitchReport) {
+        guard let message = Toast.storageMovedMessage(report) else { return }
+        toasts.show(Toast(message: message, undoTitle: "OK", now: clock.now(), undo: {}))
+    }
+
     /// Whether a toast is waiting for an answer.
     var hasPendingOffer: Bool { toasts.visibleToast != nil }
 

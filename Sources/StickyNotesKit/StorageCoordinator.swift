@@ -7,6 +7,7 @@ import AppKit
     private let store: NoteStore
     private let settings: Settings
     private let desk: DeskController
+    private let undo: UndoCenter?
     private var settingsController: SettingsWindowController?
 
     private lazy var prefetcher = ICloudPrefetcher { [weak self] in
@@ -14,10 +15,11 @@ import AppKit
         self?.desk.handleStoreChange()
     }
 
-    init(store: NoteStore, settings: Settings, desk: DeskController) {
+    init(store: NoteStore, settings: Settings, desk: DeskController, undo: UndoCenter? = nil) {
         self.store = store
         self.settings = settings
         self.desk = desk
+        self.undo = undo
         super.init()
     }
 
@@ -64,7 +66,11 @@ import AppKit
                 .appendingPathComponent("StickyNotes", isDirectory: true)
         }
 
-        store.reconfigure(rootURL: newRoot)
+        // Typing that is still waiting for its save would otherwise land in the
+        // new root against a file the old one gave it.
+        _ = desk.flushForQuit()
+        let report = store.reconfigure(rootURL: newRoot)
+        undo?.tellStorageMoved(report)
         startPrefetching()
 
         // Daily note feature requires a vault — tear down its window when

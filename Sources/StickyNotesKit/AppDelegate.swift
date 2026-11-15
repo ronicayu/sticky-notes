@@ -36,7 +36,7 @@ import AppKit
         undo = UndoCenter(clock: clock)
         desk = DeskController(store: store, settings: settings, clock: clock, undo: undo, recovery: recovery)
         capture = CaptureCoordinator(desk: desk, store: store)
-        storage = StorageCoordinator(store: store, settings: settings, desk: desk)
+        storage = StorageCoordinator(store: store, settings: settings, desk: desk, undo: undo)
         menuBar = MenuBarController(
             store: store, settings: settings, desk: desk, capture: capture, storage: storage, undo: undo
         )

@@ -57,6 +57,19 @@ import XCTest
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.activeURL.path))
     }
 
+    func testTypingStillWaitingForItsSaveIsWrittenBeforeTheStorageMoves() throws {
+        let note = seed("Typing")
+        desk.presentWindow(for: note, activate: false)
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        defer { controller.window?.close() }
+        controller.textView.string = "typed just before the switch"
+        controller.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
+
+        storage.applyStorageMode(.vault(path: vaultPath))
+
+        XCTAssertEqual(store.loadActive().first?.content, "typed just before the switch")
+    }
+
     func testChoosingLocalStorageLeavesTheVaultAndICloud() {
         isolated.settings.obsidianVaultPath = vaultPath
         isolated.settings.useICloud = true
