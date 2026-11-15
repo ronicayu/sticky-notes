@@ -1,7 +1,7 @@
 # Model notes (v3)
 
 Code modelled: commit `c16cef1` (branch `masterpiece`, Phase 0 and 1 complete) with the fixes of N1-N6 (`414f4d9`,
-`5d21840`) and of the review (`12cd68b`). Every file:line below is `git show c16cef1:<path>`; the fixes moved the lines of `ConflictResolver`,
+`5d21840`) and of the two reviews (`12cd68b`, `98c055b`). Every file:line below is `git show c16cef1:<path>`; the fixes moved the lines of `ConflictResolver`,
 `NoteStore`, `NoteDocument`, `DailyDocument`, `DeskController` and `WriteLineage` (now in `NoteStore.swift`). HEAD was `6838780` when the work began; later commits (to `83e94dc`) change
 geometry and comments in `NoteDocument.swift` and `DailyDocument.swift` and add layout pruning to
 `DeskController.reconcileOpenWindows`, which do not change a modelled transition. Re-checked at `9f58340`:
@@ -21,7 +21,7 @@ in `out-v3/`.
 | `DailyDocument.tla` | Model (b): today's daily note across midnight, this Mac plus the other Mac through iCloud |
 | `n-*.cfg`, `d-*.cfg`, `regress-*.cfg` | Configs; `regress-note-*` and `regress-daily-*` are the faithfulness configs (one per fixed bug, N1-N6 included) |
 | `note-doc-view.mjs`, `daily-doc-view.mjs` | Chart views |
-| `out-v5/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config on the fixed code (`out-v3/` is the run of `c16cef1`) |
+| `out-v6/<config>/` | `report.md`, `chart.mmd`, `tlc.out` of every config on the fixed code (`out-v3/` is the run of `c16cef1`) |
 | `run-all.sh` | Reruns every config and the base check |
 
 ## Switch convention
@@ -34,7 +34,9 @@ in `out-v3/`.
   switches: FALSE is the fixed code, TRUE brings the `c16cef1` behaviour back. The configs that showed each finding
   are now `regress-*` configs with the switch TRUE, and the plain config of the same chain has it FALSE.
 - `ALLOW_OLD_RESTORE_KEEPS_BUFFER` (F1, `414f4d9`) and `ALLOW_OLD_STALE_STANDS_IN` (F2, `5d21840`) are the two regressions the review found.
-- Environment constants (`ALLOW_EXTERNAL_EDIT`, ...) only switch an actor on; `ALLOW_EXTERNAL_RESTORE` switches on `ExternalRestore`: an earlier own write is put back on purpose, and the tokens it re-adds count as typed by the person (a stale rewrite adds the tokens it removes to `extRemoved` instead).
+- `ALLOW_OLD_CONFLICT_ANY_OWN` (`414f4d9`, F3): a conflict version equal to an earlier own write was dropped whoever saved it and whenever. Fixed: the model labels a deliberate restore that arrives as a conflict version `restore` and never drops it; in the code that is the version's date and saving computer.
+- `EXCUSE_STALE_BLOCK` is not an old behaviour but a design choice, TRUE everywhere except `n-probe-stale-block`: a block of two own texts after an earlier own file was kept next to our newest text is not counted as spurious.
+- Environment constants (`ALLOW_EXTERNAL_EDIT`, ...) only switch an actor on; `ALLOW_RESTORE_AS_CONFLICT` and `ALLOW_ICLOUD_OLDER_WINS` switch on `ExternalRestoreConflict` and `ICloudSelfConflictOlderWins` (iCloud keeps the older own save as the file and the newest as the conflict version); `ALLOW_EXTERNAL_RESTORE` switches on `ExternalRestore`: an earlier own write is put back on purpose, and the tokens it re-adds count as typed by the person (a stale rewrite adds the tokens it removes to `extRemoved` instead).
 
 ## Abstractions
 
@@ -47,6 +49,7 @@ in `out-v3/`.
   or "none" (the document expects no file). Own writes and adopting a read make it "ok"; any outside write,
   a frontmatter-only rewrite or an iCloud download makes it "stale". A save with "ok" writes, with "stale" or
   "none" finds a conflict, merges and writes.
+- `linM` holds the bodies that only the store wrote as a conflict merge, heal or copy (`Entry.merged`): they are in `lin` (the file holds them) but `Own(t) = lin \ linM` is what vouches for an earlier version, a put-back body or a stale file. `ExternalRestore` re-adds tokens that count as typed and are taken out of `extRemoved`.
 - `base` is `persistedContent`. `lin`/`linNew` are `WriteLineage` (set of own written bodies, newest); the lineage
   is saved in a file and survives a relaunch. It ends only in `Adopted`: a document took over text (`apply`,
   `MergeIn`, `Opened`, daily `Adopt`) that lacks lines of what it showed (or of the newest write when it started

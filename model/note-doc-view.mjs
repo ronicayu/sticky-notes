@@ -23,6 +23,7 @@ export const state = (v) => {
   if (s.hasConf)
     return s.confKind === "own" || s.confKind === "self"
       ? "Older own save kept as a conflict version"
+      : s.confKind === "restore" ? "Deliberate restore waiting as a conflict version"
       : "Other Mac's conflict version waiting";
   if (s.hasPend) return "Outside edit held back";
   if (s.armed)
@@ -65,6 +66,9 @@ const labels = {
   ObsidianStaleRewrite: "Obsidian rewrites the file from an older copy",
   ExternalConflict: "the other Mac's offline edit arrives as a conflict version",
   ICloudSelfConflict: "iCloud keeps an older save as a conflict version",
+  ICloudSelfConflictOlderWins: "iCloud keeps the older save as the file and the newest save as a conflict version",
+  ExternalRestore: "the other Mac puts an earlier version of the text back on purpose",
+  ExternalRestoreConflict: "the other Mac's deliberate restore arrives as a conflict version",
   ExternalMove: "the other Mac archives, trashes or deletes the file",
   FileVanishes: "iCloud hides or locks the file for a while",
   FileReturns: "iCloud shows the file again",

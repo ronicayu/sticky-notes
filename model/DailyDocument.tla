@@ -26,6 +26,7 @@ CONSTANTS
   ALLOW_B_EDITS_OFFLINE,           \* the other Mac edits an older copy: an iCloud conflict version
   ALLOW_B_CREATES_OFFLINE,         \* the other Mac creates the day's file before it sees this Mac's
   ALLOW_SELF_CONFLICT,             \* iCloud keeps an older save of this Mac as a conflict version
+  EXCUSE_STALE_BLOCK,              \* design choice: a block of two own texts after an earlier own file was kept next to our newest is not spurious (TRUE); FALSE shows it
   ALLOW_WRITE_FAILURE,             \* writes on this Mac fail for a while
   \* --- findings N2 and N6 of the re-run model, fixed after c16cef1 (TRUE = bring the c16cef1 behaviour back) ---
   ALLOW_OLD_BLANK_WINNER_BLOCK,    \* N2: a blank file is not replaced by a conflict version that has text
@@ -59,7 +60,7 @@ Init == s = [
   buf |-> Tmpl, base |-> Tmpl, hasPend |-> FALSE, pend |-> <<>>,
   armed |-> FALSE, unsaved |-> FALSE, focus |-> "away", fp |-> "ok", unseen |-> FALSE,
   lf |-> [d \in Days |-> IF d = 1 THEN Synced(Tmpl) ELSE NoFile],
-  lin |-> [d \in Days |-> {}], linNew |-> [d \in Days |-> <<>>],
+  lin |-> [d \in Days |-> {}], linM |-> [d \in Days |-> {}], linNew |-> [d \in Days |-> <<>>],
   hasPrev |-> FALSE, prev |-> <<>>, diskOwn |-> FALSE,
   srvMain |-> [d \in Days |-> d = 1], srvC |-> [d \in Days |-> IF d = 1 THEN Tmpl ELSE <<>>],
   dup |-> FALSE, dupC |-> <<>>, dupSeen |-> FALSE, dupCopy |-> <<>>,
@@ -79,16 +80,19 @@ Rd(t, d) == t
 \* WriteLineage.adopted: the document took `new` as the text in place of `old`; if lines
 \* of `old` are missing from it, the person did not take them out and the lineage ends.
 Adopted(t, d, old, new) ==
-  IF t.lin[d] # {} /\ ~Covered(old, new) THEN [t EXCEPT !.lin[d] = {}, !.brk = TRUE] ELSE t
+  IF t.lin[d] # {} /\ ~Covered(old, new) THEN [t EXCEPT !.lin[d] = {}, !.linM[d] = {}, !.brk = TRUE] ELSE t
 
 \* The file is an earlier write of ours that was put back, not our newest: the sweep
 \* judges our newest text in its place (DailyFile.resolveConflicts, `judged`).
-StaleFile(t, d) == t.lin[d] # {} /\ t.lf[d].c \in t.lin[d] /\ t.lf[d].c # t.linNew[d]
+\* Bodies a window saved; a body only the store wrote as a merge (`linM`) vouches for nothing.
+Own(t, d) == t.lin[d] \ t.linM[d]
+
+StaleFile(t, d) == t.lin[d] # {} /\ t.lf[d].c \in Own(t, d) /\ t.lf[d].c # t.linNew[d]
 
 \* ConflictResolver.versionsToMerge: an own conflict version is dropped when it is an
 \* earlier write than the newest and the newest write's text is in the file.
 DropsOwn(t, d, c) ==
-  /\ ~ALLOW_OLD_NO_LINEAGE /\ t.lin[d] # {} /\ c \in t.lin[d]
+  /\ ~ALLOW_OLD_NO_LINEAGE /\ t.lin[d] # {} /\ c \in Own(t, d)
   /\ c # t.linNew[d] /\ (StaleFile(t, d) \/ Covered(t.linNew[d], t.lf[d].c))
 
 Out(t, ok) == [st |-> t, ok |-> ok]
@@ -98,15 +102,19 @@ WriteLocal(t, d, b) ==
   LET f == t.lf[d]
   IN [t EXCEPT !.lf[d] = [st |-> "file", c |-> b,
                           origin |-> IF f.st = "none" THEN "new" ELSE f.origin, dirty |-> TRUE],
-               !.lin[d] = t.lin[d] \cup {b}, !.linNew[d] = b,
+               !.lin[d] = t.lin[d] \cup {b}, !.linM[d] = t.linM[d] \ {b}, !.linNew[d] = b,
                !.hasPrev = t.hasPrev \/ t.diskOwn,
                !.prev = IF t.diskOwn /\ d = 2 THEN t.lf[d].c ELSE t.prev, !.diskOwn = TRUE,
                !.unseen = TRUE]
 
+\* The same for a write the store makes from other versions (heal, conflict merge).
+WriteMerged(t, d, b) ==
+  LET w == WriteLocal(t, d, b) IN [w EXCEPT !.linM[d] = w.linM[d] \cup ({b} \ t.lin[d])]
+
 \* The document merges an outside version `ext` into the buffer (three-way against base).
 MergeIn(t, ext, known) ==
   LET r == IF ALLOW_OLD_UNBASED_MERGE THEN MergeVersions(t.buf, ext, FALSE, FALSE)
-           ELSE IF t.buf # t.base /\ ext \in t.lin[t.shown] /\ ext # t.linNew[t.shown]
+           ELSE IF t.buf # t.base /\ ext \in Own(t, t.shown) /\ ext # t.linNew[t.shown]
              THEN [c |-> t.buf, blk |-> FALSE, sp |-> FALSE]   \* N1: an older copy of our own text adds nothing
            ELSE ThreeWay(t.base, t.buf, ext)
   IN [Adopted(t, t.shown, t.buf, r.c) EXCEPT !.buf = r.c, !.base = ext, !.hasPend = FALSE, !.pend = <<>>,
@@ -139,7 +147,7 @@ Flush(t) ==
 Heal(t) ==
   IF ~t.dupSeen \/ t.shown # 2 \/ t.lf[2].st # "file" \/ t.diskFull THEN t
   ELSE LET merged == MergeBodies(t.lf[2].c, t.dupCopy)
-           t1 == IF merged.c # t.lf[2].c THEN WriteLocal(Rd(t, 2), 2, merged.c) ELSE t
+           t1 == IF merged.c # t.lf[2].c THEN WriteMerged(Rd(t, 2), 2, merged.c) ELSE t
        IN [t1 EXCEPT !.dupSeen = FALSE, !.dupCopy = <<>>, !.dup = FALSE, !.dupC = <<>>,
                      !.spurious = t.spurious \/ merged.sp]
 
@@ -176,9 +184,8 @@ ResolveConfWith(t, w) ==
            \* file; if not, the file may be a restore made on purpose, so both texts are merged.
            stands == StaleFile(u, 2) /\ Covered(disk, u.linNew[2])
            added == StaleFile(u, 2) /\ ~stands
-           cur == IF stands THEN u.linNew[2]
-                  ELSE IF added THEN MergeVersions(disk, u.linNew[2], FALSE, TRUE).c
-                  ELSE disk
+           m == MergeVersions(disk, u.linNew[2], FALSE, TRUE)
+           cur == IF stands THEN u.linNew[2] ELSE IF added THEN m.c ELSE disk
            dropOwn == DropsOwn(u, 2, u.conf)
            cleared == [u EXCEPT !.hasConf = FALSE, !.conf = <<>>, !.confKind = "none"]
            win == IF w /\ u.confKind = "other" THEN u.conf ELSE cur
@@ -186,7 +193,8 @@ ResolveConfWith(t, w) ==
            r == IF dropOwn \/ u.conf = cur THEN [c |-> cur, blk |-> FALSE, sp |-> FALSE]
                 ELSE MergeVersions(win, lose, FALSE, ~ALLOW_OLD_BLANK_WINNER_BLOCK)
        IN IF r.c = disk THEN cleared
-          ELSE [WriteLocal(cleared, 2, r.c) EXCEPT !.spurious = cleared.spurious \/ (r.sp /\ ~cleared.brk)]
+          ELSE [WriteMerged(cleared, 2, r.c) EXCEPT !.spurious = cleared.spurious \/ (r.sp /\ ~cleared.brk /\ u.conf \notin u.linM[2] /\ disk \notin u.linM[2])
+                                                         \/ (added /\ m.sp /\ ~EXCUSE_STALE_BLOCK)]
 
 
 \* DailyDocument.load for the day now: heal, merge conflict versions, read, else seed.
