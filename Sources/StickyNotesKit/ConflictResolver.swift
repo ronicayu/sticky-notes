@@ -81,19 +81,23 @@ enum ConflictResolver {
 
     /// The notes worth merging: the current file plus every conflict version
     /// except this computer's own older saves. iCloud can keep an earlier save
-    /// from the same Mac as a "conflict"; it holds nothing the current file
-    /// lacks, so appending it only produces a "Conflicted copy" of the user's
-    /// own words.
+    /// from the same Mac as a "conflict"; when this Mac also wrote the current
+    /// file, it holds nothing the current file lacks, so appending it only
+    /// produces a "Conflicted copy" of the user's own words. If another Mac
+    /// wrote the current file, or nobody knows who did, the older save may be
+    /// the only copy of this Mac's text and is kept.
     static func versionsToMerge(
         current: Note?,
         candidates: [ConflictCandidate],
+        currentSavingComputer: String?,
         thisComputer: String?,
         currentModified: Date?
     ) -> [Note] {
         var versions: [Note] = []
         if let current { versions.append(current) }
         for candidate in candidates {
-            if let thisComputer, candidate.savingComputer == thisComputer,
+            if let thisComputer, currentSavingComputer == thisComputer,
+               candidate.savingComputer == thisComputer,
                let saved = candidate.modificationDate, let currentModified,
                saved <= currentModified {
                 continue

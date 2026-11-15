@@ -257,16 +257,40 @@ final class ConflictResolverTests: XCTestCase {
         let versions = ConflictResolver.versionsToMerge(
             current: current,
             candidates: [candidate("older own save", computer: "Mac A", saved: 100)],
+            currentSavingComputer: "Mac A",
             thisComputer: "Mac A",
             currentModified: Date(timeIntervalSince1970: 200)
         )
         XCTAssertEqual(versions.map(\.content), ["current"])
     }
 
+    func testAnOlderVersionFromThisMacIsKeptWhenAnotherMacWroteTheCurrentFile() {
+        let versions = ConflictResolver.versionsToMerge(
+            current: note("written on the desktop", updated: 200),
+            candidates: [candidate("typed on this Mac", computer: "Mac A", saved: 100)],
+            currentSavingComputer: "Mac B",
+            thisComputer: "Mac A",
+            currentModified: Date(timeIntervalSince1970: 200)
+        )
+        XCTAssertEqual(versions.map(\.content), ["written on the desktop", "typed on this Mac"])
+    }
+
+    func testAnOlderVersionIsKeptWhenTheCurrentFilesOriginIsUnknown() {
+        let versions = ConflictResolver.versionsToMerge(
+            current: note("current", updated: 200),
+            candidates: [candidate("older own save", computer: "Mac A", saved: 100)],
+            currentSavingComputer: nil,
+            thisComputer: "Mac A",
+            currentModified: Date(timeIntervalSince1970: 200)
+        )
+        XCTAssertEqual(versions.count, 2)
+    }
+
     func testAConflictVersionFromAnotherMacIsStillMerged() {
         let versions = ConflictResolver.versionsToMerge(
             current: note("current", updated: 200),
             candidates: [candidate("from the desktop", computer: "Mac B", saved: 100)],
+            currentSavingComputer: "Mac A",
             thisComputer: "Mac A",
             currentModified: Date(timeIntervalSince1970: 200)
         )
@@ -277,6 +301,7 @@ final class ConflictResolverTests: XCTestCase {
         let versions = ConflictResolver.versionsToMerge(
             current: note("current", updated: 200),
             candidates: [candidate("newer own save", computer: "Mac A", saved: 300)],
+            currentSavingComputer: "Mac A",
             thisComputer: "Mac A",
             currentModified: Date(timeIntervalSince1970: 200)
         )
@@ -287,6 +312,7 @@ final class ConflictResolverTests: XCTestCase {
         let versions = ConflictResolver.versionsToMerge(
             current: note("current", updated: 200),
             candidates: [candidate("who knows", computer: nil, saved: nil)],
+            currentSavingComputer: "Mac A",
             thisComputer: "Mac A",
             currentModified: Date(timeIntervalSince1970: 200)
         )
@@ -517,6 +543,7 @@ final class ConflictSweepTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         store = NoteStore(rootURL: root, format: .markdown)
         store.thisComputerName = "Mac A"
+        store.currentSavingComputerProvider = { _ in "Mac A" }
     }
 
     override func tearDownWithError() throws {

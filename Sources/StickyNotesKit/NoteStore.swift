@@ -484,6 +484,9 @@ final class NoteStore {
             )
         }
     }
+    var currentSavingComputerProvider: (URL) -> String? = { url in
+        NSFileVersion.currentVersionOfItem(at: url)?.localizedNameOfSavingComputer
+    }
     var otherVersionsRemover: (URL) -> Void = { url in
         try? NSFileVersion.removeOtherVersionsOfItem(at: url)
     }
@@ -529,6 +532,7 @@ final class NoteStore {
         let versions = ConflictResolver.versionsToMerge(
             current: current,
             candidates: candidates,
+            currentSavingComputer: currentSavingComputerProvider(url),
             thisComputer: thisComputerName,
             currentModified: currentModified
         )
