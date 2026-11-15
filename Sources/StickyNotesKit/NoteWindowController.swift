@@ -36,6 +36,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     var onCloseRefused: ((_ retry: @escaping () -> Void) -> Void)?
     /// Called when the note has just been collapsed.
     var onCollapsed: (() -> Void)?
+    /// Called when the window has stopped being key.
+    var onLostKey: (() -> Void)?
     /// Called when a label was removed with its chip, with what puts it back.
     var onLabelRemoved: ((_ label: String, _ restore: @escaping () -> Void) -> Void)?
     /// Called when an untouched note was swept away because focus left it.
@@ -416,7 +418,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         super.init(window: window)
         window.delegate = self
         window.alphaValue = NoteWindowController.blurAlpha
-        window.initialFirstResponder = textView
+        // A collapsed note hides its body: focus must not start in text nobody can see.
+        window.initialFirstResponder = layout.collapsed ? nil : textView
         window.minSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         window.contentMinSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         editor.onTextChange = { [weak self] text in
@@ -1001,6 +1004,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         updateChromeVisibility()
         editor.dismissLabelCompletion()
         noteDocument.blur()
+        onLostKey?()
     }
 
     /// Refresh the window's opacity from the outside, for a window that was
@@ -1167,6 +1171,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             if let responder = window.firstResponder as? NSView, responder.isDescendant(of: bodyContainer) {
                 window.makeFirstResponder(nil)
             }
+            window.initialFirstResponder = nil
             preCollapseHeight = frame.size.height
             // Focus has left the body: an outside edit held back while the
             // person typed is folded in now, as it is when the window loses key.
@@ -1202,6 +1207,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             frame = NoteWindow.clamp(frame, into: visibleScreenFrames())
             setFrameAsToggled(frame)
             recordFrame(frame, resized: true)
+            window.initialFirstResponder = textView
             window.makeFirstResponder(textView)
         }
         updateExpandButtonIcon()

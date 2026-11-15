@@ -16,6 +16,10 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
 
     private var state: DailyNoteState
 
+    /// Brings the app to the front when the person opens the note. The desk
+    /// sets it, so one replacement covers every window.
+    var activateApp: () -> Void = { NSApp.activate(ignoringOtherApps: true) }
+
     private let dragZone: NoteDragZone
     private let dateLabel: CenteredTitleLabel
     private let closeButton: NSButton
@@ -340,16 +344,21 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
     ///   deliberate enough act to create the file, so it shows up in Obsidian
     ///   whether or not they end up typing. Pass false for the launch-time
     ///   restore: that isn't a fresh choice, and it runs unattended on every
-    ///   Mac, which is the shape of thing that collides.
+    ///   Mac, which is the shape of thing that collides. It also does not take
+    ///   key status or activate the app: the person is working in something else.
     func show(userInitiated: Bool = true) {
         // Re-resolve in case the day rolled over while hidden (the
         // belt-and-suspenders companion to the midnight timer and wake
         // observer — covers a reopen that races ahead of either).
         dailyDocument.rolloverIfNeeded(now: clock.now())
         if userInitiated { dailyDocument.createTodaysFileIfMissing() }
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if userInitiated {
+            showWindow(nil)
+            window?.makeKeyAndOrderFront(nil)
+            activateApp()
+        } else {
+            window?.orderFront(nil)
+        }
         persistVisibility(true)
     }
 

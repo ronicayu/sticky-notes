@@ -27,6 +27,9 @@ import AppKit
     var menuBarIconFrame: (() -> NSRect?)?
     /// How long a motion of the given length lasts; Reduce Motion makes it 0.
     var motionDuration: (TimeInterval) -> TimeInterval = { Appearance.animationDuration($0) }
+    /// Brings the app to the front when the person asks for a note. A test
+    /// replaces it: a test host cannot be activated.
+    var activateApp: () -> Void = { NSApp.activate(ignoringOtherApps: true) }
     private var dailyNoteController: DailyNoteWindowController?
     private var notesPanelController: NotesPanelController?
     var notesPanel: NotesPanelController? { notesPanelController }
@@ -81,10 +84,11 @@ import AppKit
     }
 
     /// Open a window for every active note. Labels hidden in a previous session
-    /// stay hidden across a relaunch.
+    /// stay hidden across a relaunch. The notes come up behind whatever the person
+    /// is working in: nothing here takes key status or activates the app.
     func restoreActiveNotes() {
         for note in store.loadActive() {
-            presentWindow(for: note)
+            presentWindow(for: note, activate: false)
         }
         applyVisibility()
     }
@@ -179,8 +183,8 @@ import AppKit
     /// other note appears without ceremony.
     func presentWindow(for note: Note, activate: Bool = true, animateIn: Bool = false) {
         if let existing = windowControllers[note.id] {
-            existing.showWindow(nil)
             if activate {
+                existing.showWindow(nil)
                 existing.window?.makeKeyAndOrderFront(nil)
             } else {
                 existing.window?.orderFront(nil)
@@ -241,15 +245,16 @@ import AppKit
             }
             self.undo.offerRetryAfterRefusedClose(retry)
         }
+        controller.onLostKey = { [weak self] in self?.applyVisibility() }
         windowControllers[note.id] = controller
-        controller.showWindow(nil)
         if activate {
+            controller.showWindow(nil)
             controller.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            activateApp()
         } else {
-            // Sync-induced presentation: float the window in without yanking
-            // focus from whatever the user is doing. It never becomes key, so
-            // nothing else would lift it out of the faded-away state.
+            // Launch and sync-induced presentation: float the window in without
+            // yanking focus from whatever the user is doing. It never becomes
+            // key, so nothing else would lift it out of the faded-away state.
             controller.window?.orderFront(nil)
             controller.refreshAlpha()
         }
@@ -281,11 +286,14 @@ import AppKit
             focusDailyNote()
             return
         }
+        // A note the person opens must not be the first thing "hide all" takes
+        // away again.
+        showAllIfHidden()
         if let controller = windowControllers[id] {
             if controller.isCollapsed { controller.toggleCollapse() }
             controller.showWindow(nil)
             controller.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            activateApp()
             return
         }
         // Fallback: load from disk and present (e.g. file appeared via iCloud sync).
@@ -409,10 +417,14 @@ import AppKit
     /// every store change, including the debounced save behind each keystroke —
     /// ordering already-visible windows to the front would make notes jump
     /// above other apps while you type.
-    func applyVisibility() {
+    /// `keepingKeyNote` is for those store changes: the note being typed in is
+    /// not taken away under the person's hands, whatever its labels say. It goes
+    /// when it loses key (`NoteWindowController.onLostKey`).
+    func applyVisibility(keepingKeyNote: Bool = false) {
         let hiddenLabels = settings.hiddenLabels
         for controller in windowControllers.values {
             let shouldHide = notesHidden || hiddenLabels.contains(where: controller.labels.contains)
+            if shouldHide, keepingKeyNote, controller.window.map(isKeyWindow) == true { continue }
             setVisible(controller.window, !shouldHide)
         }
 
@@ -420,6 +432,10 @@ import AppKit
         // its own state.visible flag decides whether it should come back.
         setVisible(dailyNoteController?.window, !notesHidden && DailyNote.loadState(settings: settings, dataless: dataless).visible)
     }
+
+    /// Whether a window is the one being typed in. A test replaces it, because a
+    /// test host never gives a window key status.
+    var isKeyWindow: (NSWindow) -> Bool = { $0.isKeyWindow }
 
     private func setVisible(_ window: NSWindow?, _ visible: Bool) {
         guard let window = window, window.isVisible != visible else { return }
@@ -504,7 +520,7 @@ import AppKit
         if case let .saved(id) = NoteStore.change(in: notification),
            notification.object as AnyObject === store, windowControllers[id] != nil {
             DispatchQueue.main.async { [weak self] in
-                self?.applyVisibility()
+                self?.applyVisibility(keepingKeyNote: true)
             }
             return
         }
@@ -540,7 +556,7 @@ import AppKit
 
         // Also catches label edits, which change whether a note belongs on
         // screen without changing whether its window exists.
-        applyVisibility()
+        applyVisibility(keepingKeyNote: true)
     }
 
     /// A window is closed for a missing note only when the note is known to be
@@ -695,6 +711,7 @@ import AppKit
         controller.dailyDocument.saveRecovery = { [recovery] body, day in
             recovery.writeDaily(body: body, day: day)
         }
+        controller.activateApp = { [weak self] in self?.activateApp() }
         return controller
     }
 
