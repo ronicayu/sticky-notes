@@ -153,6 +153,12 @@ final class Settings {
         machineFilesFolder.appendingPathComponent("layout.json")
     }
 
+    /// Where this Mac keeps what it wrote to each note file, so that an older copy
+    /// of its own text that turns up after a relaunch is still recognised.
+    var writeLineageURL: URL {
+        machineFilesFolder.appendingPathComponent("write-lineage.json")
+    }
+
     /// Where a storage switch remembers what each root held when it was left.
     var switchRecordsURL: URL {
         machineFilesFolder.appendingPathComponent("storage-switch-records.json")

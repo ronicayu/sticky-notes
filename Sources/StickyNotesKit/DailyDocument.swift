@@ -50,11 +50,7 @@ final class DailyFile: NoteRepository {
             return present ? .unreadable : .missing
         }
         guard let body = String(data: data, encoding: .utf8) else { return .unreadable }
-        // A file that is not our newest write ends the lineage: from then on an
-        // older save of ours may hold the only copy of some text.
-        if !WriteLineage.isNewest(NoteStore.contentHash(body: body), for: NoteStore.lineageKey(url)) {
-            WriteLineage.clear(NoteStore.lineageKey(url))
-        }
+        WriteLineage.observed(body: body, for: NoteStore.lineageKey(url))
         return .file(data, body)
     }
 
@@ -93,7 +89,7 @@ final class DailyFile: NoteRepository {
     private static func writeRecording(_ data: Data, to url: URL) throws -> Fingerprint {
         try data.write(to: url, options: .atomic)
         let body = String(decoding: data, as: UTF8.self)
-        WriteLineage.record(NoteStore.contentHash(body: body), for: NoteStore.lineageKey(url))
+        WriteLineage.record(body: body, for: NoteStore.lineageKey(url))
         return Fingerprint(of: data)
     }
 
@@ -104,6 +100,16 @@ final class DailyFile: NoteRepository {
     static func replaceFile(at url: URL, with body: String, expecting expected: Fingerprint) -> Fingerprint? {
         guard let data = try? Data(contentsOf: url), Fingerprint(of: data) == expected else { return nil }
         return try? writeRecording(Data(body.utf8), to: url)
+    }
+
+    func isEarlierOwnBody(_ body: String, ofNote id: UUID) -> Bool {
+        guard let url = url else { return false }
+        return WriteLineage.containsBody(body, for: NoteStore.lineageKey(url))
+    }
+
+    func textAdopted(_ body: String, over previous: String?, ofNote id: UUID) {
+        guard let url = url else { return }
+        WriteLineage.adopted(body, over: previous, for: NoteStore.lineageKey(url))
     }
 
     func loadNote(id: UUID, archived: Bool) -> Note? {
@@ -132,15 +138,27 @@ final class DailyFile: NoteRepository {
 
     /// Merge the file's iCloud conflict versions (`unresolvedConflicts()`) into
     /// it, as `NoteStore` does for a note: nothing is thrown away, except an
-    /// older copy of this Mac's own save while the file still holds its newest.
+    /// earlier copy of this Mac's own saves (see `ConflictResolver.versionsToMerge`).
     /// A version that cannot be read yet is left unresolved for a later sweep.
     /// Returns whether the file was rewritten.
     @discardableResult
     func resolveConflicts(_ conflicts: [NoteStore.ConflictVersionHandle]) -> Bool {
-        guard let url = url, !conflicts.isEmpty else { return false }
+        resolveConflictsReporting(conflicts) == .merged
+    }
+
+    enum MergeOutcome {
+        /// Nothing to merge, or nothing that a later try would change.
+        case unchanged
+        case merged
+        /// The merged text could not be written, so the versions are still there.
+        case couldNotWrite
+    }
+
+    func resolveConflictsReporting(_ conflicts: [NoteStore.ConflictVersionHandle]) -> MergeOutcome {
+        guard let url = url, !conflicts.isEmpty else { return .unchanged }
         // Without the current file nothing can be judged, and resolving the
         // versions now would discard the only readable copies.
-        guard case let .file(data, body) = read(url) else { return false }
+        guard case let .file(data, body) = read(url) else { return .unchanged }
         let current = note(body: body, updatedAt: Self.modificationDate(of: url) ?? .distantPast)
 
         var conflictNotes: [Note] = []
@@ -166,25 +184,31 @@ final class DailyFile: NoteRepository {
             }
         }
 
-        let key = NoteStore.lineageKey(url)
+        let history = WriteLineage.history(for: NoteStore.lineageKey(url))
         let versions = ConflictResolver.versionsToMerge(
             current: current,
-            currentIsOurNewest: WriteLineage.isNewest(NoteStore.contentHash(current), for: key),
             conflicts: conflictNotes,
-            isOurs: { WriteLineage.contains(NoteStore.contentHash($0), for: key) }
+            ours: ConflictResolver.OwnWrites(
+                isOurs: { history.contains(full: NoteStore.contentHash($0)) },
+                isNewest: { history.isNewest(full: NoteStore.contentHash($0)) },
+                newestBody: history.newestBody
+            )
         )
         guard ConflictResolver.needsMerge(versions),
               let merged = ConflictResolver.merge(versions, now: clock.now()),
-              merged.content != current.content else { return false }
+              merged.content != current.content else { return .unchanged }
 
         // Only over the file this merge was computed from; if something wrote it
         // since, the next sweep redoes the merge.
-        guard case let .file(latest, _) = read(url), latest == data,
-              (try? write(Data(merged.content.utf8), to: url)) != nil else {
+        guard case let .file(latest, _) = read(url), latest == data else {
             mergeLanded = false
-            return false
+            return .unchanged
         }
-        return true
+        guard (try? write(Data(merged.content.utf8), to: url)) != nil else {
+            mergeLanded = false
+            return .couldNotWrite
+        }
+        return .merged
     }
 
     private static func modificationDate(of url: URL) -> Date? {
@@ -243,6 +267,8 @@ final class DailyDocument {
     private var unavailableRetry: ScheduledWork?
     private var rolloverTask: ScheduledWork?
     private var rolloverRetry: ScheduledWork?
+    private var conflictRetry: ScheduledWork?
+    private var conflictRetryAttempts = 0
     private var lastDuplicateSweep = Date.distantPast
 
     /// Where conflict versions of today's file come from. A test supplies its own.
@@ -289,6 +315,7 @@ final class DailyDocument {
         unavailableRetry?.cancel()
         rolloverTask?.cancel()
         rolloverRetry?.cancel()
+        conflictRetry?.cancel()
     }
 
     /// What the window shows, when it is not the placeholder.
@@ -403,13 +430,38 @@ final class DailyDocument {
     /// Merge iCloud's conflict versions of today's file. Unsaved typing is written
     /// first, so the merge is made with it: merged afterwards, a version that
     /// already holds the typing comes back as a second copy of it. If that write
-    /// fails the versions wait for the next change. Not rate-limited like the
+    /// fails, or the merged text cannot be written, a retry is armed. Not rate-limited like the
     /// folder sweep: it asks about one file, and the file itself says whether it
     /// has any.
     private func resolveConflictVersions() {
+        conflictRetry?.cancel()
+        conflictRetry = nil
         let conflicts = file.unresolvedConflicts()
-        guard !conflicts.isEmpty, flush() else { return }
-        file.resolveConflicts(conflicts)
+        guard !conflicts.isEmpty else {
+            conflictRetryAttempts = 0
+            return
+        }
+        guard flush() else {
+            armConflictRetry()
+            return
+        }
+        if file.resolveConflictsReporting(conflicts) == .couldNotWrite {
+            armConflictRetry()
+        } else {
+            conflictRetryAttempts = 0
+        }
+    }
+
+    /// A merge that waited on a write, or could not be written, is tried again
+    /// with a growing delay, as a save is, instead of waiting for the next change.
+    private func armConflictRetry() {
+        let delay = min(NoteDocument.retryDelay * pow(2, Double(conflictRetryAttempts)), NoteDocument.maxRetryDelay)
+        conflictRetryAttempts += 1
+        conflictRetry = scheduler.schedule(after: delay) { [weak self] in
+            guard let self = self else { return }
+            self.conflictRetry = nil
+            self.storeDidChange()
+        }
     }
 
     private func healDuplicates(now: Date) {

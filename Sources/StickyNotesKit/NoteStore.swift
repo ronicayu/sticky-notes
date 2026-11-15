@@ -93,49 +93,221 @@ struct MigrationReport {
     var reassignedDuplicateIds = 0
 }
 
-/// The body hashes this process wrote to each file, oldest first, shared by
-/// every `NoteStore` in the process (a second store on the same folder must
-/// honour the first one's writes). iCloud can keep an earlier save from this
-/// very process as a conflict version. While the file still holds our newest
-/// write, such a version holds only text the user has since edited away, so
-/// it is not a conflict. Any read that finds anything else ends the lineage:
-/// from then on an older save of ours may hold the only copy of some text.
-/// In memory only, so after a relaunch everything merges.
+/// What this Mac wrote to each file, oldest first, shared by every `NoteStore`
+/// in the process (a second store on the same folder must honour the first
+/// one's writes). iCloud can keep an earlier save from this very Mac as a
+/// conflict version, and Obsidian can put an older copy of the note back.
+///
+/// Soundness. The list only grows at its end, so every entry but the last is an
+/// earlier write than the newest one (N). An earlier write E that is one of the
+/// versions of a note adds nothing when its lines are in N, or when the person
+/// took them out of the note in a write between E and N. The list says which
+/// case holds only while the person was the one who changed the text from E to
+/// N, so it ends (`observed`, `adopted`) as soon as text we did not write took
+/// lines of N out of the note: an outside version that lacks lines of N was read
+/// or became the document's text. After that an earlier write may hold the only
+/// copy of a line, and is merged like any other version. An outside append, a
+/// property rewrite, or an older copy of our own text that the window did not
+/// adopt, leaves the list alone, because they take nothing out.
+///
+/// Within that, `ConflictResolver.versionsToMerge` drops an earlier write only
+/// while N's text is itself still in the merge (the file covers it, or N is one
+/// of the versions), and never N itself. An older own body as the current file
+/// does not let a newer own save be dropped: that save is then N, or the file
+/// does not cover N and nothing is dropped. A foreign version is never in the
+/// list, and a version with a line none of our writes had is not an earlier
+/// write, so text found only in another version is merged as before.
+///
+/// The list is saved in a machine-local file (`useFile`), so a relaunch keeps it.
 enum WriteLineage {
+    struct Entry: Codable, Equatable {
+        /// `NoteStore.contentHash` of body, title and labels.
+        var full: String
+        /// The same of the body alone.
+        var body: String
+    }
+
+    /// What one file's list says, as a value a merge can use without the lock.
+    struct History {
+        var entries: [Entry] = []
+        /// The text of the newest write, when it was kept.
+        var newestBody: String?
+
+        var newest: Entry? { entries.last }
+        func contains(full hash: String) -> Bool { entries.contains { $0.full == hash } }
+        func contains(body hash: String) -> Bool { entries.contains { $0.body == hash } }
+        func isNewest(full hash: String) -> Bool { entries.last?.full == hash }
+    }
+
+    private struct Stored: Codable {
+        var writes: [Entry]
+        var newestBody: String?
+        /// Orders files by their latest write, to keep the most recent ones.
+        var touched: Int
+    }
+
+    private struct FileContents: Codable {
+        var version = 1
+        var files: [String: Stored]
+    }
+
+    /// In memory a file keeps this many writes; the saved file keeps fewer.
+    private static let limit = 1000
+    static let savedWritesPerFile = 64
+    static let savedFiles = 300
+    /// A newest write longer than this is not kept as text; coverage then falls
+    /// back to the exact-match test.
+    static let newestBodyLimit = 20_000
+    private static let saveDelay: TimeInterval = 2
+
     private static let lock = NSLock()
     // Every access holds `lock`.
-    nonisolated(unsafe) private static var hashes: [String: [String]] = [:]
-    private static let limit = 1000
+    nonisolated(unsafe) private static var files: [String: Stored] = [:]
+    nonisolated(unsafe) private static var counter = 0
+    nonisolated(unsafe) private static var fileURL: URL?
+    nonisolated(unsafe) private static var saveScheduled = false
+    private static let fileQueue = DispatchQueue(label: "WriteLineage.file", qos: .utility)
 
-    static func record(_ hash: String, for key: String) {
+    static func record(body: String, title: String = "", labels: [String] = [], for key: String) {
+        let entry = Entry(
+            full: NoteStore.contentHash(body: body, title: title, labels: labels),
+            body: NoteStore.contentHash(body: body)
+        )
+        lock.lock()
+        counter += 1
+        var stored = files[key] ?? Stored(writes: [], newestBody: nil, touched: 0)
+        stored.writes.append(entry)
+        if stored.writes.count > limit { stored.writes.removeFirst(stored.writes.count - limit) }
+        stored.newestBody = body.utf8.count <= newestBodyLimit ? body : nil
+        stored.touched = counter
+        files[key] = stored
+        let needsSave = markDirtyLocked()
+        lock.unlock()
+        if needsSave { scheduleSave() }
+    }
+
+    /// Call with `lock` held. True when a save must be scheduled.
+    private static func markDirtyLocked() -> Bool {
+        guard fileURL != nil, !saveScheduled else { return false }
+        saveScheduled = true
+        return true
+    }
+
+    private static func scheduleSave() {
+        fileQueue.asyncAfter(deadline: .now() + saveDelay) { write() }
+    }
+
+    /// A read of the file found `body`. When that is text we never wrote and it
+    /// lacks lines of our newest write, something outside took text out of the
+    /// note that the person did not, so an earlier write may now hold the only
+    /// copy of it: the list ends. An outside append, or a body that is one of our
+    /// own writes (an older copy put back), changes nothing.
+    static func observed(body: String, for key: String) {
+        lock.lock()
+        guard let stored = files[key] else { lock.unlock(); return }
+        let hash = NoteStore.contentHash(body: body)
+        if stored.writes.contains(where: { $0.body == hash }) { lock.unlock(); return }
+        if let newest = stored.newestBody, ConflictResolver.isCovered(newest, by: body) { lock.unlock(); return }
+        files[key] = nil
+        let needsSave = markDirtyLocked()
+        lock.unlock()
+        if needsSave { scheduleSave() }
+    }
+
+    /// A document took `body` as the text of the note in place of `previous`, or
+    /// of the newest write when it had none: it started from the file, or an
+    /// outside version replaced what it showed. If that dropped lines, whoever
+    /// dropped them was not the person, and the list ends, even when `body` is
+    /// one of our own older writes.
+    static func adopted(_ body: String, over previous: String?, for key: String) {
+        lock.lock()
+        guard let stored = files[key] else { lock.unlock(); return }
+        let reference = previous ?? stored.newestBody
+        let kept: Bool
+        if let reference {
+            kept = ConflictResolver.isCovered(reference, by: body)
+        } else {
+            kept = stored.writes.last?.body == NoteStore.contentHash(body: body)
+        }
+        if kept { lock.unlock(); return }
+        files[key] = nil
+        let needsSave = markDirtyLocked()
+        lock.unlock()
+        if needsSave { scheduleSave() }
+    }
+
+    static func history(for key: String) -> History {
         lock.lock(); defer { lock.unlock() }
-        var list = hashes[key, default: []]
-        list.append(hash)
-        if list.count > limit { list.removeFirst(list.count - limit) }
-        hashes[key] = list
+        guard let stored = files[key] else { return History() }
+        return History(entries: stored.writes, newestBody: stored.newestBody)
+    }
+
+    /// True when `hash` (of body, title and labels) is anywhere in the list for `key`.
+    static func contains(_ hash: String, for key: String) -> Bool {
+        history(for: key).contains(full: hash)
+    }
+
+    /// True when `body` is exactly the body of one of the writes for `key`.
+    static func containsBody(_ body: String, for key: String) -> Bool {
+        history(for: key).contains(body: NoteStore.contentHash(body: body))
     }
 
     /// True when `hash` is the most recent write recorded for `key`.
     static func isNewest(_ hash: String, for key: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return hashes[key]?.last == hash
+        history(for: key).isNewest(full: hash)
     }
 
-    /// True when `hash` is anywhere in the lineage for `key`.
-    static func contains(_ hash: String, for key: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return hashes[key]?.contains(hash) ?? false
+    // MARK: - The machine-local file
+
+    /// Keep the list in `url` from now on, and load what an earlier run left
+    /// there. The file must be in a folder that does not sync and is not a storage
+    /// root. Nil keeps the list in memory only, as a test does.
+    static func useFile(_ url: URL?) {
+        var loaded: [String: Stored] = [:]
+        if let url, let data = try? Data(contentsOf: url),
+           let contents = try? JSONDecoder().decode(FileContents.self, from: data), contents.version == 1 {
+            loaded = contents.files
+        }
+        lock.lock()
+        fileURL = url
+        saveScheduled = false
+        files = loaded
+        counter = loaded.values.map(\.touched).max() ?? 0
+        lock.unlock()
     }
 
-    static func clear(_ key: String) {
-        lock.lock(); defer { lock.unlock() }
-        hashes[key] = nil
+    /// Write the list now, for a quit.
+    static func saveNow() {
+        fileQueue.sync { write() }
     }
 
-    /// What a relaunch does.
+    /// Runs on `fileQueue`.
+    private static func write() {
+        lock.lock()
+        saveScheduled = false
+        guard let url = fileURL else { lock.unlock(); return }
+        let kept = files.sorted { $0.value.touched > $1.value.touched }.prefix(savedFiles)
+        var contents = FileContents(files: [:])
+        for (key, stored) in kept {
+            var copy = stored
+            if copy.writes.count > savedWritesPerFile {
+                copy.writes.removeFirst(copy.writes.count - savedWritesPerFile)
+            }
+            contents.files[key] = copy
+        }
+        lock.unlock()
+        guard let data = try? JSONEncoder().encode(contents) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// Forget everything in memory, as a relaunch does, and stop using a file.
     static func reset() {
-        lock.lock(); defer { lock.unlock() }
-        hashes = [:]
+        lock.lock()
+        files = [:]
+        fileURL = nil
+        saveScheduled = false
+        lock.unlock()
     }
 }
 
@@ -244,12 +416,14 @@ final class NoteStore {
     }()
 
     private let clock: AppClock
+    private let scheduler: Scheduler
 
     /// No default root: a store that quietly opens the user's real storage is
     /// how a test ends up writing to it. Production gets its root from `Settings`.
-    init(rootURL: URL, clock: AppClock = SystemClock()) {
+    init(rootURL: URL, clock: AppClock = SystemClock(), scheduler: Scheduler = MainScheduler()) {
         self.rootURL = rootURL
         self.clock = clock
+        self.scheduler = scheduler
         ensureDirectories()
         migrateJSONNotes()
         startWatching()
@@ -345,7 +519,7 @@ final class NoteStore {
             break
         case .nothing, .fingerprint:
             if FileManager.default.fileExists(atPath: url.path) {
-                guard let current = readMainSnapshot(url) else { return .failed(SaveError.unreadableOnDisk) }
+                guard let current = readSnapshot(url) else { return .failed(SaveError.unreadableOnDisk) }
                 if case let .fingerprint(expected) = expectation, current.fingerprint == expected {
                     break
                 }
@@ -365,7 +539,7 @@ final class NoteStore {
     func snapshot(id: UUID, archived: Bool = false) -> NoteSnapshot? {
         let dir = archived ? archiveURL : activeURL
         guard let url = existingURL(for: id, in: dir) else { return nil }
-        return readMainSnapshot(url)
+        return readSnapshot(url)
     }
 
     /// Where a note's file is now, read from disk. Used when a save finds the
@@ -387,7 +561,7 @@ final class NoteStore {
             let dir = directory(of: folder)
             switch rescanForId(id, in: dir) {
             case let .found(url):
-                guard let snapshot = readMainSnapshot(url) else { unknown = true; continue }
+                guard let snapshot = readSnapshot(url) else { unknown = true; continue }
                 switch folder {
                 case .active: return .active(snapshot)
                 case .archive: return .archived(snapshot)
@@ -497,7 +671,7 @@ final class NoteStore {
             return cached.last { $0.id == id }
         }
         guard let url = existingURL(for: id, in: dir) else { return nil }
-        return readMain(url)
+        return read(url)
     }
 
     func archive(_ note: Note) {
@@ -680,6 +854,9 @@ final class NoteStore {
         watcher?.stop()
         watcher = nil
         storageGeneration += 1
+        conflictRetries.values.forEach { $0.cancel() }
+        conflictRetries = [:]
+        conflictRetryAttempts = [:]
         invalidateCache()
 
         // Heals duplicate ids the way every load does, so each note is copied once.
@@ -712,7 +889,7 @@ final class NoteStore {
                   sinceDeparture: sinceDeparture)
         }
         records[dirKey(newRoot)] = switchDestination().copies.reduce(into: [:]) { result, pair in
-            if let note = pair.value.lazy.compactMap({ self.readMain($0.url) }).first, let copy = pair.value.first {
+            if let note = pair.value.lazy.compactMap({ self.read($0.url) }).first, let copy = pair.value.first {
                 result[pair.key.uuidString] = NoteStore.signature(note, copy.folder)
             }
         }
@@ -830,7 +1007,7 @@ final class NoteStore {
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
             for url in files {
                 if url.pathExtension == NoteStore.fileExtension {
-                    guard let note = readMain(url) else { report.notReadable += 1; continue }
+                    guard let note = read(url) else { report.notReadable += 1; continue }
                     entries.append(SwitchEntry(
                         note: note, folder: folder, url: url, placed: NoteStore.deletionDate(of: url) ?? .distantPast))
                 } else if NoteStore.isICloudPlaceholder(url) {
@@ -850,7 +1027,7 @@ final class NoteStore {
             let files = (try? FileManager.default.contentsOfDirectory(at: directory(of: folder), includingPropertiesForKeys: nil)) ?? []
             for url in files {
                 if url.pathExtension == NoteStore.fileExtension {
-                    if let note = readMain(url) {
+                    if let note = read(url) {
                         copies[note.id, default: []].append(DestinationCopy(folder: folder, url: url))
                     } else {
                         unreadable.insert(url.lastPathComponent)
@@ -896,7 +1073,7 @@ final class NoteStore {
         var target = copies.first { $0.folder == folder }
         let primary = target ?? copies.max(by: { placedDate(of: $0.url) < placedDate(of: $1.url) })
 
-        if let primary, let held = readMain(primary.url) {
+        if let primary, let held = read(primary.url) {
             if unchangedSinceArrival {
                 // Nothing here the new root does not already have.
                 report.count(primary.folder)
@@ -1298,7 +1475,7 @@ final class NoteStore {
         var inconclusive = false
         for url in files {
             if url.pathExtension == NoteStore.fileExtension {
-                guard let note = readMain(url) else {
+                guard let note = read(url) else {
                     if couldBeFile(of: id, named: url.lastPathComponent) { inconclusive = true }
                     continue
                 }
@@ -1444,15 +1621,22 @@ final class NoteStore {
     var beforeResolvingConflicts: (UUID) -> Bool = { _ in true }
 
     private func recordWrite(_ note: Note, to url: URL) {
-        WriteLineage.record(NoteStore.contentHash(note), for: NoteStore.lineageKey(url))
+        WriteLineage.record(
+            body: note.content, title: note.title, labels: note.labels, for: NoteStore.lineageKey(url)
+        )
     }
 
-    private func isNewestOwnWrite(_ note: Note, at url: URL) -> Bool {
-        WriteLineage.isNewest(NoteStore.contentHash(note), for: NoteStore.lineageKey(url))
+    /// Whether `body` is exactly the text of a write this Mac made to the note's
+    /// active file, which a document uses to tell an outside writer putting back
+    /// an older copy of the person's own text from new text.
+    func isEarlierOwnBody(_ body: String, ofNote id: UUID) -> Bool {
+        guard let url = pathIndex[id] ?? existingURL(for: id, in: activeURL) else { return false }
+        return WriteLineage.containsBody(body, for: NoteStore.lineageKey(url))
     }
 
-    private func isOwnWrite(_ note: Note, at url: URL) -> Bool {
-        WriteLineage.contains(NoteStore.contentHash(note), for: NoteStore.lineageKey(url))
+    func textAdopted(_ body: String, over previous: String?, ofNote id: UUID) {
+        guard let url = pathIndex[id] ?? existingURL(for: id, in: activeURL) else { return }
+        WriteLineage.adopted(body, over: previous, for: NoteStore.lineageKey(url))
     }
 
     /// The same file reaches us as `/var/...` and `/private/var/...`.
@@ -1473,35 +1657,31 @@ final class NoteStore {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Read a note's own file. Unless it holds the newest text this process
-    /// wrote, the lineage ends: the file is not ours to vouch for any more.
-    private func readMain(_ url: URL) -> Note? {
-        readMainSnapshot(url)?.note
-    }
-
-    private func readMainSnapshot(_ url: URL) -> NoteSnapshot? {
-        guard let snapshot = readSnapshot(url) else { return nil }
-        let key = NoteStore.lineageKey(url)
-        if !WriteLineage.isNewest(NoteStore.contentHash(snapshot.note), for: key) {
-            WriteLineage.clear(key)
-        }
-        return snapshot
-    }
-
     /// Merge one file's conflict versions back into it. iCloud exposes losing
     /// versions through `NSFileVersion`; ignoring them, as we used to, silently
     /// threw away whatever the other Mac wrote.
-    /// Returns the merged note's id when it rewrote the file.
+    /// Returns the merged note's id when it rewrote the file. A merge that could
+    /// not be written, or that waited on a window's text that could not be
+    /// written, is tried again on its own.
     private func resolveConflict(at url: URL) -> UUID? {
+        var needsRetry = false
+        defer { settleConflictRetry(for: url, needed: needsRetry) }
+        return resolveConflict(at: url, needsRetry: &needsRetry)
+    }
+
+    private func resolveConflict(at url: URL, needsRetry: inout Bool) -> UUID? {
         let conflicts = conflictVersionsProvider(url)
         guard !conflicts.isEmpty else { return nil }
 
         // Without the current file nothing can be judged, and resolving the
         // versions now would discard the only readable copies.
-        guard let first = readMainSnapshot(url) else { return nil }
-        guard beforeResolvingConflicts(first.note.id) else { return nil }
+        guard let first = readSnapshot(url) else { return nil }
+        guard beforeResolvingConflicts(first.note.id) else {
+            needsRetry = true
+            return nil
+        }
         // Read again: the owner may have just written its text into the file.
-        guard let snapshot = readMainSnapshot(url) else { return nil }
+        guard let snapshot = readSnapshot(url) else { return nil }
         let current = snapshot.note
 
         var conflictNotes: [Note] = []
@@ -1531,11 +1711,15 @@ final class NoteStore {
             }
         }
 
+        let history = WriteLineage.history(for: NoteStore.lineageKey(url))
         let versions = ConflictResolver.versionsToMerge(
             current: current,
-            currentIsOurNewest: isNewestOwnWrite(current, at: url),
             conflicts: conflictNotes,
-            isOurs: { isOwnWrite($0, at: url) }
+            ours: ConflictResolver.OwnWrites(
+                isOurs: { history.contains(full: NoteStore.contentHash($0)) },
+                isNewest: { history.isNewest(full: NoteStore.contentHash($0)) },
+                newestBody: history.newestBody
+            )
         )
 
         guard ConflictResolver.needsMerge(versions),
@@ -1553,11 +1737,41 @@ final class NoteStore {
 
         // Only over the file this merge was computed from. If something wrote
         // it since, the merge is stale and the next sweep redoes it.
-        guard case .saved = writeIfUnchanged(merged, to: url, expecting: .fingerprint(snapshot.fingerprint)) else {
+        switch writeIfUnchanged(merged, to: url, expecting: .fingerprint(snapshot.fingerprint)) {
+        case .saved:
+            return merged.id
+        case .failed:
+            mergeLanded = false
+            needsRetry = true
+            return nil
+        case .conflict, .gone:
             mergeLanded = false
             return nil
         }
-        return merged.id
+    }
+
+    private var conflictRetries: [String: ScheduledWork] = [:]
+    private var conflictRetryAttempts: [String: Int] = [:]
+
+    /// After a sweep of one file: arm a retry with a growing delay when it needs
+    /// one, as a save does, or forget the delay when it does not.
+    private func settleConflictRetry(for url: URL, needed: Bool) {
+        let key = NoteStore.lineageKey(url)
+        conflictRetries[key]?.cancel()
+        conflictRetries[key] = nil
+        guard needed else {
+            conflictRetryAttempts[key] = nil
+            return
+        }
+        let attempts = conflictRetryAttempts[key, default: 0]
+        conflictRetryAttempts[key] = attempts + 1
+        let delay = min(NoteDocument.retryDelay * pow(2, Double(attempts)), NoteDocument.maxRetryDelay)
+        let generation = storageGeneration
+        conflictRetries[key] = scheduler.schedule(after: delay) { [weak self] in
+            guard let self, self.storageGeneration == generation else { return }
+            self.conflictRetries[key] = nil
+            if let id = self.resolveConflict(at: url) { self.notifyChange(.external([id])) }
+        }
     }
 
     private func loadAll(from dir: URL) -> [Note]? {
@@ -1570,7 +1784,7 @@ final class NoteStore {
         var seen = Set<UUID>()
         var sawDuplicate = false
         for url in files where url.pathExtension == NoteStore.fileExtension {
-            guard let note = readMain(url) else { continue }
+            guard let note = read(url) else { continue }
             if !seen.insert(note.id).inserted { sawDuplicate = true }
             pathIndex[note.id] = url
             knownIds.insert(note.id)
@@ -1608,6 +1822,7 @@ final class NoteStore {
         let note = String(data: data, encoding: .utf8).flatMap {
             parseMarkdown($0, fallbackId: idFromFilename(url) ?? stableId(for: url))
         }
+        if let note { WriteLineage.observed(body: note.content, for: NoteStore.lineageKey(url)) }
         return note.map { NoteSnapshot(note: $0, fingerprint: Fingerprint(of: data)) }
     }
 

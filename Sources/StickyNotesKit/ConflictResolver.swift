@@ -20,8 +20,9 @@ enum ConflictResolver {
     /// user's own text stops being a substring of the newer one after a single
     /// backspace, yet it still adds nothing: a version whose lines the winner
     /// already has is dropped, and a version that holds every line of the
-    /// winner and more replaces it as the base. Only versions with lines on
-    /// both sides that the other lacks are appended.
+    /// winner and more replaces it as the base, as does a version with text when
+    /// the winner is blank. Only versions with lines on both sides that the other
+    /// lacks are appended.
     static func merge(_ versions: [Note], now: Date = Date()) -> Note? {
         guard let winner = versions.max(by: { $0.updatedAt < $1.updatedAt }) else { return nil }
         guard versions.count > 1 else { return winner }
@@ -39,7 +40,7 @@ enum ConflictResolver {
 
         var base = winner.content
         for candidate in candidates
-        where !isCovered(candidate.body, by: base) && isSuperset(candidate.body, of: base) {
+        where !isCovered(candidate.body, by: base) && (isSuperset(candidate.body, of: base) || isBlank(base)) {
             base = candidate.body
         }
 
@@ -86,20 +87,34 @@ enum ConflictResolver {
         return "\(local)\n\n\(divider(for: externalDate, now: now))\n\n\(external)"
     }
 
+    /// What this Mac knows of its own writes to one file, for `versionsToMerge`.
+    struct OwnWrites {
+        /// The note is exactly one of the writes (body, title and labels).
+        var isOurs: (Note) -> Bool
+        /// The note is exactly the newest write.
+        var isNewest: (Note) -> Bool
+        /// The text of the newest write, when it was kept.
+        var newestBody: String?
+    }
+
     /// The notes worth merging: the current file plus its conflict versions,
-    /// minus the ones that are an earlier save of this process's own writing.
-    /// A conflict version is dropped only when the current file is this
-    /// process's newest write (`currentIsOurNewest`) and the version is
-    /// something this process wrote (`isOurs`); otherwise it may hold text
-    /// the file lacks.
-    static func versionsToMerge(
-        current: Note,
-        currentIsOurNewest: Bool,
-        conflicts: [Note],
-        isOurs: (Note) -> Bool
-    ) -> [Note] {
-        guard currentIsOurNewest else { return [current] + conflicts }
-        return [current] + conflicts.filter { !isOurs($0) }
+    /// minus the ones that are an earlier save of this Mac's own writing.
+    ///
+    /// A conflict version is dropped when it is one of our writes but not the
+    /// newest, and the newest is still in the merge: the file covers its text
+    /// (an outside append or a property rewrite after our last save does not stop
+    /// that), or it is itself one of the versions. An earlier write holds only
+    /// text that the newest has or that the person took out in between, so it
+    /// adds nothing. When nothing shows that the newest survives, every version
+    /// is kept, because an earlier write may then hold the only copy of a line.
+    /// A version that is not one of our writes, and the newest write itself, are
+    /// never dropped.
+    static func versionsToMerge(current: Note, conflicts: [Note], ours: OwnWrites) -> [Note] {
+        let newestSurvives = ours.isNewest(current)
+            || ours.newestBody.map { isCovered($0, by: current.content) } == true
+            || conflicts.contains(where: ours.isNewest)
+        guard newestSurvives else { return [current] + conflicts }
+        return [current] + conflicts.filter { ours.isNewest($0) || !ours.isOurs($0) }
     }
 
     static func normalizedBody(_ body: String) -> String { normalize(body) }
@@ -141,7 +156,7 @@ enum ConflictResolver {
     /// matching line of `base`, so a repeated line still counts. The last line
     /// may instead use up a base line it is a prefix of, because an older save
     /// is often cut mid-word.
-    private static func isCovered(_ body: String, by base: String) -> Bool {
+    static func isCovered(_ body: String, by base: String) -> Bool {
         var available: [String: Int] = [:]
         for line in lines(of: base) { available[line, default: 0] += 1 }
         let bodyLines = lines(of: body)
@@ -172,6 +187,8 @@ enum ConflictResolver {
         }
         return next == baseLines.endIndex
     }
+
+    private static func isBlank(_ body: String) -> Bool { lines(of: body).isEmpty }
 
     private static func normalize(_ body: String) -> String {
         body.trimmingCharacters(in: .whitespacesAndNewlines)

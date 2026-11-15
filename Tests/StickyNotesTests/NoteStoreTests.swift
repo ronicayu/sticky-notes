@@ -358,10 +358,10 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertEqual(first.id, second.id, "identity churned between loads")
     }
 
-    /// An outside write ends the lineage, so an older save of ours that iCloud
-    /// kept as a conflict version is merged back rather than taken for text the
-    /// user has since edited away.
-    func testAnOutsideWriteEndsTheLineageSoAnOlderOwnVersionIsMerged() throws {
+    /// An outside append leaves the lineage alone: the file still has all of our
+    /// newest write, so an older save of ours that iCloud kept as a conflict
+    /// version holds only text the person has since edited away.
+    func testAnOutsideAppendDoesNotStopAnOlderOwnVersionFromBeingDropped() throws {
         let store = makeStore()
         var note = makeNote(content: "teh cat\nsat down")
         store.save(note)
@@ -382,7 +382,7 @@ final class NoteStoreTests: XCTestCase {
         store.handleFileSystemEvent()
 
         let content = try XCTUnwrap(store.loadNote(id: note.id)).content
-        XCTAssertTrue(content.contains("teh cat"), "the older version was dropped: \(content)")
+        XCTAssertFalse(content.contains("teh cat"), "an older save of ours came back as a conflict: \(content)")
         XCTAssertTrue(content.contains("from Obsidian"), content)
     }
 

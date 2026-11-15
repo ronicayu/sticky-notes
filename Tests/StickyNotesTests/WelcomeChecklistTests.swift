@@ -297,6 +297,8 @@ import XCTest
         outside.updatedAt = clock.now().addingTimeInterval(5)
         let other = NoteStore(rootURL: root, clock: clock)
         other.save(outside)
+        // Obsidian's write is not one of this Mac's.
+        WriteLineage.reset()
         defer { other.stopWatching() }
         controller.handleStoreChange()
         scheduler.advance(by: NoteDocument.debounce * 4)

@@ -818,6 +818,38 @@ import XCTest
         XCTAssertTrue(undo.hasPendingOffer)
     }
 
+    /// Obsidian wrote frontmatter the parser rejects, or iCloud has not downloaded
+    /// the file: a close was refused for as long as that lasted.
+    func testClosingANoteWhoseFileCannotBeReadWritesARecoveryFile() throws {
+        let note = seed("Unreadable")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        type("body of Unreadable and a late thought", into: controller)
+        let file = try XCTUnwrap(files(in: store.activeURL).first)
+        try Data([0xff, 0xfe, 0xfd]).write(to: file)
+
+        controller.closeNote()
+
+        XCTAssertNil(desk.windowControllers[note.id], "the window could not be closed")
+        let recovered = try files(in: RecoveryFiles(settings: isolated.settings, store: store, clock: clock).folder)
+        XCTAssertTrue(try String(contentsOf: XCTUnwrap(recovered.first)).contains("a late thought"))
+        XCTAssertTrue(undo.hasPendingOffer)
+    }
+
+    func testClosingAnUntouchedNoteWhoseFileCannotBeReadAlsoWritesARecoveryFile() throws {
+        let note = seed("Untouched")
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        let file = try XCTUnwrap(files(in: store.activeURL).first)
+        try Data([0xff, 0xfe, 0xfd]).write(to: file)
+
+        controller.closeNote()
+
+        XCTAssertNil(desk.windowControllers[note.id])
+        let recovered = try files(in: RecoveryFiles(settings: isolated.settings, store: store, clock: clock).folder)
+        XCTAssertFalse(recovered.isEmpty)
+    }
+
     /// A note renamed on the other Mac and still downloading is listed under a
     /// name that says nothing of this note's.
     func testReconcileKeepsTheWindowOfANoteThatIsDownloadingUnderANewName() throws {

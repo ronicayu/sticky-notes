@@ -117,6 +117,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
     /// The note's file is gone and its text could not be written anywhere.
     var isStranded: Bool { noteDocument.isStranded }
+    var fileCannotBeRead: Bool { noteDocument.fileCannotBeRead }
 
     /// Discard without archiving. Used for abandoned captures, which should
     /// leave no trace at all. Text that arrived from outside since the window

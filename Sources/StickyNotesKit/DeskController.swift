@@ -210,10 +210,11 @@ import AppKit
         }
         controller.onCloseRefused = { [weak self, weak controller] retry in
             guard let self = self, let controller = controller else { return }
-            // The note is gone and nothing can take its text: a retry would only
-            // fail again, so the person's close takes the way out that reconcile
-            // and quit use.
-            if controller.isStranded, self.closeKeepingText(of: controller) {
+            // The note is gone and nothing can take its text, or its file cannot
+            // be read: a retry would only fail again, so the person's close takes
+            // the way out that reconcile and quit use.
+            if controller.isStranded || controller.fileCannotBeRead,
+               self.closeKeepingText(of: controller, alwaysWriteRecoveryFile: controller.fileCannotBeRead) {
                 self.windowControllers.removeValue(forKey: controller.noteId)
                 return
             }
@@ -535,8 +536,11 @@ import AppKit
     /// Close a window whose note is gone. Text typed into it is written where the
     /// note went; if the store cannot take it, to a recovery file. Only when
     /// neither works does the window stay open, with a retry armed.
-    private func closeKeepingText(of controller: NoteWindowController) -> Bool {
-        if controller.closeAfterExternalDeletion() { return true }
+    /// `alwaysWriteRecoveryFile` is for a note whose file cannot be read: what the
+    /// window holds may differ from what that file holds, so the window's text
+    /// is kept apart whether or not it counts as unsaved.
+    private func closeKeepingText(of controller: NoteWindowController, alwaysWriteRecoveryFile: Bool = false) -> Bool {
+        if !alwaysWriteRecoveryFile, controller.closeAfterExternalDeletion() { return true }
         guard recovery.write(controller.bufferedNote) else { return false }
         undo.tellRecoveredCopy(in: "the Recovered folder")
         return controller.closeAfterExternalDeletion(textKeptElsewhere: true)

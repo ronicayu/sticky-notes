@@ -86,6 +86,10 @@ final class NoteDocument {
     /// refused for a reason that waiting will not fix quickly.
     private(set) var isStranded = false
 
+    /// The last write was refused because the note's file cannot be read or
+    /// found, so the text is on no disk and a retry may be a long time coming.
+    private(set) var fileCannotBeRead = false
+
     private var retryAttempts = 0
     private var retryArmed = false
     private var armedRetryDelay: TimeInterval = 0
@@ -147,6 +151,7 @@ final class NoteDocument {
         self.scheduler = scheduler
         self.clock = clock
         let snapshot = repository.snapshot(id: note.id, archived: false)
+        repository.textAdopted(note.content, over: nil, ofNote: note.id)
         persistedFingerprint = Self.fingerprint(of: snapshot, matching: note)
         // A document that has seen the file has seen its properties too.
         if persistedFingerprint != nil, let snapshot { buffer.preserved = snapshot.note.preserved }
@@ -175,6 +180,7 @@ final class NoteDocument {
         saveTask?.cancel()
         saveTask = nil
         pendingExternal = nil
+        repository.textAdopted(note.content, over: nil, ofNote: note.id)
         buffer = note
         persistedContent = note.content
         persistedTitle = note.title
@@ -319,7 +325,8 @@ final class NoteDocument {
     /// changed away from the base is that side's, with no merge: a properties-only
     /// rewrite never reverts the person's typing, and an untouched buffer takes
     /// the outside text whole. A body both sides changed is merged by
-    /// `ConflictResolver`, which keeps both. A title both sides changed stays the
+    /// `ConflictResolver`, which keeps both, unless the outside body is an earlier
+    /// write of this Mac's own, which adds nothing. A title both sides changed stays the
     /// person's, and the other is added to the text as an "Also titled" line.
     /// Labels follow the same rule as the body: added together only when both
     /// sides changed them.
@@ -341,12 +348,20 @@ final class NoteDocument {
         let externalChangedBody = external.content != persistedContent
         let localChangedBody = buffer.content != persistedContent
         if externalChangedBody {
-            taken.content = localChangedBody
-                ? Self.mergedBody(
+            if !localChangedBody {
+                taken.content = external.content
+            } else if repository.isEarlierOwnBody(external.content, ofNote: buffer.id) {
+                // An older copy of what the person wrote, put back by Obsidian or
+                // a sync: every line in it was typed here, and the buffer holds
+                // what the person kept of it. Merging it would add it back as
+                // someone else's text.
+                taken.content = buffer.content
+            } else {
+                taken.content = Self.mergedBody(
                     base: persistedContent, local: buffer.content,
                     external: external.content, externalDate: external.updatedAt, now: clock.now()
                 )
-                : external.content
+            }
         }
 
         let externalChangedTitle = external.title != persistedTitle
@@ -415,6 +430,7 @@ final class NoteDocument {
         // against; a merged buffer differs from it until the save that follows.
         // A stale record made every later outside edit look like it landed on
         // unsaved work and get deferred.
+        repository.textAdopted(updated.content, over: buffer.content, ofNote: buffer.id)
         persistedContent = source.content
         persistedTitle = source.title
         persistedLabels = source.labels
@@ -489,7 +505,11 @@ final class NoteDocument {
         for _ in 0..<Self.maxSaveAttempts {
             buffer.updatedAt = clock.now()
             switch repository.save(buffer, expecting: persistedFingerprint) {
-            case .failed:
+            case let .failed(error):
+                switch error as? SaveError {
+                case .unreadableOnDisk?, .locationUnknown?: fileCannotBeRead = true
+                case nil: fileCannotBeRead = false
+                }
                 scheduleRetry()
                 return false
             case let .saved(fingerprint):
@@ -528,6 +548,7 @@ final class NoteDocument {
     private func markPersisted() {
         retryAttempts = 0
         isStranded = false
+        fileCannotBeRead = false
         persistedContent = buffer.content
         persistedTitle = buffer.title
         persistedLabels = buffer.labels

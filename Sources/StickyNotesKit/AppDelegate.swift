@@ -10,6 +10,7 @@ import AppKit
     /// suite and a fixed clock.
     public convenience override init() {
         let settings = Settings(defaults: .standard)
+        WriteLineage.useFile(settings.writeLineageURL)
         self.init(
             store: NoteStore(rootURL: settings.preferredStorageRoot),
             settings: settings,
@@ -84,6 +85,10 @@ import AppKit
         case .keepTrying: return .terminateCancel
         case .quitAnyway: return .terminateNow
         }
+    }
+
+    public func applicationWillTerminate(_ notification: Notification) {
+        WriteLineage.saveNow()
     }
 
     enum UnsavedNotesChoice { case keepTrying, quitAnyway }

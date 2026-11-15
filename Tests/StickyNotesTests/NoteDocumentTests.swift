@@ -964,6 +964,8 @@ final class NoteDocumentTests: XCTestCase {
         elsewhere.content = "created on the other Mac"
         elsewhere.updatedAt = Date(timeIntervalSince1970: 1_900_000_000)
         store.save(elsewhere)
+        // The other Mac's write is not one of this Mac's.
+        WriteLineage.reset()
 
         document.setBody("created here")
         scheduler.advance(by: 1)

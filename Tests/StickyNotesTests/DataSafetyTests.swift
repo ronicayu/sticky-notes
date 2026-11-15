@@ -346,12 +346,19 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertTrue(merged.content.contains("Conflicted copy"), "got \(merged.content)")
     }
 
-    func testAClearedNoteIsNotRevertedByAnOlderCopy() throws {
+    func testABlankCurrentFileTakesAConflictVersionWithoutADivider() throws {
         let merged = try XCTUnwrap(ConflictResolver.merge([
-            note("", updated: 200), note("old text", updated: 100)
+            note("", updated: 200), note("text from the other Mac\nsecond line", updated: 100)
         ], now: now))
-        XCTAssertTrue(merged.content.contains("Conflicted copy"), "got \(merged.content)")
-        XCTAssertTrue(merged.content.contains("old text"), "got \(merged.content)")
+        XCTAssertEqual(merged.content, "text from the other Mac\nsecond line")
+    }
+
+    func testABlankCurrentFileTakesTheOlderOfTwoVersionsAndKeepsTheOtherUnderADivider() throws {
+        let merged = try XCTUnwrap(ConflictResolver.merge([
+            note("", updated: 300), note("one", updated: 100), note("two", updated: 200)
+        ], now: now))
+        XCTAssertTrue(merged.content.hasPrefix("one"), "got \(merged.content)")
+        XCTAssertTrue(merged.content.contains("Conflicted copy") && merged.content.contains("two"), "got \(merged.content)")
     }
 
     func testABodyMergeDoesNotRevertAReorder() {
@@ -362,21 +369,36 @@ final class ConflictResolverTests: XCTestCase {
         XCTAssertTrue(merged.contains("Conflicted copy"), "got \(merged)")
     }
 
-    func testVersionsFromThisProcessAreDroppedOnlyWhenTheFileIsOursToo() {
-        let current = note("current", updated: 200)
+    func testAnEarlierOwnVersionIsDroppedOnlyWhileTheNewestWriteIsStillInTheMerge() {
+        let current = note("newest own save\nan outside line", updated: 200)
         let own = note("older own save", updated: 100)
         let theirs = note("from another Mac", updated: 100)
-        let isOurs: (Note) -> Bool = { $0.content == "older own save" }
+        let isOurs: (Note) -> Bool = { $0.content == "older own save" || $0.content == "newest own save" }
+        let isNewest: (Note) -> Bool = { $0.content == "newest own save" }
 
-        let ours = ConflictResolver.versionsToMerge(
-            current: current, currentIsOurNewest: true, conflicts: [own, theirs], isOurs: isOurs
+        let covered = ConflictResolver.versionsToMerge(
+            current: current, conflicts: [own, theirs],
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestBody: "newest own save")
         )
-        XCTAssertEqual(ours.map(\.content), ["current", "from another Mac"])
+        XCTAssertEqual(covered.map(\.content), [current.content, "from another Mac"], "the file covers the newest write")
 
-        let notOurs = ConflictResolver.versionsToMerge(
-            current: current, currentIsOurNewest: false, conflicts: [own, theirs], isOurs: isOurs
+        let newestIsAVersion = ConflictResolver.versionsToMerge(
+            current: current, conflicts: [own, note("newest own save", updated: 150)],
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestBody: nil)
         )
-        XCTAssertEqual(notOurs.count, 3)
+        XCTAssertEqual(newestIsAVersion.map(\.content), [current.content, "newest own save"])
+
+        let lost = ConflictResolver.versionsToMerge(
+            current: current, conflicts: [own, theirs],
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestBody: "a line only the newest write had")
+        )
+        XCTAssertEqual(lost.count, 3, "the newest write is nowhere, so an earlier one may hold the only copy")
+
+        let unknown = ConflictResolver.versionsToMerge(
+            current: current, conflicts: [own, theirs],
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestBody: nil)
+        )
+        XCTAssertEqual(unknown.count, 3)
     }
 
     // MARK: - needsMerge
@@ -817,7 +839,8 @@ final class ConflictSweepTests: XCTestCase {
     }
 
     /// The same, when the sweep was skipped: the window adopts the older body
-    /// and the user types on from it.
+    /// and the user types on from it. The newer save then exists only in the
+    /// conflict version, because the older body took its line out.
     func testANewerOwnSaveIsKeptAfterTheWindowAdoptsAnOlderOwnBody() throws {
         var note = savedNote("A")
         let url = try fileURL()
@@ -825,13 +848,15 @@ final class ConflictSweepTests: XCTestCase {
         note.updatedAt = Date()
         store.save(note)
         let newer = try version(of: note, content: "A\nnew line")
+        let clock = ManualClock()
+        let scheduler = TestScheduler(clock: clock)
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
         try rawNote(id: note.id, content: "A", updated: "2026-12-01T00:00:00Z")
             .write(to: url, atomically: true, encoding: .utf8)
-        XCTAssertEqual(try XCTUnwrap(store.loadNote(id: note.id)).content
-            .trimmingCharacters(in: .whitespacesAndNewlines), "A")
-        note.content = "A!"
-        note.updatedAt = Date()
-        store.save(note)
+        document.storeDidChange()
+        XCTAssertEqual(document.buffer.content.trimmingCharacters(in: .whitespacesAndNewlines), "A")
+        document.edit { $0.content = "A!" }
+        scheduler.advance(by: 1)
         store.conflictVersionsProvider = { _ in [newer] }
         store.otherVersionsRemover = { _ in }
 

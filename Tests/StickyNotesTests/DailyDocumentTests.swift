@@ -821,6 +821,48 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertFalse(document.hasUnsavedEdits)
     }
 
+    func testABlankDailyFileTakesAConflictVersionWithoutADivider() throws {
+        try write("")
+        let document = makeDocument(conflicts: [try conflictVersion("from the laptop\nsecond line")])
+
+        document.storeDidChange()
+
+        XCTAssertEqual(document.body.trimmingCharacters(in: .whitespacesAndNewlines), "from the laptop\nsecond line")
+        XCTAssertFalse(document.body.contains("Conflicted copy"), document.body)
+    }
+
+    /// The merge could not be written (the disk refused), so the version stays and
+    /// the merge is tried again on its own, with a growing delay.
+    func testAConflictMergeThatCouldNotBeWrittenIsRetried() throws {
+        try write("from this Mac")
+        var resolved = 0
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        versions = [try conflictVersion("from the laptop") { resolved += 1 }]
+        let folder = try url().deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path) }
+
+        document.storeDidChange()
+        XCTAssertEqual(resolved, 0)
+        XCTAssertEqual(try text(), "from this Mac", "the write was meant to fail")
+
+        scheduler.advance(by: NoteDocument.retryDelay)
+        XCTAssertEqual(resolved, 0, "the disk still refuses")
+        scheduler.advance(by: NoteDocument.retryDelay)
+        XCTAssertEqual(resolved, 0, "the second retry waits twice as long")
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+        scheduler.advance(by: NoteDocument.retryDelay * 2)
+
+        XCTAssertEqual(resolved, 1)
+        XCTAssertTrue(try text().contains("from this Mac") && text().contains("from the laptop"))
+        XCTAssertEqual(document.body, try text())
+    }
+
     /// iCloud keeps this Mac's earlier saves as conflict versions. While the file
     /// holds our newest save, such a copy holds only text since edited away.
     func testAnOlderOwnDailySaveWithATypoFixedLaterIsDroppedWithNoDivider() throws {
