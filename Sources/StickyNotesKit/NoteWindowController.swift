@@ -915,10 +915,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         // is not about this file: neither is worth a disk read.
         if case let .saved(id) = NoteStore.change(in: notification) {
             if id == note.id, notification.object as AnyObject !== store,
-               let written = store.snapshot(id: id)?.note {
+               let written = store.snapshot(id: id) {
                 // Another store wrote this note. This store's cache cannot
                 // hold that write, so the file itself is the only place to look.
-                noteDocument.externalChange(written)
+                noteDocument.externalChange(written.note, fingerprint: written.fingerprint)
             }
             return
         }

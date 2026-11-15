@@ -266,9 +266,9 @@ private final class ChangeLog: @unchecked Sendable {
         withExtendedLifetime(controller) {}
     }
 
-    /// Covers the synchronous part only: the watcher's echo of the save is a
-    /// `.reset`, which drops the cache and makes every window read again.
-    func testTheSynchronousPartOfAWindowsSaveReadsNoFiles() throws {
+    /// Typing reads nothing. The save a pause in typing triggers reads the file
+    /// once, to check it is still what the window last saw.
+    func testTypingReadsNoFilesAndASaveReadsTheFileOnce() throws {
         let store = NoteStore(rootURL: root)
         let shown = makeNote("on screen")
         store.save(shown)
@@ -279,10 +279,12 @@ private final class ChangeLog: @unchecked Sendable {
 
         controller.textView.string = "on screen, edited"
         controller.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
+        XCTAssertEqual(store.readCount, reads, "typing read a file")
+
         controller.flushPendingSave()
 
         XCTAssertEqual(store.loadNote(id: shown.id)?.content, "on screen, edited")
-        XCTAssertEqual(store.readCount, reads, "saving a window's own note read files")
+        XCTAssertEqual(store.readCount, reads + 1, "a save must read the file exactly once")
     }
 
     // MARK: - Duplicate ids

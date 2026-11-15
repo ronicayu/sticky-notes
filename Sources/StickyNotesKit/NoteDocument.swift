@@ -61,9 +61,16 @@ final class NoteDocument {
     private var persistedContent: String
     private var persistedTitle: String
 
-    /// The fingerprint of the bytes the last successful write produced. Saves
-    /// are still blind, so nothing reads it yet.
+    /// The fingerprint of the file as this document last wrote or read it, the
+    /// one every save is checked against. Nil means no file is expected: the
+    /// note is being created, or what the file holds is not known, and a save
+    /// then finds the file as a conflict and merges with it instead of
+    /// overwriting it.
     private(set) var persistedFingerprint: Fingerprint?
+
+    /// How many times one save merges with a file that changed under it before
+    /// giving up and arming a retry.
+    static let maxSaveAttempts = 3
 
     private let repository: NoteRepository
     private let scheduler: Scheduler
@@ -81,7 +88,10 @@ final class NoteDocument {
     var didApplyExternal: (Applied) -> Void = { _ in }
 
     /// `note` is as just saved or as last read, so the watcher's echo of it is
-    /// not an outside edit.
+    /// not an outside edit. The file is read once here: if it holds what `note`
+    /// does, its fingerprint is the baseline for saves. A note with no file yet
+    /// starts with none, and one whose file differs from `note` too, so its
+    /// first save merges with the file rather than replacing it.
     init(note: Note, repository: NoteRepository, scheduler: Scheduler = MainScheduler(), clock: AppClock = SystemClock()) {
         buffer = note
         persistedContent = note.content
@@ -89,6 +99,18 @@ final class NoteDocument {
         self.repository = repository
         self.scheduler = scheduler
         self.clock = clock
+        persistedFingerprint = Self.fingerprint(of: repository.snapshot(id: note.id, archived: false), matching: note)
+    }
+
+    /// The snapshot's fingerprint when the snapshot holds the same text as
+    /// `note`, so a document that adopts that fingerprint has seen the file.
+    private static func fingerprint(of snapshot: NoteSnapshot?, matching note: Note) -> Fingerprint? {
+        guard let snapshot, hasSameText(snapshot.note, note) else { return nil }
+        return snapshot.fingerprint
+    }
+
+    private static func hasSameText(_ a: Note, _ b: Note) -> Bool {
+        a.content == b.content && a.title == b.title && a.labels == b.labels
     }
 
     var id: UUID { buffer.id }
@@ -96,15 +118,16 @@ final class NoteDocument {
     /// Start over from `note`, as just read from disk: the buffer, the baseline
     /// and every armed save or held-back edit are replaced. For an owner whose
     /// document moves to another file, such as the daily note on a new day. The
-    /// caller must have saved or kept whatever the buffer held.
-    func reset(to note: Note) {
+    /// caller must have saved or kept whatever the buffer held. `fingerprint` is
+    /// that of the file `note` was read from, or nil when there is no file yet.
+    func reset(to note: Note, fingerprint: Fingerprint? = nil) {
         saveTask?.cancel()
         saveTask = nil
         pendingExternal = nil
         buffer = note
         persistedContent = note.content
         persistedTitle = note.title
-        persistedFingerprint = nil
+        persistedFingerprint = fingerprint
         wasNeverEdited = true
         isClosed = false
     }
@@ -154,13 +177,16 @@ final class NoteDocument {
     // MARK: - Outside changes
 
     /// Something other than this document may have rewritten the note's file.
+    /// The file is read, not the store's cache, because the fingerprint of the
+    /// bytes is what keeps the next save from overwriting this version.
     func storeDidChange() {
-        guard let updated = repository.loadNote(id: buffer.id, archived: false) else { return }
-        externalChange(updated)
+        guard let snapshot = repository.snapshot(id: buffer.id, archived: false) else { return }
+        externalChange(snapshot.note, fingerprint: snapshot.fingerprint)
     }
 
-    /// An outside version of the note, as read from disk.
-    func externalChange(_ updated: Note) {
+    /// An outside version of the note, as read from disk. `fingerprint` is that
+    /// of the file it came from, when the reader has it.
+    func externalChange(_ updated: Note, fingerprint: Fingerprint? = nil) {
         // Our own write, echoed back by the watcher. Mid-burst it is the text as
         // of the last debounce, which is not an outside edit.
         if updated.content == persistedContent, updated.title == persistedTitle { return }
@@ -180,7 +206,7 @@ final class NoteDocument {
             pendingExternal = updated
             return
         }
-        apply(updated)
+        apply(updated, from: updated, fingerprint: fingerprint)
     }
 
     /// The window lost focus: fold in an outside edit that was held back.
@@ -194,7 +220,10 @@ final class NoteDocument {
     /// Fold a held-back outside edit into what the person has been typing. The
     /// buffer has not necessarily been saved yet, so writing either side over
     /// the other loses text; `ConflictResolver` keeps both.
-    private func mergePendingExternal() {
+    ///
+    /// `fingerprint` is that of the file `external` was read from, when known;
+    /// otherwise the file is read again.
+    private func mergePendingExternal(fingerprint: Fingerprint? = nil) {
         guard let external = pendingExternal else { return }
         pendingExternal = nil
 
@@ -205,7 +234,7 @@ final class NoteDocument {
         if Self.isBlank(buffer) {
             var taken = external
             taken.labels = buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
-            apply(taken)
+            apply(taken, from: external, fingerprint: fingerprint)
             return
         }
 
@@ -221,14 +250,27 @@ final class NoteDocument {
               var merged = ConflictResolver.merge([local, external], now: clock.now())
         else {
             if localTitleWins { return }
-            apply(external)
+            apply(external, from: external, fingerprint: fingerprint)
             return
         }
         if localTitleWins { merged.title = local.title }
-        apply(merged)
+        apply(merged, from: external, fingerprint: fingerprint)
     }
 
-    private func apply(_ updated: Note) {
+    /// Make `updated` the buffer's text. It came from the outside version
+    /// `source`, which the next save must not overwrite unseen, so the
+    /// fingerprint is brought up to the file that version was read from.
+    private func apply(_ updated: Note, from source: Note, fingerprint: Fingerprint?) {
+        if let fingerprint {
+            persistedFingerprint = fingerprint
+        } else if let fresh = Self.fingerprint(
+            of: repository.snapshot(id: buffer.id, archived: false), matching: source
+        ) {
+            persistedFingerprint = fresh
+        }
+        // Otherwise the file has moved on since `source` was read, and the stale
+        // fingerprint stays, so the next save meets it as a conflict and merges.
+
         // The buffer now is this version, so it is what the buffer is compared
         // against. A stale record made every later outside edit look like it
         // landed on unsaved work and get deferred.
@@ -270,31 +312,45 @@ final class NoteDocument {
 
     /// Write the note and remember exactly what went to disk.
     ///
+    /// The write is checked against the fingerprint of the file as this document
+    /// last read or wrote it. When the file has changed since, nothing is
+    /// overwritten: that version is merged into the buffer the way any outside
+    /// edit is, and the save is tried again against it. A file that keeps
+    /// changing under the save is given up on after `maxSaveAttempts`; the
+    /// buffer keeps the merged text and counts as unsaved.
+    ///
     /// A write that did not land does not mark the buffer as persisted, so it
     /// still counts as unsaved, and another attempt is armed. Returns false for
     /// that case, so a caller about to archive or close can stop. A note whose
     /// file is gone returns true: there is nothing to retry, and the window is
     /// closed by the reconcile that found it gone.
-    ///
-    /// Still a blind write: the file is not checked against what this document
-    /// last read. A document that saves with `save(_:expecting:)` can use
-    /// `persistedFingerprint`.
     @discardableResult
     private func persist() -> Bool {
         guard !isClosed else { return true }
-        buffer.updatedAt = clock.now()
-        switch repository.save(buffer) {
-        case .failed, .conflict:
-            scheduleSave(after: Self.retryDelay)
-            return false
-        case let .saved(fingerprint):
-            markPersisted()
-            persistedFingerprint = fingerprint
-            return true
-        case .gone:
-            markPersisted()
-            return true
+        for _ in 0..<Self.maxSaveAttempts {
+            buffer.updatedAt = clock.now()
+            switch repository.save(buffer, expecting: persistedFingerprint) {
+            case .failed:
+                scheduleSave(after: Self.retryDelay)
+                return false
+            case let .saved(fingerprint):
+                markPersisted()
+                persistedFingerprint = fingerprint
+                return true
+            case .gone:
+                markPersisted()
+                return true
+            case let .conflict(onDisk, fingerprint):
+                // The newest outside version replaces any held-back older one.
+                pendingExternal = onDisk
+                mergePendingExternal(fingerprint: fingerprint)
+                // Set even when the merge kept the buffer as it was, or the same
+                // conflict would come back every time.
+                persistedFingerprint = fingerprint
+            }
         }
+        scheduleSave(after: Self.retryDelay)
+        return false
     }
 
     private func markPersisted() {
@@ -356,11 +412,11 @@ final class NoteDocument {
     private func foldInOutsideText() {
         mergePendingExternal()
         guard Self.isBlank(buffer), pendingExternal == nil,
-              let onDisk = repository.snapshot(id: buffer.id, archived: false)?.note,
-              !Self.isBlank(onDisk),
-              onDisk.content != persistedContent || onDisk.title != persistedTitle else { return }
-        pendingExternal = onDisk
-        mergePendingExternal()
+              let snapshot = repository.snapshot(id: buffer.id, archived: false),
+              !Self.isBlank(snapshot.note),
+              snapshot.note.content != persistedContent || snapshot.note.title != persistedTitle else { return }
+        pendingExternal = snapshot.note
+        mergePendingExternal(fingerprint: snapshot.fingerprint)
     }
 
     private func discard() {

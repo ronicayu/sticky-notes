@@ -3,6 +3,8 @@ import Foundation
 /// Today's daily note as a `NoteRepository`: one raw Markdown file, no
 /// frontmatter, so Obsidian and its plugins stay authoritative for formatting.
 /// A document edits it as a note whose body is the file's text.
+///
+/// Saves are compare-and-swap, as for any note.
 final class DailyFile: NoteRepository {
     /// The file the document is on now; nil when no vault or pattern is set,
     /// in which case there is nowhere to write and nothing is kept.
@@ -14,17 +16,39 @@ final class DailyFile: NoteRepository {
         self.clock = clock
     }
 
-    func note(body: String) -> Note {
+    func note(body: String, updatedAt: Date? = nil) -> Note {
         let now = clock.now()
         return Note(
             id: id, content: body,
             positionX: 0, positionY: 0, width: 0, height: 0,
-            collapsed: false, color: .yellow, createdAt: now, updatedAt: now
+            collapsed: false, color: .yellow, createdAt: now, updatedAt: updatedAt ?? now
         )
     }
 
+    static func hasICloudPlaceholder(for url: URL) -> Bool {
+        let stub = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).icloud")
+        return FileManager.default.fileExists(atPath: stub.path)
+    }
+
+    private enum OnDisk {
+        case missing
+        /// There is a file, or one waiting in iCloud, and it cannot be read.
+        case unreadable
+        case file(Data, String)
+    }
+
+    private func read(_ url: URL) -> OnDisk {
+        guard let data = try? Data(contentsOf: url) else {
+            let present = FileManager.default.fileExists(atPath: url.path) || Self.hasICloudPlaceholder(for: url)
+            return present ? .unreadable : .missing
+        }
+        guard let body = String(data: data, encoding: .utf8) else { return .unreadable }
+        return .file(data, body)
+    }
+
     @discardableResult
-    func save(_ note: Note) -> SaveResult {
+    func save(_ note: Note, expecting expected: Fingerprint?) -> SaveResult {
         guard let url = url else { return .gone }
         do {
             // Obsidian creates the folder lazily; so do we, rather than
@@ -32,12 +56,28 @@ final class DailyFile: NoteRepository {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true
             )
-            let data = Data(note.content.utf8)
-            try data.write(to: url, options: .atomic)
-            return .saved(Fingerprint(of: data))
+            switch read(url) {
+            case .unreadable:
+                return .failed(SaveError.unreadableOnDisk)
+            case let .file(data, body):
+                let current = Fingerprint(of: data)
+                if current != expected {
+                    return .conflict(onDisk: self.note(body: body), fingerprint: current)
+                }
+            case .missing:
+                // Never written, or deleted since: either way the person's text
+                // goes to a new file.
+                break
+            }
+            return .saved(try write(Data(note.content.utf8), to: url))
         } catch {
             return .failed(error)
         }
+    }
+
+    private func write(_ data: Data, to url: URL) throws -> Fingerprint {
+        try data.write(to: url, options: .atomic)
+        return Fingerprint(of: data)
     }
 
     func loadNote(id: UUID, archived: Bool) -> Note? {
@@ -45,8 +85,12 @@ final class DailyFile: NoteRepository {
     }
 
     func snapshot(id: UUID, archived: Bool) -> NoteSnapshot? {
-        guard let url = url, let data = try? Data(contentsOf: url),
-              let body = String(data: data, encoding: .utf8) else { return nil }
+        snapshot()
+    }
+
+    /// Today's file as it is on disk now, and its fingerprint.
+    func snapshot() -> NoteSnapshot? {
+        guard let url = url, case let .file(data, body) = read(url) else { return nil }
         return NoteSnapshot(note: note(body: body), fingerprint: Fingerprint(of: data))
     }
 
@@ -169,15 +213,15 @@ final class DailyDocument {
             adopt("", unavailable: false)
             return
         }
-        if let raw = try? String(contentsOf: url, encoding: .utf8) {
-            adopt(raw, unavailable: false)
+        if let snapshot = file.snapshot() {
+            adopt(snapshot.note.content, fingerprint: snapshot.fingerprint, unavailable: false)
             return
         }
         // Today's note exists but cannot be read yet. Seeding the template here
         // would overwrite real content. An evicted iCloud file does not answer
         // to `fileExists`: iCloud replaces it with a hidden `.<name>.icloud`
         // stub until something asks for the download.
-        if FileManager.default.fileExists(atPath: url.path) || hasICloudPlaceholder(for: url) {
+        if FileManager.default.fileExists(atPath: url.path) || DailyFile.hasICloudPlaceholder(for: url) {
             try? FileManager.default.startDownloadingUbiquitousItem(at: url)
             adopt("", unavailable: true)
             // The watcher covers the usual case; this is the backstop for a read
@@ -193,20 +237,16 @@ final class DailyDocument {
         adopt(DailyNote.renderedTemplate(for: day, fileURL: url, settings: settings) ?? "", unavailable: false)
     }
 
-    private func adopt(_ body: String, unavailable: Bool) {
+    /// `fingerprint` is that of the file `body` was read from; nil when the
+    /// buffer is a placeholder or a template with no file behind it.
+    private func adopt(_ body: String, fingerprint: Fingerprint? = nil, unavailable: Bool) {
         isUnavailable = unavailable
-        document.reset(to: file.note(body: body))
+        document.reset(to: file.note(body: body), fingerprint: fingerprint)
         onBodyReplaced()
     }
 
     private static func isBlank(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func hasICloudPlaceholder(for url: URL) -> Bool {
-        let stub = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(url.lastPathComponent).icloud")
-        return FileManager.default.fileExists(atPath: stub.path)
     }
 
     // MARK: - Typing and saving
@@ -232,21 +272,21 @@ final class DailyDocument {
 
     /// The folder changed: pick up an outside edit, a duplicate, or a download.
     func storeDidChange() {
-        guard let url = url else { return }
+        guard url != nil else { return }
         // A duplicate arrives as an ordinary new file in the folder watched.
         // Heal first so the read below picks up the merged text.
         healDuplicatesIfDue(now: clock.now())
         // A failed read means the file is mid-sync or undecodable, not empty:
         // treating it as empty would blank the buffer and then save that over
         // the real content. If we were waiting on a download, this is it.
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return }
+        guard let snapshot = file.snapshot() else { return }
         if isUnavailable {
             unavailableRetry?.cancel()
             unavailableRetry = nil
-            adopt(raw, unavailable: false)
+            adopt(snapshot.note.content, fingerprint: snapshot.fingerprint, unavailable: false)
             return
         }
-        document.externalChange(file.note(body: raw))
+        document.externalChange(snapshot.note, fingerprint: snapshot.fingerprint)
     }
 
     private func healDuplicates(now: Date) {
@@ -345,10 +385,14 @@ final class DailyDocument {
             storeDidChange()
             return
         }
+        var fingerprint: Fingerprint?
         if FileManager.default.fileExists(atPath: url.path) {
             try? templated.write(to: url, atomically: true, encoding: .utf8)
+            if let written = file.snapshot(), written.note.content == templated {
+                fingerprint = written.fingerprint
+            }
         }
-        adopt(templated, unavailable: false)
+        adopt(templated, fingerprint: fingerprint, unavailable: false)
     }
 
     /// Write today's note out if it is not on disk yet, so opening it is enough
@@ -361,7 +405,7 @@ final class DailyDocument {
         // A file that exists, or is only waiting to come down from iCloud, must
         // never be written over with an empty buffer.
         guard !FileManager.default.fileExists(atPath: url.path),
-              !hasICloudPlaceholder(for: url) else { return }
+              !DailyFile.hasICloudPlaceholder(for: url) else { return }
         document.requestSave()
         document.flush()
     }

@@ -744,4 +744,257 @@ final class NoteDocumentTests: XCTestCase {
         XCTAssertEqual(document.buffer.content, "shopping\n- milk\n- bread")
         XCTAssertEqual(store.loadActive().filter { $0.id == document.id }.count, 1, "the note was duplicated")
     }
+
+    // MARK: - Never overwriting a file that was not read
+
+    /// What is on disk, read from the file and not from the store's cache.
+    private func fileNote(_ document: NoteDocument) throws -> Note {
+        try XCTUnwrap(store.snapshot(id: document.id)?.note, "note has no file")
+    }
+
+    /// A repository that passes everything to the store and remembers each save's result.
+    private final class RecordingRepository: NoteRepository {
+        let store: NoteStore
+        private(set) var results: [SaveResult] = []
+
+        init(store: NoteStore) { self.store = store }
+
+        var conflicts: Int {
+            results.filter { if case .conflict = $0 { return true } else { return false } }.count
+        }
+
+        func save(_ note: Note, expecting fingerprint: Fingerprint?) -> SaveResult {
+            let result = store.save(note, expecting: fingerprint)
+            results.append(result)
+            return result
+        }
+        func loadNote(id: UUID, archived: Bool) -> Note? { store.loadNote(id: id, archived: archived) }
+        func snapshot(id: UUID, archived: Bool) -> NoteSnapshot? { store.snapshot(id: id, archived: archived) }
+        func archive(_ note: Note) { store.archive(note) }
+        func discardActive(_ note: Note) { store.discardActive(note) }
+    }
+
+    /// A file that always changes between the check and the save.
+    private final class AlwaysConflictingRepository: NoteRepository {
+        private(set) var saves = 0
+
+        func save(_ note: Note, expecting fingerprint: Fingerprint?) -> SaveResult {
+            saves += 1
+            var other = note
+            other.content = "outside version \(saves)"
+            other.updatedAt = Date(timeIntervalSince1970: 1_900_000_000)
+            return .conflict(onDisk: other, fingerprint: Fingerprint(of: Data("\(saves)".utf8)))
+        }
+        func loadNote(id: UUID, archived: Bool) -> Note? { nil }
+        func snapshot(id: UUID, archived: Bool) -> NoteSnapshot? { nil }
+        func archive(_ note: Note) {}
+        func discardActive(_ note: Note) {}
+    }
+
+    /// An outside write lands between the last keystroke and the debounce, before
+    /// the watcher has reported it. The save used to overwrite it, and the
+    /// watcher's echo then matched what the window had written and was ignored.
+    /// (Model finding F4.)
+    func testASaveDoesNotOverwriteAVaultEditTheWatcherHasNotReported() throws {
+        let document = open(content: "buy milk")
+        document.setBody("buy milk\nand eggs")
+        try writeOutsideWithoutTellingTheDocument(document, body: "buy milk\ncall Sam")
+
+        scheduler.advance(by: 1)
+
+        let saved = try fileNote(document).content
+        XCTAssertTrue(saved.contains("and eggs"), saved)
+        XCTAssertTrue(saved.contains("call Sam"), saved)
+        XCTAssertFalse(document.hasUnsavedEdits)
+        XCTAssertEqual(document.buffer.content, saved)
+    }
+
+    /// When the outside text already holds everything typed, it is taken as it is.
+    func testAnUnreportedOutsideSupersetIsTakenWithoutADivider() throws {
+        let document = open(content: "buy milk")
+        document.setBody("buy milk\nand eggs")
+        try writeOutsideWithoutTellingTheDocument(document, body: "buy milk\nand eggs\nand bread")
+
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try fileNote(document).content, "buy milk\nand eggs\nand bread")
+        XCTAssertEqual(document.buffer.content, "buy milk\nand eggs\nand bread")
+    }
+
+    func testClosingDoesNotOverwriteAnUnreportedOutsideEdit() throws {
+        let document = open(content: "buy milk")
+        document.setBody("buy milk\nand eggs")
+        try writeOutsideWithoutTellingTheDocument(document, body: "buy milk\ncall Sam")
+
+        guard case .closed = document.close(.archive) else { return XCTFail("did not close") }
+
+        let kept = try archived(document).content
+        XCTAssertTrue(kept.contains("and eggs") && kept.contains("call Sam"), kept)
+    }
+
+    func testFlushingDoesNotOverwriteAnUnreportedOutsideEdit() throws {
+        let document = open(content: "buy milk")
+        document.setBody("buy milk\nand eggs")
+        try writeOutsideWithoutTellingTheDocument(document, body: "buy milk\ncall Sam")
+
+        XCTAssertTrue(document.flush())
+
+        let saved = try fileNote(document).content
+        XCTAssertTrue(saved.contains("and eggs") && saved.contains("call Sam"), saved)
+    }
+
+    /// A blank buffer holds nothing to protect, so the outside text is taken
+    /// whole, not appended under a divider.
+    func testASaveFromABlankBufferTakesAnUnreportedOutsideEditAsItIs() throws {
+        let document = open(content: "")
+        document.adjust { $0.color = .blue }
+        try writeOutsideWithoutTellingTheDocument(document, body: "typed in Obsidian")
+
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try fileNote(document).content, "typed in Obsidian")
+    }
+
+    func testOurOwnWritesEchoNeverMakesASaveConflict() throws {
+        let repository = RecordingRepository(store: store)
+        let note = makeNote(content: "start")
+        store.save(note)
+        let document = NoteDocument(note: note, repository: repository, scheduler: scheduler, clock: clock)
+
+        for text in ["start one", "start one two", "start one two three"] {
+            document.setBody(text)
+            scheduler.advance(by: 1)
+            // What the watcher does after every write of ours.
+            store.handleFileSystemEvent()
+            document.storeDidChange()
+        }
+
+        XCTAssertEqual(repository.results.count, 3)
+        XCTAssertEqual(repository.conflicts, 0, "an echo of our own write was met as a conflict")
+        XCTAssertEqual(try fileNote(document).content, "start one two three")
+    }
+
+    func testAnAdoptedOutsideEditLeavesTheNextSaveWithoutAConflict() throws {
+        let repository = RecordingRepository(store: store)
+        let note = makeNote(content: "start")
+        store.save(note)
+        let document = NoteDocument(note: note, repository: repository, scheduler: scheduler, clock: clock)
+
+        try writeOutside(document, body: "start\nfrom Obsidian")
+        document.storeDidChange()
+        XCTAssertEqual(document.buffer.content, "start\nfrom Obsidian")
+        XCTAssertEqual(document.persistedFingerprint, store.snapshot(id: document.id)?.fingerprint)
+
+        document.setBody("start\nfrom Obsidian\nand here")
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(repository.conflicts, 0)
+        XCTAssertEqual(try fileNote(document).content, "start\nfrom Obsidian\nand here")
+    }
+
+    func testAnOutsideEditAdoptedThroughTheCacheStillGetsAFreshFingerprint() throws {
+        let note = makeNote(content: "start")
+        store.save(note)
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
+
+        try writeOutside(document, body: "start\nfrom Obsidian")
+        document.externalChange(try fileNote(document))
+
+        XCTAssertEqual(document.persistedFingerprint, store.snapshot(id: document.id)?.fingerprint)
+    }
+
+    /// An outside edit the document was only told about as an older version:
+    /// the file has moved on again, so the stale fingerprint stays and the save
+    /// merges with what is there now.
+    func testAnOutsideEditThatChangedAgainBeforeItWasReadKeepsTheSaveSafe() throws {
+        let document = open(content: "start")
+        try writeOutsideWithoutTellingTheDocument(document, body: "start\nfirst outside edit")
+        var older = try fileNote(document)
+        older.content = "start\nfirst outside edit"
+        try writeOutsideWithoutTellingTheDocument(document, body: "start\nfirst outside edit\nsecond outside edit")
+
+        document.externalChange(older)
+        document.setBody("start\nfirst outside edit\nmine")
+        scheduler.advance(by: 1)
+
+        let saved = try fileNote(document).content
+        XCTAssertTrue(saved.contains("second outside edit") && saved.contains("mine"), saved)
+    }
+
+    func testTypingReadsNoFilesAndASaveReadsTheFileOnce() throws {
+        let document = open(content: "start")
+        let reads = store.readCount
+
+        for text in ["s", "st", "sta", "star", "start!"] { document.setBody(text) }
+        XCTAssertEqual(store.readCount, reads, "typing read a file")
+
+        scheduler.advance(by: 1)
+        XCTAssertEqual(store.readCount, reads + 1, "a save must read the file exactly once")
+    }
+
+    func testASaveThatKeepsMeetingAChangedFileGivesUpAndRetriesLater() {
+        let repository = AlwaysConflictingRepository()
+        let document = NoteDocument(
+            note: makeNote(content: "start"), repository: repository, scheduler: scheduler, clock: clock
+        )
+
+        document.setBody("start\ntyped")
+        scheduler.advance(by: NoteDocument.debounce + 0.01)
+
+        XCTAssertEqual(repository.saves, NoteDocument.maxSaveAttempts)
+        XCTAssertTrue(document.hasUnsavedEdits, "text that reached no file counts as saved")
+        XCTAssertTrue(document.buffer.content.contains("typed"), document.buffer.content)
+        XCTAssertEqual(scheduler.pendingCount, 1, "no retry is armed")
+
+        scheduler.advance(by: NoteDocument.retryDelay + 0.01)
+        XCTAssertEqual(repository.saves, 2 * NoteDocument.maxSaveAttempts)
+    }
+
+    func testANewNoteStartsWithNoFingerprintAndCreatesItsFile() throws {
+        let note = makeNote(content: "")
+        let repository = RecordingRepository(store: store)
+        let document = NoteDocument(note: note, repository: repository, scheduler: scheduler, clock: clock)
+        XCTAssertNil(document.persistedFingerprint)
+
+        document.setBody("first words")
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(repository.conflicts, 0)
+        XCTAssertNotNil(document.persistedFingerprint)
+        XCTAssertEqual(try fileNote(document).content, "first words")
+    }
+
+    func testANewNoteMeetsAFileThatAppearedFirstAsAConflictAndKeepsBothTexts() throws {
+        let note = makeNote(content: "")
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
+        var elsewhere = note
+        elsewhere.content = "created on the other Mac"
+        elsewhere.updatedAt = Date(timeIntervalSince1970: 1_900_000_000)
+        store.save(elsewhere)
+
+        document.setBody("created here")
+        scheduler.advance(by: 1)
+
+        let saved = try fileNote(document).content
+        XCTAssertTrue(saved.contains("created here") && saved.contains("created on the other Mac"), saved)
+        XCTAssertEqual(store.loadActive().filter { $0.id == note.id }.count, 1)
+    }
+
+    /// The document was handed a note that differs from the file, as when the
+    /// watcher has not yet reported a change: it must not claim to have seen the file.
+    func testADocumentOverANoteThatDiffersFromItsFileHoldsNoFingerprint() throws {
+        let note = makeNote(content: "as last read")
+        store.save(note)
+        var changed = note
+        changed.content = "changed since"
+        store.save(changed)
+
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
+
+        XCTAssertNil(document.persistedFingerprint)
+        document.setBody("as last read\nplus typing")
+        scheduler.advance(by: 1)
+        let saved = try fileNote(document).content
+        XCTAssertTrue(saved.contains("changed since") && saved.contains("plus typing"), saved)
+    }
 }

@@ -657,4 +657,84 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertEqual(try text(), "on the way to a full disk")
         XCTAssertFalse(document.hasUnsavedEdits)
     }
+
+    // MARK: - Never overwriting a file that was not read
+
+    /// iCloud finished a download the watcher has not reported, then the person's
+    /// pause in typing saved over it. (Model finding F8.)
+    func testADailySaveDoesNotOverwriteAnUnreportedDownload() throws {
+        try write("one")
+        let document = makeDocument()
+        document.setBody("one\nmine")
+        try write("one\nfrom the other Mac")
+
+        scheduler.advance(by: 1)
+
+        let saved = try text()
+        XCTAssertTrue(saved.contains("mine") && saved.contains("from the other Mac"), saved)
+        XCTAssertEqual(document.body, saved)
+        XCTAssertFalse(document.hasUnsavedEdits)
+    }
+
+    func testADailySaveOfANewNoteDoesNotOverwriteAFileThatArrivedFirst() throws {
+        let document = makeDocument()
+        document.setBody("typed on this Mac")
+        try write("written on the other Mac")
+
+        scheduler.advance(by: 1)
+
+        let saved = try text()
+        XCTAssertTrue(saved.contains("typed on this Mac") && saved.contains("written on the other Mac"), saved)
+    }
+
+    func testAnUnreportedOutsideSupersetOfTodaysNoteIsTakenWithoutADivider() throws {
+        try write("one")
+        let document = makeDocument()
+        document.setBody("one\nmine")
+        try write("one\nmine\nand more")
+
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try text(), "one\nmine\nand more")
+    }
+
+    func testClosingTodaysNoteDoesNotOverwriteAnUnreportedOutsideEdit() throws {
+        try write("one")
+        let document = makeDocument()
+        document.setBody("one\nmine")
+        try write("one\nfrom the other Mac")
+
+        XCTAssertTrue(document.flush())
+
+        let saved = try text()
+        XCTAssertTrue(saved.contains("mine") && saved.contains("from the other Mac"), saved)
+    }
+
+    func testOurOwnDailySaveIsNeverMetAsAConflict() throws {
+        try write("one")
+        let document = makeDocument()
+        var replaced = 0
+        document.onBodyReplaced = { replaced += 1 }
+
+        for body in ["one a", "one a b", "one a b c"] {
+            document.setBody(body)
+            scheduler.advance(by: 1)
+            document.storeDidChange()
+        }
+
+        XCTAssertEqual(try text(), "one a b c")
+        XCTAssertEqual(replaced, 0, "our own write came back as an outside edit")
+        XCTAssertFalse(document.hasUnsavedEdits)
+    }
+
+    func testADailyNoteDeletedUnderTheWindowIsWrittenAgainWithTheTypedText() throws {
+        try write("one")
+        let document = makeDocument()
+        try FileManager.default.removeItem(at: try url())
+
+        document.setBody("one\nstill typing")
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try text(), "one\nstill typing")
+    }
 }
