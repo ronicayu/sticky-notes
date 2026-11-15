@@ -220,12 +220,18 @@ private final class ChangeLog: @unchecked Sendable {
         XCTAssertEqual(changes(from: store) { store.save(note) }, [.saved(id)])
         XCTAssertEqual(changes(from: store) { store.archive(note) }, [.moved(id, from: .active, to: .archive)])
         XCTAssertEqual(changes(from: store) { store.restore(note) }, [.moved(id, from: .archive, to: .active)])
-        XCTAssertEqual(changes(from: store) { store.discardActive(note) }, [.removed(id)])
+        let discarded = makeNote()
+        store.save(discarded)
+        XCTAssertEqual(
+            changes(from: store) { store.discardActive(discarded) },
+            [.moved(discarded.id, from: .active, to: .trash)]
+        )
+        let neverWritten = makeNote()
+        XCTAssertEqual(changes(from: store) { store.discardActive(neverWritten) }, [.removed(neverWritten.id)])
 
-        store.save(note)
         store.archive(note)
         XCTAssertEqual(changes(from: store) { store.deleteForever(note) }, [.moved(id, from: .archive, to: .trash)])
-        let trashed = try XCTUnwrap(store.loadTrashed().first)
+        let trashed = try XCTUnwrap(store.loadTrashed().first { $0.id == id })
         XCTAssertEqual(changes(from: store) { store.restoreFromTrash(trashed) },
                        [.moved(id, from: .trash, to: .archive)])
     }

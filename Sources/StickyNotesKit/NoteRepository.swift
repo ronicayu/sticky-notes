@@ -11,6 +11,26 @@ protocol NoteRepository: AnyObject {
     func snapshot(id: UUID, archived: Bool) -> NoteSnapshot?
     func archive(_ note: Note)
     func discardActive(_ note: Note)
+
+    /// Whether text typed into a note whose active file is gone can be kept
+    /// somewhere else. False for a repository that has only one file, which then
+    /// has nowhere else to put it.
+    var canKeepTextElsewhere: Bool { get }
+    func whereIs(id: UUID) -> NoteStore.Whereabouts
+    /// Compare-and-swap into the archive or the trash, where a note that left
+    /// the active folder now lives.
+    func save(_ note: Note, in folder: NoteStore.Folder, expecting fingerprint: Fingerprint) -> SaveResult
+    /// A copy of a note that exists nowhere, written to the trash.
+    func saveRecoveredCopy(of note: Note) -> Bool
 }
 
-extension NoteStore: NoteRepository {}
+extension NoteRepository {
+    var canKeepTextElsewhere: Bool { false }
+    func whereIs(id: UUID) -> NoteStore.Whereabouts { .unknown }
+    func save(_ note: Note, in folder: NoteStore.Folder, expecting fingerprint: Fingerprint) -> SaveResult { .gone }
+    func saveRecoveredCopy(of note: Note) -> Bool { false }
+}
+
+extension NoteStore: NoteRepository {
+    var canKeepTextElsewhere: Bool { true }
+}

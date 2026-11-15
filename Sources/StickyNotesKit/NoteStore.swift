@@ -257,10 +257,22 @@ final class NoteStore {
             // fully known, which suppresses the scan that would find it under
             // its new name. Dropping the save there loses whatever the user
             // just typed, so pay for one rescan before believing it's gone.
-            if !confirmedDeletedIds.contains(note.id),
-               rescanForId(note.id, in: activeURL) != nil {
-                confirmedDeletedIds.remove(note.id)
-            } else {
+            var found = false
+            if !confirmedDeletedIds.contains(note.id) {
+                switch rescanForId(note.id, in: activeURL) {
+                case .found:
+                    confirmedDeletedIds.remove(note.id)
+                    found = true
+                case .unknown:
+                    // The folder could not be listed, or the file may be waiting
+                    // in iCloud: nothing says the note is gone, and the text
+                    // must stay with the caller.
+                    return .failed(SaveError.locationUnknown)
+                case .absent:
+                    break
+                }
+            }
+            if !found {
                 // Really gone. Remember that, or every subsequent keystroke
                 // pays for another full scan of the notes directory.
                 confirmedDeletedIds.insert(note.id)
@@ -319,12 +331,105 @@ final class NoteStore {
         return readMainSnapshot(url)
     }
 
+    /// Where a note's file is now, read from disk. Used when a save finds the
+    /// active file gone, to put the text where the note went.
+    enum Whereabouts {
+        case active(NoteSnapshot)
+        case archived(NoteSnapshot)
+        case trashed(NoteSnapshot)
+        /// Every folder was listed and none holds the note.
+        case missing
+        /// A folder could not be listed or the note's file could not be read, so
+        /// the note may still exist.
+        case unknown
+    }
+
+    func whereIs(id: UUID) -> Whereabouts {
+        var unknown = false
+        for folder in [Folder.active, .archive, .trash] {
+            let dir = directory(of: folder)
+            switch rescanForId(id, in: dir) {
+            case let .found(url):
+                guard let snapshot = readMainSnapshot(url) else { unknown = true; continue }
+                switch folder {
+                case .active: return .active(snapshot)
+                case .archive: return .archived(snapshot)
+                case .trash: return .trashed(snapshot)
+                }
+            case .unknown:
+                unknown = true
+            case .absent:
+                break
+            }
+        }
+        return unknown ? .unknown : .missing
+    }
+
+    private func directory(of folder: Folder) -> URL {
+        switch folder {
+        case .active: return activeURL
+        case .archive: return archiveURL
+        case .trash: return trashURL
+        }
+    }
+
+    /// Compare-and-swap into the archive or the trash: for text typed into a
+    /// note that was archived or deleted from under the window. Writes only if
+    /// the file there still has the bytes `fingerprint` was taken from.
+    func save(_ note: Note, in folder: Folder, expecting fingerprint: Fingerprint) -> SaveResult {
+        guard folder != .active else { return save(note, expecting: fingerprint) }
+        guard let url = existingURL(for: note.id, in: directory(of: folder)) else { return .gone }
+        let result = writeIfUnchanged(note, to: url, expecting: .fingerprint(fingerprint))
+        if case .saved = result { notifyChange(.reset) }
+        return result
+    }
+
+    /// A copy of a note whose file is gone, written to `.trash/` under a new id,
+    /// so it shows in the Trash tab and is never mistaken for the original.
+    /// Rewritten in place when the same note is recovered again.
+    func saveRecoveredCopy(of note: Note) -> Bool {
+        let copy = Note(
+            id: Self.recoveredCopyId(for: note.id), title: note.title, content: note.content,
+            positionX: note.positionX, positionY: note.positionY, width: note.width, height: note.height,
+            collapsed: note.collapsed, color: note.color, labels: note.labels, floatLevel: note.floatLevel,
+            createdAt: note.createdAt, updatedAt: note.updatedAt
+        )
+        let url = existingURL(for: copy.id, in: trashURL) ?? {
+            let stamp = NoteStore.filenameFormatter.string(from: clock.now())
+            return trashURL.appendingPathComponent("recovered-\(note.id.uuidString)-\(stamp).\(NoteStore.fileExtension)")
+        }()
+        try? FileManager.default.createDirectory(at: trashURL, withIntermediateDirectories: true)
+        guard write(copy, to: url) else { return false }
+        stampDeletionDate(on: url)
+        pathIndex[copy.id] = url
+        notifyChange(.reset)
+        return true
+    }
+
+    private static func recoveredCopyId(for id: UUID) -> UUID {
+        var digest = SHA256()
+        digest.update(data: Data("recovered-copy:\(id.uuidString)".utf8))
+        var bytes = Array(digest.finalize().prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x40
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
     func loadActive() -> [Note] {
+        loadAll(from: activeURL) ?? []
+    }
+
+    /// The active notes, or nil when the folder cannot be listed (a revoked
+    /// permission, a drive that is away). `loadActive` answers `[]` for both
+    /// that and an empty folder; a caller that closes things because a note is
+    /// missing has to tell them apart.
+    func listActive() -> [Note]? {
         loadAll(from: activeURL)
     }
 
     func loadArchived() -> [Note] {
-        loadAll(from: archiveURL).sorted { $0.updatedAt > $1.updatedAt }
+        (loadAll(from: archiveURL) ?? []).sorted { $0.updatedAt > $1.updatedAt }
     }
 
     /// Served from the cache while it is warm, which costs no disk read. A cold
@@ -350,13 +455,23 @@ final class NoteStore {
         notifyChange(.moved(note.id, from: .active, to: .archive))
     }
 
+    /// Remove a note the person threw away empty. The file goes to `.trash/`
+    /// rather than being unlinked: "empty" is judged from what the window shows,
+    /// and the file may hold more than that.
     func discardActive(_ note: Note) {
+        var change = Change.removed(note.id)
         if let url = existingURL(for: note.id, in: activeURL) {
-            try? FileManager.default.removeItem(at: url)
+            let destination = uniqueTrashURL(for: url)
+            if moveFile(from: url, to: destination) {
+                stampDeletionDate(on: destination)
+                change = .moved(note.id, from: .active, to: .trash)
+            } else {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
         pathIndex.removeValue(forKey: note.id)
         knownIds.remove(note.id)
-        notifyChange(.removed(note.id))
+        notifyChange(change)
     }
 
     func restore(_ note: Note) {
@@ -417,7 +532,7 @@ final class NoteStore {
 
     /// Notes sitting in the trash, newest first.
     func loadTrashed() -> [Note] {
-        loadAll(from: trashURL).sorted { $0.updatedAt > $1.updatedAt }
+        (loadAll(from: trashURL) ?? []).sorted { $0.updatedAt > $1.updatedAt }
     }
 
     /// Put a trashed note back in the archive, where deleting it came from.
@@ -644,7 +759,7 @@ final class NoteStore {
         // keeps the no-resurrect guard working.)
         if indexedDirs.contains(dirKey(dir)) { return nil }
         // Cold index: scan and rebuild for this dir.
-        return scanForId(id, in: dir)
+        return scanForId(id, in: dir).url
     }
 
     /// Builds a fresh URL for a new save into the given directory.
@@ -654,27 +769,65 @@ final class NoteStore {
         return dir.appendingPathComponent("\(stamp)-\(suffix).md")
     }
 
+    /// What a look through one folder for a note found.
+    enum FileSearch {
+        case found(URL)
+        /// The folder was listed and holds no file of the note.
+        case absent
+        /// The folder could not be listed, or a file that may be the note's is
+        /// unreadable or still in iCloud. Nothing can be said about the note.
+        case unknown
+
+        var url: URL? {
+            if case let .found(url) = self { return url }
+            return nil
+        }
+    }
+
     /// Read every file in `dir` to locate `id`, indexing all of them on the
     /// way so the next lookup here is free.
     /// A scan that ignores `indexedDirs`, for when the index is the thing
     /// we're suspicious of.
-    private func rescanForId(_ id: UUID, in dir: URL) -> URL? {
+    private func rescanForId(_ id: UUID, in dir: URL) -> FileSearch {
         indexedDirs.remove(dirKey(dir))
         return scanForId(id, in: dir)
     }
 
-    private func scanForId(_ id: UUID, in dir: URL) -> URL? {
+    private func scanForId(_ id: UUID, in dir: URL) -> FileSearch {
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
-            return nil
+            return .unknown
         }
         var match: URL?
-        for url in files where url.pathExtension == NoteStore.fileExtension {
-            guard let note = readMain(url) else { continue }
-            pathIndex[note.id] = url
-            if note.id == id { match = url }
+        var inconclusive = false
+        for url in files {
+            if url.pathExtension == NoteStore.fileExtension {
+                guard let note = readMain(url) else {
+                    if couldBeFile(of: id, named: url.lastPathComponent) { inconclusive = true }
+                    continue
+                }
+                pathIndex[note.id] = url
+                if note.id == id { match = url }
+            } else if url.pathExtension == "icloud", url.lastPathComponent.hasPrefix(".") {
+                // A file iCloud has not downloaded is listed as ".<name>.icloud".
+                let name = String(url.deletingPathExtension().lastPathComponent.dropFirst())
+                if couldBeFile(of: id, named: name) { inconclusive = true }
+            }
         }
+        if let match {
+            indexedDirs.insert(dirKey(dir))
+            return .found(match)
+        }
+        if inconclusive { return .unknown }
         indexedDirs.insert(dirKey(dir))
-        return match
+        return .absent
+    }
+
+    /// Whether a file that cannot be read may be this note's: it sits where the
+    /// note was last seen, or carries the id in its name as `generateURL` writes it.
+    private func couldBeFile(of id: UUID, named name: String) -> Bool {
+        if pathIndex[id]?.lastPathComponent == name { return true }
+        let suffix = String(id.uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
+        return name.hasSuffix("-\(suffix).\(NoteStore.fileExtension)")
     }
 
     /// Sweeping asks the filesystem for conflict versions of every file, and
@@ -866,11 +1019,11 @@ final class NoteStore {
         return merged.id
     }
 
-    private func loadAll(from dir: URL) -> [Note] {
+    private func loadAll(from dir: URL) -> [Note]? {
         if let cached = cache[dirKey(dir)] { return cached }
 
         guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
-            return []
+            return nil
         }
         var notes: [Note] = []
         var seen = Set<UUID>()

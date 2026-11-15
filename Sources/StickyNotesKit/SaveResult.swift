@@ -29,6 +29,9 @@ enum SaveError: Error {
     /// The file exists but cannot be read or parsed, so nothing can be judged
     /// about it and it is not overwritten.
     case unreadableOnDisk
+    /// The folder could not be listed, or the note's file may be waiting in
+    /// iCloud: nothing says the note is gone, so nothing is judged about it.
+    case locationUnknown
 }
 
 enum SaveResult {
