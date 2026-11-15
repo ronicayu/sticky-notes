@@ -23,6 +23,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     var onCollapsed: (() -> Void)?
     /// Called when a label was removed with its chip, with what puts it back.
     var onLabelRemoved: ((_ label: String, _ restore: @escaping () -> Void) -> Void)?
+    /// Called when an untouched note was swept away because focus left it.
+    var onEmptyNoteRemoved: ((Note) -> Void)?
     /// Called when the note left the active folder under typed text, and the text
     /// was written where the note went.
     var onTextKept: ((NoteDocument.KeptIn) -> Void)?
@@ -123,8 +125,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Discard without archiving. Used for abandoned captures, which should
     /// leave no trace at all. Text that arrived from outside since the window
     /// was opened is on screen now, and the note stays.
-    func discardAbandonedCapture() {
-        closeThroughDocument(.discard)
+    func discardAbandonedCapture(offeringUndo: Bool = false) {
+        closeThroughDocument(.discard, offeringUndo: offeringUndo)
     }
 
     /// Height of the chrome strip when expanded.
@@ -675,7 +677,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         closeThroughDocument(.archive)
     }
 
-    private func closeThroughDocument(_ reason: NoteDocument.CloseReason) {
+    private func closeThroughDocument(_ reason: NoteDocument.CloseReason, offeringUndo: Bool = false) {
         switch noteDocument.close(reason) {
         case .refused:
             // A note to be discarded that turned out to hold text just stays.
@@ -685,6 +687,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             return
         case let .closed(archived):
             if let archived = archived { onArchived?(archived) }
+            if offeringUndo, archived == nil { onEmptyNoteRemoved?(note) }
             // The note is saved and gone from the desk's books by now; only the
             // picture of it is still on screen for the length of the fade. A note
             // that was only discarded leaves at once.
@@ -942,7 +945,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         if isAbandonedCapture {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self, self.isAbandonedCapture else { return }
-                self.discardAbandonedCapture()
+                self.discardAbandonedCapture(offeringUndo: true)
             }
             return
         }

@@ -68,6 +68,11 @@ import AppKit
         show(Toast(notice: "Note was deleted — your typing is in Trash", now: clock.now()))
     }
 
+    /// An untouched note was swept up when focus left it. Say so, and offer it back.
+    func offerUndoForEmptyNoteRemoval(restore: @escaping () -> Void) {
+        show(Toast(message: "Empty note removed", now: clock.now(), undo: restore))
+    }
+
     /// What a switch of storage carried over. One message, nothing to undo.
     func tellStorageMoved(_ report: StorageSwitchReport) {
         guard let message = Toast.storageMovedMessage(report) else { return }
