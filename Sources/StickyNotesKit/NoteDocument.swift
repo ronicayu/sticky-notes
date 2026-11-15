@@ -15,7 +15,20 @@ final class NoteDocument {
         /// Throw the note away without archiving it, as for an untouched capture.
         case discard
         /// The file is gone or moved; whoever removed it already owns the note.
+        /// Text typed since the last save is written where the note went first.
         case externalDeletion
+        /// As `externalDeletion`, for text the caller has already put in a
+        /// recovery file because the store could not take it.
+        case externalDeletionTextKept
+    }
+
+    /// Where text typed into a note whose file was archived or removed from
+    /// under it was written.
+    enum KeptIn {
+        case archive
+        case trash
+        /// A copy in the trash: the note exists nowhere else.
+        case recoveredCopy
     }
 
     enum CloseResult {
@@ -52,6 +65,23 @@ final class NoteDocument {
     /// if it is empty now.
     private(set) var wasNeverEdited = true
 
+    /// False for a new note that no file was ever written for. Such a note is
+    /// not gone when its file is missing.
+    private(set) var hasFile: Bool
+
+    /// Set for a note that is created blank by the person asking for a new one:
+    /// it gets its file with the first edit, and none if it is left untouched.
+    /// Where it sits on the desk goes out with that edit. Writing it sooner would
+    /// make every misfired hotkey a create and a delete in a synced vault.
+    var createsFileOnFirstEdit = false
+
+    /// The person changed the note since the last write that landed.
+    private var unsavedEdit = false
+
+    /// The active file was found gone and the text went to the archive, the
+    /// trash or a recovered copy, so the note is no longer there to archive.
+    private var activeFileGone = false
+
     /// What the last write put on disk, or what the window was handed. The file
     /// watcher reports our own writes back, and a mid-typing echo carries the
     /// previous text; comparing against this tells it from someone else's edit.
@@ -86,6 +116,9 @@ final class NoteDocument {
     /// Called after an outside version replaced part of the buffer, with what
     /// changed, so the view can redraw it.
     var didApplyExternal: (Applied) -> Void = { _ in }
+    /// Called after text typed into a note that left the active folder was
+    /// written somewhere else, so the person can be told where it is.
+    var didKeepText: (KeptIn) -> Void = { _ in }
 
     /// `note` is as just saved or as last read, so the watcher's echo of it is
     /// not an outside edit. The file is read once here: if it holds what `note`
@@ -99,7 +132,9 @@ final class NoteDocument {
         self.repository = repository
         self.scheduler = scheduler
         self.clock = clock
-        persistedFingerprint = Self.fingerprint(of: repository.snapshot(id: note.id, archived: false), matching: note)
+        let snapshot = repository.snapshot(id: note.id, archived: false)
+        persistedFingerprint = Self.fingerprint(of: snapshot, matching: note)
+        hasFile = snapshot != nil
     }
 
     /// The snapshot's fingerprint when the snapshot holds the same text as
@@ -128,6 +163,9 @@ final class NoteDocument {
         persistedContent = note.content
         persistedTitle = note.title
         persistedFingerprint = fingerprint
+        hasFile = fingerprint != nil
+        unsavedEdit = false
+        activeFileGone = false
         wasNeverEdited = true
         isClosed = false
     }
@@ -139,6 +177,7 @@ final class NoteDocument {
     func edit(_ change: (inout Note) -> Void) {
         change(&buffer)
         wasNeverEdited = false
+        unsavedEdit = true
         scheduleSave()
     }
 
@@ -163,6 +202,13 @@ final class NoteDocument {
         saveTask != nil || buffer.content != persistedContent || buffer.title != persistedTitle
     }
 
+    /// True when the buffer holds a change the person made, or a merge's result,
+    /// that no file holds. A move of the window alone is not that: losing it
+    /// costs nothing worth a recovered copy.
+    private var holdsTextNoFileHas: Bool {
+        unsavedEdit || buffer.content != persistedContent || buffer.title != persistedTitle
+    }
+
     /// A note is disposable when nothing was ever typed into it and it holds
     /// nothing, the shape a mis-pressed hotkey leaves behind.
     var isAbandonedCapture: Bool {
@@ -181,12 +227,14 @@ final class NoteDocument {
     /// bytes is what keeps the next save from overwriting this version.
     func storeDidChange() {
         guard let snapshot = repository.snapshot(id: buffer.id, archived: false) else { return }
+        hasFile = true
         externalChange(snapshot.note, fingerprint: snapshot.fingerprint)
     }
 
     /// An outside version of the note, as read from disk. `fingerprint` is that
     /// of the file it came from, when the reader has it.
     func externalChange(_ updated: Note, fingerprint: Fingerprint? = nil) {
+        hasFile = true
         // Our own write, echoed back by the watcher. Mid-burst it is the text as
         // of the last debounce, which is not an outside edit.
         // The file may still be new to us: a rewrite that kept the text, such as a
@@ -352,6 +400,7 @@ final class NoteDocument {
 
     private func scheduleSave(after delay: TimeInterval = NoteDocument.debounce) {
         guard !isClosed else { return }
+        if createsFileOnFirstEdit, !hasFile, wasNeverEdited, Self.isBlank(buffer) { return }
         saveTask?.cancel()
         saveTask = scheduler.schedule(after: delay) { [weak self] in
             guard let self = self else { return }
@@ -380,6 +429,12 @@ final class NoteDocument {
     /// that case, so a caller about to archive or close can stop. A note whose
     /// file is gone returns true: there is nothing to retry, and the window is
     /// closed by the reconcile that found it gone.
+    ///
+    /// A note whose file is gone does not mark typing as saved. Text typed since
+    /// the last write is put where the note went: into its file in the archive
+    /// or the trash, merged with what that file holds, or into a recovered copy
+    /// in the trash when the note exists nowhere. Only when that lands does the
+    /// buffer count as persisted; otherwise a retry is armed.
     @discardableResult
     private func persist() -> Bool {
         guard !isClosed else { return true }
@@ -391,12 +446,24 @@ final class NoteDocument {
                 return false
             case let .saved(fingerprint):
                 markPersisted()
+                hasFile = true
+                activeFileGone = false
                 persistedFingerprint = fingerprint
                 return true
             case .gone:
-                markPersisted()
-                return true
+                guard repository.canKeepTextElsewhere, holdsTextNoFileHas else {
+                    markPersisted()
+                    return true
+                }
+                switch keepTextElsewhere() {
+                case .done: return true
+                case .again: continue
+                case .failed:
+                    scheduleSave(after: Self.retryDelay)
+                    return false
+                }
             case let .conflict(onDisk, fingerprint):
+                hasFile = true
                 // The newest outside version replaces any held-back older one.
                 pendingExternal = onDisk
                 mergePendingExternal(fingerprint: fingerprint)
@@ -412,6 +479,61 @@ final class NoteDocument {
     private func markPersisted() {
         persistedContent = buffer.content
         persistedTitle = buffer.title
+        unsavedEdit = false
+    }
+
+    private enum Kept {
+        case done
+        /// The situation changed under the attempt: look again.
+        case again
+        case failed
+    }
+
+    /// The active file is gone. Write the buffer where the note went.
+    private func keepTextElsewhere() -> Kept {
+        switch repository.whereIs(id: buffer.id) {
+        case let .active(snapshot):
+            // Found again by a rescan: the file is back, so save against it as
+            // for any outside version.
+            pendingExternal = snapshot.note
+            mergePendingExternal(fingerprint: snapshot.fingerprint)
+            persistedFingerprint = snapshot.fingerprint
+            return .again
+        case let .archived(snapshot):
+            return keepText(in: .archive, over: snapshot, as: .archive)
+        case let .trashed(snapshot):
+            return keepText(in: .trash, over: snapshot, as: .trash)
+        case .missing:
+            guard repository.saveRecoveredCopy(of: buffer) else { return .failed }
+            finishKeeping(in: .recoveredCopy)
+            return .done
+        case .unknown:
+            return .failed
+        }
+    }
+
+    /// Merge what the file in the archive or trash holds into the buffer, as
+    /// for any outside version, then write the result over exactly that file.
+    private func keepText(in folder: NoteStore.Folder, over snapshot: NoteSnapshot, as place: KeptIn) -> Kept {
+        pendingExternal = snapshot.note
+        mergePendingExternal(fingerprint: snapshot.fingerprint)
+        buffer.updatedAt = clock.now()
+        switch repository.save(buffer, in: folder, expecting: snapshot.fingerprint) {
+        case let .saved(fingerprint):
+            persistedFingerprint = fingerprint
+            finishKeeping(in: place)
+            return .done
+        case .conflict, .gone:
+            return .again
+        case .failed:
+            return .failed
+        }
+    }
+
+    private func finishKeeping(in place: KeptIn) {
+        markPersisted()
+        activeFileGone = true
+        didKeepText(place)
     }
 
     /// Write any debounced edit now. Saves are debounced, so quitting mid-sentence
@@ -434,22 +556,28 @@ final class NoteDocument {
         saveTask?.cancel()
         saveTask = nil
         switch reason {
-        case .externalDeletion:
+        case .externalDeletionTextKept:
             // An armed save would resurrect the file just as the window goes.
             isClosed = true
             return .closed(archived: nil)
-        case .discard:
-            foldInOutsideText()
-            // The note holds text after all; the window shows it, so keep it open.
-            guard Self.isBlank(buffer) else { return .refused }
-            discard()
+        case .externalDeletion:
+            // The note is gone from the active folder, but text typed into it
+            // must not go with the window. Where that cannot be written the
+            // window stays, and a retry is armed.
+            if holdsTextNoFileHas {
+                mergePendingExternal()
+                guard persist() else { return .refused }
+            }
+            isClosed = true
             return .closed(archived: nil)
-        case .archive:
+        case .discard, .archive:
             foldInOutsideText()
             if Self.isBlank(buffer) {
                 discard()
                 return .closed(archived: nil)
             }
+            // Text arrived from outside: the window shows it, so keep it open.
+            guard reason == .archive else { return .refused }
             // `archive` only moves the file on disk, so anything typed since the
             // last save has to land first, an outside edit held back included.
             mergePendingExternal()
@@ -458,7 +586,9 @@ final class NoteDocument {
             guard persist() else { return .refused }
             isClosed = true
             repository.archive(buffer)
-            return .closed(archived: buffer)
+            // Nothing was archived, and so nothing is there to undo, when the
+            // note had already left the active folder.
+            return .closed(archived: activeFileGone ? nil : buffer)
         }
     }
 
@@ -475,8 +605,11 @@ final class NoteDocument {
         mergePendingExternal(fingerprint: snapshot.fingerprint)
     }
 
+    /// A note that never had a file has nothing to remove, and a removal is
+    /// announced to every window.
     private func discard() {
         isClosed = true
+        guard hasFile || repository.snapshot(id: buffer.id, archived: false) != nil else { return }
         repository.discardActive(buffer)
     }
 }

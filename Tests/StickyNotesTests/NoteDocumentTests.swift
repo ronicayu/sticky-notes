@@ -255,6 +255,7 @@ final class NoteDocumentTests: XCTestCase {
         XCTAssertTrue(document.flush())
 
         XCTAssertNil(store.loadNote(id: document.id), "a save resurrected a deleted note")
+        XCTAssertEqual(store.loadTrashed().first?.content, "typed after the file went", "the typing was kept nowhere")
         XCTAssertEqual(scheduler.pendingCount, 0)
     }
 
