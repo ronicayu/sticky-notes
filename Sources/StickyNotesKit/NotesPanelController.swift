@@ -86,10 +86,21 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// A hidden panel does no work for a change in the store: it has nobody to
+    /// show the answer to, and `showWindow` reloads before anyone sees it.
     @objc private func handleStoreChange() {
+        guard window?.isVisible == true else { return }
         DispatchQueue.main.async { [weak self] in
+            guard self?.window?.isVisible == true else { return }
             self?.reload()
         }
+    }
+
+    /// Reloads first: whatever changed while the panel was hidden, and today's
+    /// note, are only read now.
+    override func showWindow(_ sender: Any?) {
+        reload()
+        super.showWindow(sender)
     }
 
     private func setupUI() {
@@ -260,7 +271,11 @@ final class NotesPanelController: NSWindowController, NSTableViewDataSource, NST
 
     // MARK: - Data
 
+    /// How many times the list was rebuilt. Read by tests.
+    private(set) var reloadCount = 0
+
     func reload() {
+        reloadCount += 1
         let previousSelection = selectedNote()?.id
         rebuildLabelMenu()
 
