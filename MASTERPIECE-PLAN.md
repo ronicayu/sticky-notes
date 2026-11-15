@@ -24,6 +24,11 @@ between this app and a masterpiece, in this order:
    Sparkle and a Homebrew cask turn a personal tool into something a demanding Mac user can
    recommend without a paragraph of caveats.
 
+One fix goes ahead of all of it: the "Conflicted copy" block that appears when typing into a new
+note in a vault on iCloud Drive (1.0). The TLA+ model in `model/` reproduces it; the cause is a
+merge rule that appends an older copy of the user's own text. It is a small hotfix and does not
+wait for Phase 0.
+
 After those: keyboard parity with the original Stickies (⌘1–⌘7 colours, ⌘M collapse, ⌘W close),
 a title that scales with ⌘+, incremental restyling, and VoiceOver on the custom views. Then stop.
 
@@ -280,7 +285,40 @@ both compare build numbers. `appVersionString` falls back to "dev" (AppDelegate.
 
 ## 3. Phase 1 — Trust: no keystroke is ever lost
 
-Each item cites the risk ID from §6. 0.1 and 0.2 are prerequisites.
+Each item cites the risk ID from §6 and, where the model checked it, the finding ID (F1–F10) from
+`model/REPORT.md`. 0.1 and 0.2 are prerequisites, except for 1.0, which lands first on the
+current code.
+
+### 1.0 Hotfix: no "Conflicted copy" of your own text (F1, F2; owner's field bug)
+
+**Problem.** Typing a few lines into a new note in a vault on iCloud Drive often appends a
+"Conflicted copy" block. `ConflictResolver.merge` (ConflictResolver.swift:25-31) appends any
+losing version whose body is not a substring of the winner, so an older copy of the user's own
+text qualifies after one backspace or mid-line edit. Three paths feed it such a copy (model
+configs `owner-h1`, `owner-obsidian`, `owner-h2-prefilled`): iCloud keeping an older save of this
+Mac as an `NSFileVersion` conflict, which `resolveConflict` (NoteStore.swift:470-501) merges
+without asking which computer saved it; Obsidian writing back an older copy; and the creation echo
+of a note created with text. Separately, `applyExternalNote` never updates `lastPersisted*`
+(NoteWindowController.swift:1373-1403), so after one outside edit every later one is held back
+and later merged as a conflict (F2).
+
+**Change.**
+- `ConflictResolver.merge`: compare by lines. Drop a losing version whose non-empty lines all
+  occur in the winner; take the losing version when it contains the winner; append a block only
+  when each side has lines the other lacks.
+- `resolveConflict`: skip conflict versions saved by this computer
+  (`localizedNameOfSavingComputer`) that are older than the current file. Do not mark a version
+  resolved when `read` returned nil (NoteStore.swift:476-485).
+- `applyExternalNote`: set `lastPersistedContent` / `lastPersistedTitle` to the adopted note.
+
+**Verify.** Tests `testAnOlderVersionFromThisMacIsNotAppendedAsAConflict`,
+`testAConflictVersionWithNothingNewLeavesTheNoteAlone`,
+`testAnOutsideAppendWhileTheCaretIsInTheNoteIsTakenWithoutAConflictBlock`,
+`testTwoVaultEditsInARowBothReachAnIdleWindow`. In the model, `ALLOW_ONE_SIDED_BLOCK = FALSE`
+makes `NoSpuriousConflictBlock` hold. Before the fix, a temporary log of each conflict version's
+saving computer and date on the owner's Mac shows whether iCloud self-conflicts are the source.
+
+**Size.** S.
 
 ### 1.1 Never overwrite a file you have not read (R1, R5)
 
@@ -367,6 +405,36 @@ asking `NSFileVersion` about every file before the first window appears.
 
 **Change.** Run it after `restoreActiveNotes`, on a utility queue, posting `.external(ids)` for
 anything it changed. Measure launch to first window with 500 notes; target < 300 ms.
+
+**Size.** S.
+
+### 1.7 Daily-note conflict versions are merged (F9)
+
+**Problem.** Nothing reads `NSFileVersion` conflicts in the daily folder (DailyNote.swift and
+DailyNoteWindowController.swift have no such call). When two Macs edit the same day's note within
+the sync delay, one Mac's text survives only in a hidden conflict version.
+
+**Change.** Run the store's conflict sweep (with the 1.0 merge rule) on today's file in
+`reloadIfExternallyChanged` and `loadCurrentFile`. After 0.1 this is part of the shared document.
+
+**Verify.** `testADailyNoteConflictVersionIsMergedIn`; model config `b-create-r3` holds.
+
+**Size.** S.
+
+### 1.8 Keep what Obsidian adds to the frontmatter
+
+**Problem.** `renderMarkdown` writes a fixed key list (NoteStore.swift:598-616) and `Note` has no
+place for unknown keys, so the next save drops properties Obsidian added (tags, aliases).
+`parseLabelsList` reads only a flow-style `labels:` line (NoteStore.swift:651-661), so a list
+Obsidian rewrites in block style parses as no labels and the labels are wiped. A title typed in
+the first 0.35 s of an empty note can also be wiped by the creation echo
+(NoteWindowController.swift:1359-1363).
+
+**Change.** Carry unknown frontmatter keys through `Note` unchanged; parse both YAML list styles;
+treat a title-only difference against the creation echo as local.
+
+**Verify.** Round-trip test with `tags`, `aliases` and block-style `labels`;
+`testATitleTypedInTheFirstMomentSurvivesTheCreationEcho`.
 
 **Size.** S.
 
@@ -547,7 +615,33 @@ breaks. "Lost" means text that existed in a buffer or on disk and is in neither 
 | R14 | Watcher coalescing: `invalidateCache` drops `confirmedDeletedIds` on every change, so a genuinely deleted note that keeps receiving saves rescans the directory once per external event. Not loss, but a liveness/cost property. | NoteStore.swift:335-340, 114-123 | Bounded rescans per deleted note |
 | R15 | Rollover while dirty and key: `handleMidnight` → `saveNow` merges `pendingExternalContent` and writes to yesterday, then loads today. If the write fails (disk full), the buffer is replaced. | DailyNoteWindowController.swift:514-523, 455-460 | Same as R3 |
 
-Items 1.1–1.5 are the fixes; the model should be re-run against the `NoteDocument` state machine
+**Model verdicts** (`model/REPORT.md` §5; each confirmed by replaying the trace against the code):
+
+| ID | Verdict | Finding |
+|----|---------|---------|
+| R1 | Reachable, confirmed | F4 |
+| R2 | Reachable, confirmed | F6 |
+| R3 | Reachable, confirmed | F5 |
+| R4 | Reachable, confirmed | F7 |
+| R5 | Reachable, confirmed | F8 |
+| R6 | Reachable, confirmed | F10 |
+| R7 | Same root as R6 | F10 |
+| R8 | Not reachable as text loss: `mergeBodies` containment makes a second heal a no-op | — |
+| R9 | Reachable, confirmed | F5 |
+| R10 | Reachable, confirmed | F3 |
+| R11 | No text loss; reachable as a nested Conflicted-copy block | F1 |
+| R12 | Outside the model | — |
+| R13 | Not a loss the app causes; "latest outside version wins" is the right rule | — |
+| R14 | Outside the model | — |
+| R15 | Confirmed in code, not modelled | same shape as F6 |
+
+The model also found two risks this table missed: F1 (the merge appends text the winner already
+has — the owner's field bug, item 1.0) and F9 (daily-note conflict versions are never merged,
+item 1.7). F2 (an idle window stops following outside edits) is fixed in 1.0. Each fixed bug from
+BUGFIX-PLAN, 6cbd1f0 and cbbec66 has a `regress-*.cfg` that breaks when its `ALLOW_OLD_*` switch
+brings the old code back.
+
+Items 1.0–1.8 are the fixes; the model should be re-run against the `NoteDocument` state machine
 after 0.1, where `edit / externalChange / flush / close / fileGone / midnight` are the only
 transitions.
 
