@@ -36,8 +36,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     var onCloseRefused: ((_ retry: @escaping () -> Void) -> Void)?
     /// Called when the note has just been collapsed.
     var onCollapsed: (() -> Void)?
-    /// Called when the window has stopped being key.
-    var onLostKey: (() -> Void)?
     /// Called when a label was removed with its chip, with what puts it back.
     var onLabelRemoved: ((_ label: String, _ restore: @escaping () -> Void) -> Void)?
     /// Called when an untouched note was swept away because focus left it.
@@ -1004,7 +1002,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         updateChromeVisibility()
         editor.dismissLabelCompletion()
         noteDocument.blur()
-        onLostKey?()
     }
 
     /// Refresh the window's opacity from the outside, for a window that was

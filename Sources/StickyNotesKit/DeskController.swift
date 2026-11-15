@@ -18,6 +18,10 @@ import AppKit
 
     private(set) var windowControllers: [UUID: NoteWindowController] = [:]
     private(set) var notesHidden = false
+    /// Notes the person opened on purpose. Their labels do not hide them, and a
+    /// store change or losing key does not either, until the person hides: "Hide
+    /// all", or one of the note's labels from the menu bar.
+    private var explicitlyShown: Set<UUID> = []
     /// The welcome note's checklist, ticked as the person tries what it asks.
     private(set) lazy var welcome = WelcomeChecklist(
         defaults: settings.defaults, windowFor: { [weak self] in self?.windowControllers[$0] }
@@ -182,6 +186,7 @@ import AppKit
     /// `animateIn` is for a note the person has just made: it fades in. Every
     /// other note appears without ceremony.
     func presentWindow(for note: Note, activate: Bool = true, animateIn: Bool = false) {
+        if activate { explicitlyShown.insert(note.id) }
         if let existing = windowControllers[note.id] {
             if activate {
                 existing.showWindow(nil)
@@ -200,6 +205,7 @@ import AppKit
         ) { [weak self] id in
             guard let self = self else { return }
             self.windowControllers.removeValue(forKey: id)
+            self.explicitlyShown.remove(id)
             // An emptied desk should start the cascade from the top again.
             if self.windowControllers.isEmpty { self.lastNewNoteFrame = nil }
         }
@@ -245,7 +251,6 @@ import AppKit
             }
             self.undo.offerRetryAfterRefusedClose(retry)
         }
-        controller.onLostKey = { [weak self] in self?.applyVisibility() }
         windowControllers[note.id] = controller
         if activate {
             controller.showWindow(nil)
@@ -288,6 +293,7 @@ import AppKit
         }
         // A note the person opens must not be the first thing "hide all" takes
         // away again.
+        explicitlyShown.insert(id)
         showAllIfHidden()
         if let controller = windowControllers[id] {
             if controller.isCollapsed { controller.toggleCollapse() }
@@ -397,6 +403,7 @@ import AppKit
         let wasVisible = windowControllers.values.filter { $0.window?.isVisible == true }.count
             + (dailyVisible ? 1 : 0)
         notesHidden.toggle()
+        if notesHidden { explicitlyShown.removeAll() }
         applyVisibility()
 
         if notesHidden {
@@ -412,20 +419,28 @@ import AppKit
 
     /// Single place that decides which note windows are on screen. "Hide all"
     /// wins over everything; otherwise a note is off screen when one of its
-    /// labels is hidden.
+    /// labels is hidden, unless the person opened it on purpose.
     /// Only acts on windows whose state actually needs to change. This runs on
     /// every store change, including the debounced save behind each keystroke —
     /// ordering already-visible windows to the front would make notes jump
     /// above other apps while you type.
     /// `keepingKeyNote` is for those store changes: the note being typed in is
-    /// not taken away under the person's hands, whatever its labels say. It goes
-    /// when it loses key (`NoteWindowController.onLostKey`).
+    /// not taken away under the person's hands, whatever its labels say, and
+    /// stays up after it loses key like a note the person opened on purpose.
     func applyVisibility(keepingKeyNote: Bool = false) {
         let hiddenLabels = settings.hiddenLabels
         for controller in windowControllers.values {
-            let shouldHide = notesHidden || hiddenLabels.contains(where: controller.labels.contains)
-            if shouldHide, keepingKeyNote, controller.window.map(isKeyWindow) == true { continue }
-            setVisible(controller.window, !shouldHide)
+            let hiddenByLabel = hiddenLabels.contains(where: controller.labels.contains)
+            if hiddenByLabel, !notesHidden {
+                if keepingKeyNote, controller.window.map(isKeyWindow) == true {
+                    explicitlyShown.insert(controller.noteId)
+                }
+                if explicitlyShown.contains(controller.noteId) {
+                    setVisible(controller.window, true)
+                    continue
+                }
+            }
+            setVisible(controller.window, !(notesHidden || hiddenByLabel))
         }
 
         // The daily note has no labels; only "hide all" applies to it, and
@@ -453,6 +468,11 @@ import AppKit
 
         if hiding { hidden.insert(label) } else { hidden.remove(label) }
         settings.hiddenLabels = hidden
+        if hiding {
+            for controller in windowControllers.values where controller.labels.contains(label) {
+                explicitlyShown.remove(controller.noteId)
+            }
+        }
         applyVisibility()
 
         guard hiding else { undo.dismiss(); return }
@@ -734,6 +754,9 @@ import AppKit
             controller.hide()
             return
         }
+        // Opening it ends "hide all", as opening a note does: the next store
+        // change would hide it again.
+        showAllIfHidden()
         if dailyNoteController == nil {
             dailyNoteController = makeDailyNoteController()
         }

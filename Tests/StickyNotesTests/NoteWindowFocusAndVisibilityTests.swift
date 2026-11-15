@@ -85,7 +85,7 @@ import XCTest
         XCTAssertTrue(isShowing(note), "the note the person opened was ordered out by its own save")
     }
 
-    func testANoteWithAHiddenLabelThatIsBeingTypedInStaysUpAndGoesWhenItLosesKey() throws {
+    func testANoteWithAHiddenLabelThatWasOpenedOnPurposeStaysUpWhenItLosesKey() throws {
         let note = seed("Work note", labels: ["work"])
         desk.restoreActiveNotes()
         desk.toggleLabelVisibility("work")
@@ -100,8 +100,69 @@ import XCTest
 
         desk.isKeyWindow = { _ in false }
         controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: window))
+        saveHappens(to: note)
+        desk.reconcileOpenWindows()
 
-        XCTAssertFalse(isShowing(note), "a note with a hidden label stayed up after the person left it")
+        XCTAssertTrue(isShowing(note), "the note the person opened vanished when they left it")
+    }
+
+    func testANoteTypedInThatGainsAHiddenLabelStaysUpAfterItLosesKey() throws {
+        let note = seed("Typing", labels: ["work"])
+        desk.restoreActiveNotes()
+        let controller = try XCTUnwrap(desk.windowControllers[note.id])
+        let window = try XCTUnwrap(controller.window)
+        desk.isKeyWindow = { $0 === window }
+        isolated.settings.hiddenLabels = ["work"]
+        saveHappens(to: note)
+        XCTAssertTrue(isShowing(note))
+
+        desk.isKeyWindow = { _ in false }
+        saveHappens(to: note)
+
+        XCTAssertTrue(isShowing(note), "a later store change took the note away after the person left it")
+    }
+
+    func testHideAllHidesANoteTheyOpenedOnPurposeAndItDoesNotComeBackWithItsLabelHidden() throws {
+        let note = seed("Work note", labels: ["work"])
+        desk.restoreActiveNotes()
+        desk.toggleLabelVisibility("work")
+        desk.focusNote(id: note.id)
+        XCTAssertTrue(isShowing(note))
+
+        desk.toggleHideAll()
+        XCTAssertFalse(isShowing(note))
+        desk.toggleHideAll()
+
+        XCTAssertFalse(isShowing(note), "the label is still hidden: showing all brought back a note it hides")
+    }
+
+    func testHidingOneOfTheLabelsOfANoteTheyOpenedOnPurposeHidesIt() throws {
+        let note = seed("Both", labels: ["work", "play"])
+        desk.restoreActiveNotes()
+        desk.toggleLabelVisibility("work")
+        desk.focusNote(id: note.id)
+        XCTAssertTrue(isShowing(note))
+
+        desk.toggleLabelVisibility("play")
+
+        XCTAssertFalse(isShowing(note))
+    }
+
+    func testTheDailyNoteOpenedFromTheMenuWhileAllAreHiddenStaysUpThroughAStoreChange() throws {
+        let vault = root.appendingPathComponent("vault", isDirectory: true)
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        isolated.settings.obsidianVaultPath = vault.path
+        isolated.settings.dailyNotesPattern = "Daily/{YYYY}-{MM}-{DD}.md"
+        let note = seed("Other")
+        desk.restoreActiveNotes()
+        desk.toggleHideAll()
+
+        desk.toggleDailyNote()
+        saveHappens(to: note)
+        desk.reconcileOpenWindows()
+
+        XCTAssertFalse(desk.notesHidden)
+        XCTAssertTrue(desk.isDailyNoteVisible, "the daily note the person opened was hidden by a store change")
     }
 
     func testTheHideAllCommandStillHidesTheNoteBeingTypedIn() throws {
