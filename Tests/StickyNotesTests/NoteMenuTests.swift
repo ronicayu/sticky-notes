@@ -11,6 +11,7 @@ import XCTest
     private var store: NoteStore!
     private var layout: DeviceLayoutStore!
     private var keyNote: NoteWindowController?
+    private var keyWindow: NSWindow?
     private var noteMenu: NoteMenu!
     private var menu: NSMenu!
     private var savedMainMenu: NSMenu?
@@ -30,6 +31,7 @@ import XCTest
         layout = DeviceLayoutStore(url: root.appendingPathComponent("layout.json"))
         noteMenu = NoteMenu(
             keyNote: { [unowned self] in keyNote },
+            keyWindow: { [unowned self] in keyWindow },
             canCycle: { [unowned self] in canCycle },
             cycle: { [unowned self] in cycled.append($0) },
             currentEvent: { [unowned self] in currentEvent }
@@ -256,9 +258,9 @@ import XCTest
         }
     }
 
-    func testTheDailyNoteEditorHasNoFindBar() {
+    func testTheDailyNoteEditorHasAFindBar() {
         let editor = MarkdownEditorController(store: store, clock: ManualClock(), options: .daily)
-        XCTAssertFalse(editor.textView.usesFindBar)
+        XCTAssertTrue(editor.textView.usesFindBar)
     }
 
     // MARK: - The key path
@@ -318,7 +320,55 @@ import XCTest
         canCycle = true
         menu.update()
         XCTAssertTrue(try item("Next Note").isEnabled, "the daily note could not be left from the keyboard")
-        XCTAssertFalse(try item("Archive").isEnabled)
+        XCTAssertFalse(try item("Close").isEnabled)
+    }
+
+    // MARK: - Close
+
+    private func window(_ styleMask: NSWindow.StyleMask) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: styleMask, backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.orderFront(nil)
+        return window
+    }
+
+    func testCommandWClosesAnotherWindowThatIsKey() throws {
+        let settings = window([.titled, .closable])
+        keyNote = nil
+        keyWindow = settings
+        XCTAssertTrue(settings.isVisible)
+
+        menu.update()
+        XCTAssertEqual(try item("Close").keyEquivalent, "w")
+        XCTAssertTrue(try item("Close").isEnabled)
+        try perform("Close")
+
+        XCTAssertFalse(settings.isVisible)
+    }
+
+    func testCloseIsOfferedOnlyForAWindowThatCanBeClosed() throws {
+        let borderless = window(.borderless)
+        keyNote = nil
+        keyWindow = borderless
+
+        menu.update()
+
+        XCTAssertFalse(try item("Close").isEnabled)
+        borderless.close()
+    }
+
+    func testCommandWOnANoteStillArchivesIt() throws {
+        let controller = openNote()
+        keyNote = controller
+        keyWindow = try XCTUnwrap(controller.window)
+
+        menu.update()
+        XCTAssertEqual(try item("Archive").keyEquivalent, "w")
+        try perform("Archive")
+
+        XCTAssertEqual(archived.count, 1)
     }
 
     func testNextAndPreviousNoteAskTheDeskToCycle() throws {

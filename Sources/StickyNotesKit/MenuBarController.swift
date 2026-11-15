@@ -39,6 +39,7 @@ import KeyboardShortcuts
         self.undo = undo
         self.noteMenu = NoteMenu(
             keyNote: { [weak desk] in desk?.focusedController() },
+            keyDaily: { [weak desk] in desk?.focusedDailyNote() },
             canCycle: { [weak desk] in desk?.canCycleNotes ?? false },
             cycle: { [weak desk] step in desk?.cycleNotes(by: step) }
         )
