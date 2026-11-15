@@ -1,6 +1,6 @@
 import AppKit
 
-final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSLayoutManagerDelegate, NoteDragZoneDelegate, TodoTextViewDelegate {
+final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate, NoteDragZoneDelegate {
     /// The note's text, labels and file. The window draws it and forwards
     /// every change to it; none of the save rules live here.
     let noteDocument: NoteDocument
@@ -44,10 +44,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     private let footerView: NSView
     private let labelButton: NSButton
     private let labelStack: NSStackView
-    private let labelPanel = LabelCompletionPanel()
-    /// Character index of the `#` that triggered the active autocomplete
-    /// session, if any. Cleared when the panel is dismissed.
-    private var labelTriggerStart: Int?
     /// Container that holds titleField + scrollView + footer. We collapse the
     /// note by forcing this view's height to 0; otherwise its subviews'
     /// constraints would keep dictating the window's minimum content height.
@@ -59,9 +55,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
 
     private var dragZoneHeightConstraint: NSLayoutConstraint!
 
-    let textView: TodoTextView
-    private let textStorage: NSTextStorage
-    private let layoutManager: NSLayoutManager
+    /// The Markdown editor this window hosts.
+    let editor: MarkdownEditorController
+    var textView: TodoTextView { editor.textView }
     private let scrollView: NSScrollView
     private let backgroundView: HoverTrackingView
     private let resizeGrip = ResizeGripView()
@@ -90,18 +86,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     /// Window height when collapsed (matches the chrome strip exactly).
     static let collapsedHeight: CGFloat = 22
 
-    private static let slashDateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f
-    }()
-    private static let slashTimeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f
-    }()
     private static let humanDateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "MMM d"
@@ -213,38 +197,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         bodyContainer.wantsLayer = true
         bodyContainer.layer?.masksToBounds = true
 
-        // Editor (TextKit 1 stack so we can hook glyph generation for hidden markers).
-        textStorage = NSTextStorage(string: note.content)
-        layoutManager = NSLayoutManager()
-        textStorage.addLayoutManager(layoutManager)
-        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
-        container.widthTracksTextView = true
-        container.heightTracksTextView = false
-        layoutManager.addTextContainer(container)
-
-        textView = TodoTextView(frame: .zero, textContainer: container)
-        textView.isRichText = false
-        textView.allowsUndo = true
-        textView.backgroundColor = .clear
-        textView.drawsBackground = false
-        // Inset 0 horizontally so the body text starts at the same x as the
-        // flush-left title field — they should appear visually left-aligned.
-        // Breathing room: text was flush against the window edge, and the
-        // last line sat on the bottom border. The horizontal inset stays 0
-        // because the checkbox gutter already provides the left margin.
-        textView.textContainerInset = NSSize(width: 0, height: 8)
-        textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize),
-            .foregroundColor: MarkdownStyler.bodyTextColor
-        ]
-        textView.insertionPointColor = MarkdownStyler.bodyTextColor
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor = MarkdownEditorController(text: note.content, store: store, clock: clock, options: .note)
 
         scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -252,7 +205,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         scrollView.drawsBackground = false
         scrollView.scrollerStyle = .overlay
         scrollView.autohidesScrollers = true
-        scrollView.documentView = textView
+        scrollView.documentView = editor.textView
 
         // Footer: relative date only — color is now changed via the t-shirt
         // button in the chrome row.
@@ -375,8 +328,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         window.initialFirstResponder = textView
         window.minSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
         window.contentMinSize = NSSize(width: 120, height: NoteWindowController.collapsedHeight)
-        textView.delegate = self
-        textView.todoDelegate = self
+        editor.onTextChange = { [weak self] text in
+            guard let self = self else { return }
+            self.noteDocument.setBody(text)
+            self.refreshCollapsedTitle()
+            self.updateDateLabel()
+        }
+        editor.onMoveUpFromFirstLine = { [weak self] in self?.focusTitle() }
+        editor.labelProvider = { [weak store] in store?.allLabels() ?? [] }
+        editor.onLabelTyped = { [weak self] name in self?.addLabel(name) }
         textView.onCommandDragEnded = { [weak self] in
             self?.dragZoneDidEndDrag(suppressSnapping: false)
         }
@@ -387,16 +347,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             name: Appearance.didChange,
             object: nil
         )
-        textView.attachmentHandler = { [weak self] pasteboard in
-            guard let self = self else { return nil }
-            return Attachments.handlePaste(pasteboard, for: self.store)
-        }
-        textView.attachmentResolver = { [weak self] reference in
-            guard let self = self else { return nil }
-            return Attachments.resolve(reference, for: self.store)
-        }
         titleField.delegate = self
-        layoutManager.delegate = self
         dragZone.delegate = self
 
         noteDocument.isEditing = { [weak self] in
@@ -419,10 +370,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         labelButton.target = self
         labelButton.action = #selector(showLabelMenu)
 
-        labelPanel.onAccept = { [weak self] item in
-            self?.acceptLabelCompletion(item)
-        }
-
         backgroundView.onHoverChange = { [weak self] hovering in
             self?.isHovering = hovering
             self?.updateAlpha()
@@ -432,8 +379,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         updateDateLabel()
         updateChromeVisibility(animated: false)
         rebuildLabelChips()
-        MarkdownStyler.apply(to: textView)
-        refreshMarkerVisibility()
 
         NotificationCenter.default.addObserver(
             self,
@@ -635,8 +580,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         backgroundView.layer?.backgroundColor = NSColor(hex: note.color.bodyHex)?.cgColor
         titleField.textColor = MarkdownStyler.bodyTextColor
         titleLabel.textColor = MarkdownStyler.bodyTextColor
-        textView.insertionPointColor = MarkdownStyler.bodyTextColor
-        textView.typingAttributes[.foregroundColor] = MarkdownStyler.bodyTextColor
 
         // Chrome paints itself on the note's paper, so nothing here follows
         // the system appearance on its own.
@@ -647,9 +590,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         rebuildLabelChips()
         resizeGrip.needsDisplay = true
 
-        MarkdownStyler.apply(to: textView)
-        refreshMarkerVisibility()
-        textView.needsDisplay = true
+        editor.applyColors()
+    }
+
+    /// Re-apply styling after the shared text size changes.
+    func restyleForTextSize() {
+        editor.applyTextSize()
     }
 
     private static func colorSwatch(for color: NoteColor) -> NSImage {
@@ -746,7 +692,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         }
         updateAlpha()
         updateChromeVisibility()
-        hideLabelCompletion()
+        editor.dismissLabelCompletion()
         noteDocument.blur()
     }
 
@@ -804,24 +750,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         }
     }
 
-    // MARK: - NSTextViewDelegate
-
-    func textDidChange(_ notification: Notification) {
-        noteDocument.setBody(textView.string)
-        refreshCollapsedTitle()
-        MarkdownStyler.apply(to: textView)
-        refreshMarkerVisibility()
-        updateDateLabel()
-        detectSlashTrigger()
-        detectLabelTrigger()
-    }
-
-    func textViewDidChangeSelection(_ notification: Notification) {
-        refreshMarkerVisibility()
-        // Caret moved away from the active `#word` → kill the panel.
-        if labelTriggerStart != nil { detectLabelTrigger() }
-    }
-
     // MARK: - NSTextFieldDelegate (title)
 
     func controlTextDidChange(_ obj: Notification) {
@@ -844,238 +772,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         return false
     }
 
-    /// Body editor key handling.
-    /// - Up arrow on the first line → jump to title.
-    /// - Enter inside a bullet/ordered/checkbox item → continue the list (or
-    ///   strip the marker if the current item is empty, exiting the list).
-    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard textView === self.textView else { return false }
-
-        // While the autocomplete panel is up, arrow/enter/escape drive the
-        // panel instead of the editor.
-        if labelPanel.isVisible {
-            if commandSelector == #selector(NSResponder.moveDown(_:)) {
-                labelPanel.selectNext()
-                return true
-            }
-            if commandSelector == #selector(NSResponder.moveUp(_:)) {
-                labelPanel.selectPrevious()
-                return true
-            }
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) ||
-               commandSelector == #selector(NSResponder.insertTab(_:)) {
-                if labelPanel.acceptSelection() { return true }
-            }
-            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-                hideLabelCompletion()
-                return true
-            }
-        }
-
-        if commandSelector == #selector(NSResponder.moveUp(_:)) {
-            let selection = textView.selectedRange()
-            let str = textView.string as NSString
-            let firstNewline = str.range(of: "\n")
-            let onFirstLine = firstNewline.location == NSNotFound || selection.location <= firstNewline.location
-            guard onFirstLine else { return false }
-            focusTitle()
-            return true
-        }
-
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            return handleListContinuation()
-        }
-
-        // Tab indents a list item; anywhere else it keeps its normal meaning.
-        if commandSelector == #selector(NSResponder.insertTab(_:)) {
-            return self.textView.indentSelection(outdent: false)
-        }
-        if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
-            return self.textView.indentSelection(outdent: true)
-        }
-
-        return false
-    }
-
-    /// On Enter: if the current line is a list/checkbox item, either continue
-    /// the list with the next marker or — if the item is empty — strip the
-    /// marker and let the regular newline through to exit the list.
-    private func handleListContinuation() -> Bool {
-        let str = textView.string as NSString
-        let selection = textView.selectedRange()
-        let lineRange = str.lineRange(for: NSRange(location: selection.location, length: 0))
-        var lineText = str.substring(with: lineRange)
-        if lineText.hasSuffix("\n") { lineText.removeLast() }
-        let lineNS = lineText as NSString
-
-        // Checkbox: "[indent]- [ ] " or "[indent]- [x] "
-        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)-[ \t]\[[ xX]\][ \t]?(.*)$"#),
-           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
-            let indent = lineNS.substring(with: m.range(at: 1))
-            let rest = lineNS.substring(with: m.range(at: 2))
-            let prefixLen = lineNS.length - (rest as NSString).length
-            return continueOrExitList(
-                lineRange: lineRange,
-                prefixLen: prefixLen,
-                rest: rest,
-                continuation: "\(indent)- [ ] "
-            )
-        }
-
-        // Bullet: "- " or "* " (with optional indent)
-        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)([-*])\s(.*)$"#),
-           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
-            let indent = lineNS.substring(with: m.range(at: 1))
-            let bullet = lineNS.substring(with: m.range(at: 2))
-            let rest = lineNS.substring(with: m.range(at: 3))
-            let prefixLen = lineNS.length - (rest as NSString).length
-            return continueOrExitList(
-                lineRange: lineRange,
-                prefixLen: prefixLen,
-                rest: rest,
-                continuation: "\(indent)\(bullet) "
-            )
-        }
-
-        // Ordered: "1. ", "23. " (with optional indent)
-        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)(\d+)\.\s(.*)$"#),
-           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
-            let indent = lineNS.substring(with: m.range(at: 1))
-            let numStr = lineNS.substring(with: m.range(at: 2))
-            let rest = lineNS.substring(with: m.range(at: 3))
-            let next = (Int(numStr) ?? 0) + 1
-            let prefixLen = lineNS.length - (rest as NSString).length
-            return continueOrExitList(
-                lineRange: lineRange,
-                prefixLen: prefixLen,
-                rest: rest,
-                continuation: "\(indent)\(next). "
-            )
-        }
-
-        return false
-    }
-
-    private func continueOrExitList(lineRange: NSRange,
-                                     prefixLen: Int,
-                                     rest: String,
-                                     continuation: String) -> Bool {
-        let restTrimmed = rest.trimmingCharacters(in: .whitespaces)
-        let selection = textView.selectedRange()
-
-        if restTrimmed.isEmpty {
-            // Empty item — strip the marker so this Enter starts a new line
-            // outside the list. Return false so NSTextView handles the Enter.
-            let prefixRange = NSRange(location: lineRange.location, length: prefixLen)
-            guard textView.shouldChangeText(in: prefixRange, replacementString: "") else { return false }
-            textStorage.replaceCharacters(in: prefixRange, with: "")
-            textView.didChangeText()
-            return false
-        } else {
-            // Continue the list.
-            let insertion = "\n" + continuation
-            let insertRange = NSRange(location: selection.location, length: 0)
-            guard textView.shouldChangeText(in: insertRange, replacementString: insertion) else { return false }
-            textStorage.replaceCharacters(in: insertRange, with: insertion)
-            textView.didChangeText()
-            return true
-        }
-    }
-
-    // MARK: - Slash commands
-
-    private final class SlashCommand: NSObject {
-        let slashLocation: Int
-        let replacement: String
-        init(slashLocation: Int, replacement: String) {
-            self.slashLocation = slashLocation
-            self.replacement = replacement
-        }
-    }
-
-    private func detectSlashTrigger() {
-        let selection = textView.selectedRange()
-        guard selection.length == 0, selection.location > 0 else { return }
-        let str = textView.string as NSString
-        guard selection.location <= str.length else { return }
-        let lastChar = str.substring(with: NSRange(location: selection.location - 1, length: 1))
-        guard lastChar == "/" else { return }
-
-        if selection.location > 1 {
-            let prev = str.substring(with: NSRange(location: selection.location - 2, length: 1))
-            let allowed: Set<String> = ["\n", " ", "\t"]
-            if !allowed.contains(prev) { return }
-        }
-
-        let slashLocation = selection.location - 1
-        DispatchQueue.main.async { [weak self] in
-            self?.showSlashMenu(at: slashLocation)
-        }
-    }
-
-    private func showSlashMenu(at slashLocation: Int) {
-        let now = clock.now()
-        let date = NoteWindowController.slashDateFormatter.string(from: now)
-        let time = NoteWindowController.slashTimeFormatter.string(from: now)
-        let dateTime = "\(date) \(time)"
-
-        let entries: [(String, String)] = [
-            ("Date  →  \(date)",            date),
-            ("Time  →  \(time)",            time),
-            ("Date + Time  →  \(dateTime)", dateTime),
-            ("To-do  →  - [ ] ",            "- [ ] "),
-            ("Divider  →  ---",             "---"),
-            ("Heading  →  # ",              "# "),
-            ("Subheading  →  ## ",          "## ")
-        ]
-
-        let menu = NSMenu()
-        menu.font = NSFont.systemFont(ofSize: 12)
-        for (title, replacement) in entries {
-            let item = NSMenuItem(
-                title: title,
-                action: #selector(insertSlashCommand(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = SlashCommand(slashLocation: slashLocation, replacement: replacement)
-            menu.addItem(item)
-        }
-
-        guard let container = textView.textContainer else { return }
-        let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: slashLocation, length: 1),
-            actualCharacterRange: nil
-        )
-        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
-        rect.origin.x += textView.textContainerOrigin.x
-        rect.origin.y += textView.textContainerOrigin.y
-        let popPoint = NSPoint(x: rect.minX, y: rect.maxY + 2)
-        menu.popUp(positioning: nil, at: popPoint, in: textView)
-    }
-
-    @objc private func insertSlashCommand(_ sender: NSMenuItem) {
-        guard let cmd = sender.representedObject as? SlashCommand else { return }
-        let len = textStorage.length
-        let loc = cmd.slashLocation
-        guard loc >= 0, loc < len else { return }
-        let existing = (textView.string as NSString).substring(with: NSRange(location: loc, length: 1))
-        guard existing == "/" else { return }
-
-        let range = NSRange(location: loc, length: 1)
-        guard textView.shouldChangeText(in: range, replacementString: cmd.replacement) else { return }
-        textStorage.replaceCharacters(in: range, with: cmd.replacement)
-        textView.didChangeText()
-        let inserted = (cmd.replacement as NSString).length
-        textView.setSelectedRange(NSRange(location: loc + inserted, length: 0))
-    }
-
     // MARK: - Slash commands (title, date/time only)
 
     private func detectTitleSlashTrigger() {
-        guard let editor = titleField.currentEditor() else { return }
+        guard let fieldEditor = titleField.currentEditor() else { return }
         let str = titleField.stringValue as NSString
-        let selection = editor.selectedRange
+        let selection = fieldEditor.selectedRange
         guard selection.length == 0, selection.location > 0 else { return }
         let lastChar = str.substring(with: NSRange(location: selection.location - 1, length: 1))
         guard lastChar == "/" else { return }
@@ -1093,16 +795,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     private func showTitleSlashMenu(at slashLocation: Int) {
-        let now = clock.now()
-        let date = NoteWindowController.slashDateFormatter.string(from: now)
-        let time = NoteWindowController.slashTimeFormatter.string(from: now)
-        let dateTime = "\(date) \(time)"
-
-        let entries: [(String, String)] = [
-            ("Date  →  \(date)",            date),
-            ("Time  →  \(time)",            time),
-            ("Date + Time  →  \(dateTime)", dateTime)
-        ]
+        let entries = MarkdownEditorController.dateTimeEntries(now: clock.now())
 
         let menu = NSMenu()
         menu.font = NSFont.systemFont(ofSize: 12)
@@ -1113,7 +806,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = SlashCommand(slashLocation: slashLocation, replacement: replacement)
+            item.representedObject = SlashReplacement(slashLocation: slashLocation, replacement: replacement)
             menu.addItem(item)
         }
 
@@ -1122,7 +815,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
     }
 
     @objc private func insertTitleSlashCommand(_ sender: NSMenuItem) {
-        guard let cmd = sender.representedObject as? SlashCommand else { return }
+        guard let cmd = sender.representedObject as? SlashReplacement else { return }
         let str = titleField.stringValue as NSString
         let loc = cmd.slashLocation
         guard loc >= 0, loc < str.length else { return }
@@ -1137,18 +830,10 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         noteDocument.setTitle(newValue)
         refreshCollapsedTitle()
 
-        if let editor = titleField.currentEditor() {
+        if let fieldEditor = titleField.currentEditor() {
             let newPos = loc + (cmd.replacement as NSString).length
-            editor.selectedRange = NSRange(location: newPos, length: 0)
+            fieldEditor.selectedRange = NSRange(location: newPos, length: 0)
         }
-    }
-
-    private func refreshMarkerVisibility() {
-        let selection = textView.selectedRange()
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: selection)
-        let full = NSRange(location: 0, length: textStorage.length)
-        layoutManager.invalidateGlyphs(forCharacterRange: full, changeInLength: 0, actualCharacterRange: nil)
-        layoutManager.ensureLayout(for: layoutManager.textContainers[0])
     }
 
     private func updateDateLabel() {
@@ -1165,47 +850,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         } else {
             return formatted
         }
-    }
-
-    // MARK: - NSLayoutManagerDelegate
-
-    func layoutManager(
-        _ layoutManager: NSLayoutManager,
-        shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
-        properties props: UnsafePointer<NSLayoutManager.GlyphProperty>,
-        characterIndexes charIndexes: UnsafePointer<Int>,
-        font aFont: NSFont,
-        forGlyphRange glyphRange: NSRange
-    ) -> Int {
-        guard let storage = layoutManager.textStorage else { return 0 }
-
-        var modified = false
-        var newProps = [NSLayoutManager.GlyphProperty](repeating: .null, count: glyphRange.length)
-        for i in 0..<glyphRange.length {
-            var prop = props[i]
-            let charIdx = charIndexes[i]
-            if charIdx < storage.length {
-                let attrs = storage.attributes(at: charIdx, effectiveRange: nil)
-                if attrs[.mdHidden] != nil {
-                    prop = .null
-                    modified = true
-                }
-            }
-            newProps[i] = prop
-        }
-
-        guard modified else { return 0 }
-
-        newProps.withUnsafeBufferPointer { buffer in
-            layoutManager.setGlyphs(
-                glyphs,
-                properties: buffer.baseAddress!,
-                characterIndexes: charIndexes,
-                font: aFont,
-                forGlyphRange: glyphRange
-            )
-        }
-        return glyphRange.length
     }
 
     // MARK: - Collapse
@@ -1263,31 +907,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         noteDocument.requestSave()
     }
 
-    // MARK: - TodoTextViewDelegate
-
-    /// Flip the bracket character (`[ ]` ↔ `[x]`) inside the markdown source
-    /// for the checkbox at the given character index. The checkbox visual is
-    /// re-rendered automatically when MarkdownStyler runs in textDidChange.
-    func textViewDidToggleCheckbox(at charIndex: Int) {
-        let str = textStorage.string as NSString
-        guard charIndex < str.length else { return }
-
-        let lineRange = str.lineRange(for: NSRange(location: charIndex, length: 0))
-        let lineNS = str.substring(with: lineRange) as NSString
-        let bracketInLine = lineNS.range(of: "[")
-        guard bracketInLine.location != NSNotFound,
-              bracketInLine.location + 1 < lineNS.length else { return }
-
-        let bracketCharIdx = lineRange.location + bracketInLine.location + 1
-        let current = str.substring(with: NSRange(location: bracketCharIdx, length: 1))
-        let replacement = current.lowercased() == "x" ? " " : "x"
-
-        let range = NSRange(location: bracketCharIdx, length: 1)
-        guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
-        textStorage.replaceCharacters(in: range, with: replacement)
-        textView.didChangeText()
-    }
-
     // MARK: - External change sync
 
     @objc private func storeDidChange(_ notification: Notification) {
@@ -1324,18 +943,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
             // The collapsed bar shows a checkbox count drawn from the body,
             // so a content-only edit has to refresh it too.
             refreshCollapsedTitle()
-            let oldSelection = textView.selectedRange()
-            let fullRange = NSRange(location: 0, length: textStorage.length)
-            textStorage.replaceCharacters(in: fullRange, with: note.content)
-            // The recorded undo operations refer to ranges in the text we just
-            // threw away; replaying them against the new string garbles it.
-            textView.undoManager?.removeAllActions()
-            MarkdownStyler.apply(to: textView)
-            refreshMarkerVisibility()
+            editor.replaceText(note.content)
             updateDateLabel()
-            let len = textStorage.length
-            let clamped = NSRange(location: min(oldSelection.location, len), length: 0)
-            textView.setSelectedRange(clamped)
         }
     }
 
@@ -1429,117 +1038,6 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         if alert.runModal() == .alertFirstButtonReturn {
             addLabel(field.stringValue)
         }
-    }
-
-    // MARK: - Label autocomplete
-
-    /// Look back from the caret for an active `#word` token and either show
-    /// or update the autocomplete panel. Dismiss it when the cursor leaves
-    /// the token's span.
-    private func detectLabelTrigger() {
-        let selection = textView.selectedRange()
-        guard selection.length == 0 else { hideLabelCompletion(); return }
-        let str = textView.string as NSString
-        let cursor = selection.location
-
-        var i = cursor - 1
-        while i >= 0 {
-            let ch = str.substring(with: NSRange(location: i, length: 1))
-            if ch == "#" {
-                let prevOK: Bool
-                if i == 0 {
-                    prevOK = true
-                } else {
-                    let prev = str.substring(with: NSRange(location: i - 1, length: 1))
-                    prevOK = (prev == " " || prev == "\t" || prev == "\n")
-                }
-                if prevOK {
-                    let typedLen = cursor - i - 1
-                    let typed = typedLen > 0
-                        ? str.substring(with: NSRange(location: i + 1, length: typedLen))
-                        : ""
-                    showLabelCompletion(at: i, typed: typed)
-                    return
-                }
-                hideLabelCompletion()
-                return
-            }
-            // Spaces / newlines end the token.
-            if ch == " " || ch == "\t" || ch == "\n" {
-                hideLabelCompletion()
-                return
-            }
-            i -= 1
-        }
-        hideLabelCompletion()
-    }
-
-    private func showLabelCompletion(at hashLocation: Int, typed: String) {
-        let normalizedQuery = NoteLabel.normalize(typed)
-        let known = store.allLabels()
-        let filtered: [String]
-        if normalizedQuery.isEmpty {
-            filtered = known
-        } else {
-            filtered = known.filter { $0.contains(normalizedQuery) }
-        }
-
-        var items: [LabelCompletionPanel.Item] = filtered.map { .existing($0) }
-        if !normalizedQuery.isEmpty && !known.contains(normalizedQuery) {
-            items.append(.create(normalizedQuery))
-        }
-        if items.isEmpty {
-            hideLabelCompletion()
-            return
-        }
-
-        labelTriggerStart = hashLocation
-        labelPanel.setItems(items)
-        positionLabelPanel(below: hashLocation)
-        if !labelPanel.isVisible {
-            labelPanel.orderFront(nil)
-        }
-    }
-
-    private func hideLabelCompletion() {
-        if labelPanel.isVisible { labelPanel.orderOut(nil) }
-        labelTriggerStart = nil
-    }
-
-    private func positionLabelPanel(below charIndex: Int) {
-        guard let win = textView.window, let container = textView.textContainer else { return }
-        let glyphRange = layoutManager.glyphRange(
-            forCharacterRange: NSRange(location: charIndex, length: 1),
-            actualCharacterRange: nil
-        )
-        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
-        rect.origin.x += textView.textContainerOrigin.x
-        rect.origin.y += textView.textContainerOrigin.y
-        // Convert from textView (flipped) → window → screen.
-        let belowInTextView = NSPoint(x: rect.minX, y: rect.maxY + 2)
-        let inWindow = textView.convert(belowInTextView, to: nil)
-        let screenPoint = win.convertPoint(toScreen: inWindow)
-        var frame = labelPanel.frame
-        // Place panel so its TOP edge sits at the caret line.
-        frame.origin = NSPoint(x: screenPoint.x, y: screenPoint.y - frame.size.height)
-        labelPanel.setFrame(frame, display: false)
-    }
-
-    private func acceptLabelCompletion(_ item: LabelCompletionPanel.Item) {
-        guard let start = labelTriggerStart else { return }
-        let cursor = textView.selectedRange().location
-        let length = max(0, cursor - start)
-        guard start + length <= textStorage.length else {
-            hideLabelCompletion()
-            return
-        }
-        let range = NSRange(location: start, length: length)
-        if textView.shouldChangeText(in: range, replacementString: "") {
-            textStorage.replaceCharacters(in: range, with: "")
-            textView.didChangeText()
-        }
-        addLabel(item.labelName)
-        hideLabelCompletion()
     }
 
     // MARK: - Persistence

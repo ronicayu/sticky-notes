@@ -61,7 +61,7 @@ final class DailyNoteWindowTests: XCTestCase {
     /// real keystroke would.
     private func type(_ text: String, into controller: DailyNoteWindowController) {
         controller.textView.string = text
-        controller.textDidChange(
+        controller.editor.textDidChange(
             Notification(name: NSText.didChangeNotification, object: controller.textView)
         )
     }

@@ -863,7 +863,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         settings.bodyFontSize = clamped
         MarkdownStyler.baseFontSize = clamped
         for controller in windowControllers.values {
-            controller.applyAppearanceColors()
+            controller.restyleForTextSize()
         }
         dailyNoteController?.restyleForTextSize()
     }

@@ -281,7 +281,7 @@ final class CompareAndSwapSaveTests: XCTestCase {
         let reads = store.readCount
 
         controller.textView.string = "on screen, edited"
-        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
+        controller.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
         controller.flushPendingSave()
 
         XCTAssertEqual(store.loadNote(id: shown.id)?.content, "on screen, edited")

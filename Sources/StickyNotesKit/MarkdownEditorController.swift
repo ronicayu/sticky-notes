@@ -1,0 +1,549 @@
+import AppKit
+
+/// The text a slash menu entry puts in place of the `/` that opened it.
+final class SlashReplacement: NSObject {
+    let slashLocation: Int
+    let replacement: String
+
+    init(slashLocation: Int, replacement: String) {
+        self.slashLocation = slashLocation
+        self.replacement = replacement
+    }
+}
+
+/// The Markdown editor both note windows host: a `TodoTextView` on a TextKit 1
+/// stack, restyled as the text changes, with markers that hide when the caret
+/// is elsewhere, list continuation, slash commands, label completion and
+/// checkbox toggling. It knows nothing about notes, files or windows; the host
+/// feeds it text and listens to `onTextChange`.
+final class MarkdownEditorController: NSObject, NSTextViewDelegate, TodoTextViewDelegate {
+    /// What differs between the editors that host this. The rest is shared.
+    struct Options {
+        var verticalInset: CGFloat
+        var lineFragmentPadding: CGFloat?
+        /// Turns off smart insert, text replacement, spelling correction and the find bar.
+        var quietSubstitutions = false
+        /// Enter continues a list item and Tab indents it.
+        var listEditing = false
+        /// Typing `/` opens the date, time and block menu.
+        var slashMenu = false
+
+        static let note = Options(verticalInset: 8, listEditing: true, slashMenu: true)
+        static let daily = Options(
+            verticalInset: 4,
+            lineFragmentPadding: TodoTextView.leadingPaddingForCheckbox,
+            quietSubstitutions: true
+        )
+    }
+
+    let textView: TodoTextView
+    let textStorage: NSTextStorage
+    let layoutManager: NSLayoutManager
+
+    /// Called first on every user edit, before the text is restyled.
+    var onTextChange: ((String) -> Void)?
+    /// Called when Up is pressed on the first line. Nil leaves the key alone.
+    var onMoveUpFromFirstLine: (() -> Void)?
+    /// The labels offered when a `#word` is typed. Nil turns the completion off.
+    var labelProvider: (() -> [String])?
+    /// Called with the label the person picked from the completion list.
+    var onLabelTyped: ((String) -> Void)?
+
+    private let options: Options
+    private let clock: AppClock
+    private let markerLayout = HiddenMarkerLayoutDelegate()
+    private var labelPanel: LabelCompletionPanel?
+    /// Character index of the `#` that opened the active completion, if any.
+    private var labelTriggerStart: Int?
+
+    init(text: String = "", store: NoteStore, clock: AppClock, options: Options) {
+        self.options = options
+        self.clock = clock
+        textStorage = NSTextStorage(string: text)
+        layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        container.heightTracksTextView = false
+        if let padding = options.lineFragmentPadding { container.lineFragmentPadding = padding }
+        layoutManager.addTextContainer(container)
+
+        textView = TodoTextView(frame: .zero, textContainer: container)
+        super.init()
+
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 0, height: options.verticalInset)
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize),
+            .foregroundColor: MarkdownStyler.bodyTextColor
+        ]
+        textView.insertionPointColor = MarkdownStyler.bodyTextColor
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        if options.quietSubstitutions {
+            textView.usesFindBar = false
+            textView.smartInsertDeleteEnabled = false
+            textView.isAutomaticTextReplacementEnabled = false
+            textView.isAutomaticSpellingCorrectionEnabled = false
+        }
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+        textView.delegate = self
+        textView.todoDelegate = self
+        layoutManager.delegate = markerLayout
+        textView.attachmentHandler = { [weak store] pasteboard in
+            guard let store = store else { return nil }
+            return Attachments.handlePaste(pasteboard, for: store)
+        }
+        textView.attachmentResolver = { [weak store] reference in
+            guard let store = store else { return nil }
+            return Attachments.resolve(reference, for: store)
+        }
+        restyle()
+    }
+
+    // MARK: - Styling
+
+    /// Restyle the whole text and re-hide the markers the caret is not in.
+    func restyle() {
+        MarkdownStyler.apply(to: textView)
+        refreshMarkerVisibility()
+    }
+
+    /// Hiding is a layout decision, so changing which markers are hidden has to
+    /// invalidate the glyphs the layout manager already generated.
+    func refreshMarkerVisibility() {
+        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
+        let full = NSRange(location: 0, length: textStorage.length)
+        layoutManager.invalidateGlyphs(forCharacterRange: full, changeInLength: 0, actualCharacterRange: nil)
+        layoutManager.ensureLayout(for: layoutManager.textContainers[0])
+    }
+
+    /// Repaint what depends on the system appearance. Note windows paint their
+    /// own paper, so AppKit never does this for them.
+    func applyColors() {
+        textView.insertionPointColor = MarkdownStyler.bodyTextColor
+        textView.typingAttributes[.foregroundColor] = MarkdownStyler.bodyTextColor
+        restyle()
+        textView.needsDisplay = true
+    }
+
+    /// Re-apply styling after the shared text size changes.
+    func applyTextSize() {
+        textView.font = NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize)
+        restyle()
+    }
+
+    /// Show text that arrived from outside. Setting the storage directly does
+    /// not call the delegate, so this never counts as an edit.
+    func replaceText(_ text: String) {
+        let oldSelection = textView.selectedRange()
+        textStorage.replaceCharacters(in: NSRange(location: 0, length: textStorage.length), with: text)
+        // The recorded undo operations refer to ranges in the text we just
+        // threw away; replaying them against the new string garbles it.
+        textView.undoManager?.removeAllActions()
+        restyle()
+        textView.setSelectedRange(NSRange(location: min(oldSelection.location, textStorage.length), length: 0))
+    }
+
+    // MARK: - NSTextViewDelegate
+
+    func textDidChange(_ notification: Notification) {
+        onTextChange?(textView.string)
+        restyle()
+        if options.slashMenu { detectSlashTrigger() }
+        detectLabelTrigger()
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        refreshMarkerVisibility()
+        // Caret moved away from the active `#word` → kill the panel.
+        if labelTriggerStart != nil { detectLabelTrigger() }
+    }
+
+    /// Body editor key handling.
+    /// - While the label list is up, arrows, Enter, Tab and Escape drive it.
+    /// - Up on the first line hands over to the host (the title).
+    /// - Enter inside a bullet/ordered/checkbox item continues the list, or
+    ///   strips the marker if the item is empty, exiting the list.
+    /// - Tab indents a list item; anywhere else it keeps its normal meaning.
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard textView === self.textView else { return false }
+
+        if let panel = labelPanel, panel.isVisible {
+            if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                panel.selectNext()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                panel.selectPrevious()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) ||
+               commandSelector == #selector(NSResponder.insertTab(_:)) {
+                if panel.acceptSelection() { return true }
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                dismissLabelCompletion()
+                return true
+            }
+        }
+
+        if commandSelector == #selector(NSResponder.moveUp(_:)), let handOver = onMoveUpFromFirstLine {
+            let selection = textView.selectedRange()
+            let str = textView.string as NSString
+            let firstNewline = str.range(of: "\n")
+            let onFirstLine = firstNewline.location == NSNotFound || selection.location <= firstNewline.location
+            guard onFirstLine else { return false }
+            handOver()
+            return true
+        }
+
+        guard options.listEditing else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            return handleListContinuation()
+        }
+        if commandSelector == #selector(NSResponder.insertTab(_:)) {
+            return self.textView.indentSelection(outdent: false)
+        }
+        if commandSelector == #selector(NSResponder.insertBacktab(_:)) {
+            return self.textView.indentSelection(outdent: true)
+        }
+        return false
+    }
+
+    // MARK: - Lists
+
+    /// On Enter: if the current line is a list/checkbox item, either continue
+    /// the list with the next marker or — if the item is empty — strip the
+    /// marker and let the regular newline through to exit the list.
+    private func handleListContinuation() -> Bool {
+        let str = textView.string as NSString
+        let selection = textView.selectedRange()
+        let lineRange = str.lineRange(for: NSRange(location: selection.location, length: 0))
+        var lineText = str.substring(with: lineRange)
+        if lineText.hasSuffix("\n") { lineText.removeLast() }
+        let lineNS = lineText as NSString
+
+        // Checkbox: "[indent]- [ ] " or "[indent]- [x] "
+        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)-[ \t]\[[ xX]\][ \t]?(.*)$"#),
+           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
+            let indent = lineNS.substring(with: m.range(at: 1))
+            let rest = lineNS.substring(with: m.range(at: 2))
+            let prefixLen = lineNS.length - (rest as NSString).length
+            return continueOrExitList(
+                lineRange: lineRange,
+                prefixLen: prefixLen,
+                rest: rest,
+                continuation: "\(indent)- [ ] "
+            )
+        }
+
+        // Bullet: "- " or "* " (with optional indent)
+        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)([-*])\s(.*)$"#),
+           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
+            let indent = lineNS.substring(with: m.range(at: 1))
+            let bullet = lineNS.substring(with: m.range(at: 2))
+            let rest = lineNS.substring(with: m.range(at: 3))
+            let prefixLen = lineNS.length - (rest as NSString).length
+            return continueOrExitList(
+                lineRange: lineRange,
+                prefixLen: prefixLen,
+                rest: rest,
+                continuation: "\(indent)\(bullet) "
+            )
+        }
+
+        // Ordered: "1. ", "23. " (with optional indent)
+        if let regex = try? NSRegularExpression(pattern: #"^([ \t]*)(\d+)\.\s(.*)$"#),
+           let m = regex.firstMatch(in: lineText, range: NSRange(location: 0, length: lineNS.length)) {
+            let indent = lineNS.substring(with: m.range(at: 1))
+            let numStr = lineNS.substring(with: m.range(at: 2))
+            let rest = lineNS.substring(with: m.range(at: 3))
+            let next = (Int(numStr) ?? 0) + 1
+            let prefixLen = lineNS.length - (rest as NSString).length
+            return continueOrExitList(
+                lineRange: lineRange,
+                prefixLen: prefixLen,
+                rest: rest,
+                continuation: "\(indent)\(next). "
+            )
+        }
+
+        return false
+    }
+
+    private func continueOrExitList(lineRange: NSRange,
+                                    prefixLen: Int,
+                                    rest: String,
+                                    continuation: String) -> Bool {
+        let restTrimmed = rest.trimmingCharacters(in: .whitespaces)
+        let selection = textView.selectedRange()
+
+        if restTrimmed.isEmpty {
+            // Empty item — strip the marker so this Enter starts a new line
+            // outside the list. Return false so NSTextView handles the Enter.
+            let prefixRange = NSRange(location: lineRange.location, length: prefixLen)
+            guard textView.shouldChangeText(in: prefixRange, replacementString: "") else { return false }
+            textStorage.replaceCharacters(in: prefixRange, with: "")
+            textView.didChangeText()
+            return false
+        } else {
+            // Continue the list.
+            let insertion = "\n" + continuation
+            let insertRange = NSRange(location: selection.location, length: 0)
+            guard textView.shouldChangeText(in: insertRange, replacementString: insertion) else { return false }
+            textStorage.replaceCharacters(in: insertRange, with: insertion)
+            textView.didChangeText()
+            return true
+        }
+    }
+
+    // MARK: - TodoTextViewDelegate
+
+    /// Flip the bracket character (`[ ]` ↔ `[x]`) inside the markdown source
+    /// for the checkbox at the given character index. The checkbox visual is
+    /// re-rendered when the change reaches `textDidChange`.
+    func textViewDidToggleCheckbox(at charIndex: Int) {
+        let str = textStorage.string as NSString
+        guard charIndex < str.length else { return }
+
+        let lineRange = str.lineRange(for: NSRange(location: charIndex, length: 0))
+        let lineNS = str.substring(with: lineRange) as NSString
+        let bracketInLine = lineNS.range(of: "[")
+        guard bracketInLine.location != NSNotFound,
+              bracketInLine.location + 1 < lineNS.length else { return }
+
+        let bracketCharIdx = lineRange.location + bracketInLine.location + 1
+        let current = str.substring(with: NSRange(location: bracketCharIdx, length: 1))
+        let replacement = current.lowercased() == "x" ? " " : "x"
+
+        let range = NSRange(location: bracketCharIdx, length: 1)
+        guard textView.shouldChangeText(in: range, replacementString: replacement) else { return }
+        textStorage.replaceCharacters(in: range, with: replacement)
+        textView.didChangeText()
+    }
+
+    // MARK: - Slash commands
+
+    private static let dateFormatter = slashFormatter("yyyy-MM-dd")
+    private static let timeFormatter = slashFormatter("HH:mm")
+
+    private static func slashFormatter(_ format: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.dateFormat = format
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }
+
+    /// The date and time entries every slash menu offers, as (menu title, text).
+    static func dateTimeEntries(now: Date) -> [(String, String)] {
+        let date = dateFormatter.string(from: now)
+        let time = timeFormatter.string(from: now)
+        let dateTime = "\(date) \(time)"
+        return [
+            ("Date  →  \(date)", date),
+            ("Time  →  \(time)", time),
+            ("Date + Time  →  \(dateTime)", dateTime)
+        ]
+    }
+
+    private func detectSlashTrigger() {
+        let selection = textView.selectedRange()
+        guard selection.length == 0, selection.location > 0 else { return }
+        let str = textView.string as NSString
+        guard selection.location <= str.length else { return }
+        let lastChar = str.substring(with: NSRange(location: selection.location - 1, length: 1))
+        guard lastChar == "/" else { return }
+
+        if selection.location > 1 {
+            let prev = str.substring(with: NSRange(location: selection.location - 2, length: 1))
+            let allowed: Set<String> = ["\n", " ", "\t"]
+            if !allowed.contains(prev) { return }
+        }
+
+        let slashLocation = selection.location - 1
+        DispatchQueue.main.async { [weak self] in
+            self?.showSlashMenu(at: slashLocation)
+        }
+    }
+
+    private func showSlashMenu(at slashLocation: Int) {
+        let entries = MarkdownEditorController.dateTimeEntries(now: clock.now()) + [
+            ("To-do  →  - [ ] ", "- [ ] "),
+            ("Divider  →  ---", "---"),
+            ("Heading  →  # ", "# "),
+            ("Subheading  →  ## ", "## ")
+        ]
+
+        let menu = NSMenu()
+        menu.font = NSFont.systemFont(ofSize: 12)
+        for (title, replacement) in entries {
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(insertSlashCommand(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = SlashReplacement(slashLocation: slashLocation, replacement: replacement)
+            menu.addItem(item)
+        }
+
+        guard let container = textView.textContainer else { return }
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: slashLocation, length: 1),
+            actualCharacterRange: nil
+        )
+        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
+        rect.origin.x += textView.textContainerOrigin.x
+        rect.origin.y += textView.textContainerOrigin.y
+        let popPoint = NSPoint(x: rect.minX, y: rect.maxY + 2)
+        menu.popUp(positioning: nil, at: popPoint, in: textView)
+    }
+
+    @objc private func insertSlashCommand(_ sender: NSMenuItem) {
+        guard let cmd = sender.representedObject as? SlashReplacement else { return }
+        let len = textStorage.length
+        let loc = cmd.slashLocation
+        guard loc >= 0, loc < len else { return }
+        let existing = (textView.string as NSString).substring(with: NSRange(location: loc, length: 1))
+        guard existing == "/" else { return }
+
+        let range = NSRange(location: loc, length: 1)
+        guard textView.shouldChangeText(in: range, replacementString: cmd.replacement) else { return }
+        textStorage.replaceCharacters(in: range, with: cmd.replacement)
+        textView.didChangeText()
+        let inserted = (cmd.replacement as NSString).length
+        textView.setSelectedRange(NSRange(location: loc + inserted, length: 0))
+    }
+
+    // MARK: - Label completion
+
+    /// Look back from the caret for an active `#word` token and either show
+    /// or update the completion panel. Dismiss it when the cursor leaves
+    /// the token's span.
+    private func detectLabelTrigger() {
+        guard labelProvider != nil else { return }
+        let selection = textView.selectedRange()
+        guard selection.length == 0 else { dismissLabelCompletion(); return }
+        let str = textView.string as NSString
+        let cursor = selection.location
+
+        var i = cursor - 1
+        while i >= 0 {
+            let ch = str.substring(with: NSRange(location: i, length: 1))
+            if ch == "#" {
+                let prevOK: Bool
+                if i == 0 {
+                    prevOK = true
+                } else {
+                    let prev = str.substring(with: NSRange(location: i - 1, length: 1))
+                    prevOK = (prev == " " || prev == "\t" || prev == "\n")
+                }
+                if prevOK {
+                    let typedLen = cursor - i - 1
+                    let typed = typedLen > 0
+                        ? str.substring(with: NSRange(location: i + 1, length: typedLen))
+                        : ""
+                    showLabelCompletion(at: i, typed: typed)
+                    return
+                }
+                dismissLabelCompletion()
+                return
+            }
+            // Spaces / newlines end the token.
+            if ch == " " || ch == "\t" || ch == "\n" {
+                dismissLabelCompletion()
+                return
+            }
+            i -= 1
+        }
+        dismissLabelCompletion()
+    }
+
+    private func showLabelCompletion(at hashLocation: Int, typed: String) {
+        let normalizedQuery = NoteLabel.normalize(typed)
+        let known = labelProvider?() ?? []
+        let filtered: [String]
+        if normalizedQuery.isEmpty {
+            filtered = known
+        } else {
+            filtered = known.filter { $0.contains(normalizedQuery) }
+        }
+
+        var items: [LabelCompletionPanel.Item] = filtered.map { .existing($0) }
+        if !normalizedQuery.isEmpty && !known.contains(normalizedQuery) {
+            items.append(.create(normalizedQuery))
+        }
+        if items.isEmpty {
+            dismissLabelCompletion()
+            return
+        }
+
+        let panel = completionPanel()
+        labelTriggerStart = hashLocation
+        panel.setItems(items)
+        positionLabelPanel(panel, below: hashLocation)
+        if !panel.isVisible {
+            panel.orderFront(nil)
+        }
+    }
+
+    private func completionPanel() -> LabelCompletionPanel {
+        if let panel = labelPanel { return panel }
+        let panel = LabelCompletionPanel()
+        panel.onAccept = { [weak self] item in
+            self?.acceptLabelCompletion(item)
+        }
+        labelPanel = panel
+        return panel
+    }
+
+    func dismissLabelCompletion() {
+        if let panel = labelPanel, panel.isVisible { panel.orderOut(nil) }
+        labelTriggerStart = nil
+    }
+
+    private func positionLabelPanel(_ panel: LabelCompletionPanel, below charIndex: Int) {
+        guard let win = textView.window, let container = textView.textContainer else { return }
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: charIndex, length: 1),
+            actualCharacterRange: nil
+        )
+        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
+        rect.origin.x += textView.textContainerOrigin.x
+        rect.origin.y += textView.textContainerOrigin.y
+        // Convert from textView (flipped) → window → screen.
+        let belowInTextView = NSPoint(x: rect.minX, y: rect.maxY + 2)
+        let inWindow = textView.convert(belowInTextView, to: nil)
+        let screenPoint = win.convertPoint(toScreen: inWindow)
+        var frame = panel.frame
+        // Place panel so its TOP edge sits at the caret line.
+        frame.origin = NSPoint(x: screenPoint.x, y: screenPoint.y - frame.size.height)
+        panel.setFrame(frame, display: false)
+    }
+
+    private func acceptLabelCompletion(_ item: LabelCompletionPanel.Item) {
+        guard let start = labelTriggerStart else { return }
+        let cursor = textView.selectedRange().location
+        let length = max(0, cursor - start)
+        guard start + length <= textStorage.length else {
+            dismissLabelCompletion()
+            return
+        }
+        let range = NSRange(location: start, length: length)
+        if textView.shouldChangeText(in: range, replacementString: "") {
+            textStorage.replaceCharacters(in: range, with: "")
+            textView.didChangeText()
+        }
+        onLabelTyped?(item.labelName)
+        dismissLabelCompletion()
+    }
+}

@@ -616,10 +616,9 @@ private struct StylingVisitor: MarkupWalker {
 /// Collapses glyphs tagged `mdHidden` to nothing.
 ///
 /// The `mdHidden` attribute only marks text; something has to act on it, and
-/// that is a layout manager delegate. `NoteWindowController` implements this
-/// itself for the editor; this standalone version is for read-only surfaces —
-/// like the quick switcher's preview — that should show a note the way it
-/// reads, not the way its markdown is written.
+/// that is a layout manager delegate. `MarkdownEditorController` installs one
+/// on every editor; read-only surfaces, like the quick switcher's preview, use
+/// it too, so a note reads the same everywhere instead of showing its markdown.
 final class HiddenMarkerLayoutDelegate: NSObject, NSLayoutManagerDelegate {
     func layoutManager(
         _ layoutManager: NSLayoutManager,

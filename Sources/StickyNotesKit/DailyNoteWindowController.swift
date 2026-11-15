@@ -5,11 +5,7 @@ import AppKit
 /// injection — so Obsidian and other plugins remain authoritative for
 /// formatting. Window chrome (position / size / color) is persisted to
 /// `<vault>/StickyNotes/_daily.json` via `DailyNote.saveState`.
-final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, TodoTextViewDelegate, NoteDragZoneDelegate {
-    /// Only used to locate the attachments folder. The daily note itself is a
-    /// vault file rather than a stored note, but its pasted images belong in
-    /// the same place as everyone else's.
-    private let attachmentStore: NoteStore
+final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NoteDragZoneDelegate {
     private let settings: Settings
     private let clock: AppClock
 
@@ -24,9 +20,11 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private let closeButton: NSButton
     private let collapseButton: NSButton
     private let backgroundView: HoverTrackingView
-    let textView: TodoTextView  // internal so the end-to-end tests can type into it
-    private let textStorage: NSTextStorage
-    private let layoutManager: NSLayoutManager
+    /// The Markdown editor this window hosts. Its pasted images go to the same
+    /// attachments folder as everyone else's, although the daily note itself is
+    /// a vault file rather than a stored note.
+    let editor: MarkdownEditorController
+    var textView: TodoTextView { editor.textView }
     private let scrollView: NSScrollView
 
     private var fileWatcher: FileWatcher?
@@ -49,7 +47,6 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
 
     init(settings: Settings, store: NoteStore, clock: AppClock, scheduler: Scheduler = MainScheduler()) {
         self.settings = settings
-        self.attachmentStore = store
         self.clock = clock
         self.dailyDocument = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
         self.state = DailyNote.loadState(settings: settings)
@@ -100,43 +97,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
             tooltip: "Collapse / expand"
         )
 
-        textStorage = NSTextStorage()
-        layoutManager = NSLayoutManager()
-        textStorage.addLayoutManager(layoutManager)
-        let container = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
-        container.widthTracksTextView = true
-        container.heightTracksTextView = false
-        container.lineFragmentPadding = TodoTextView.leadingPaddingForCheckbox
-        layoutManager.addTextContainer(container)
-
-        // NSScrollView's documentView relies on autoresizingMask, not Auto
-        // Layout — leave `translatesAutoresizingMaskIntoConstraints` at its
-        // default `true` and rely on `autoresizingMask` + min/maxSize so
-        // the text view resizes with the scroll view's clip view. Setting
-        // this to false (as an earlier draft did) leaves the text view
-        // sized at zero so clicks never land on real text positions.
-        textView = TodoTextView(frame: .zero, textContainer: container)
-        textView.isRichText = false
-        textView.allowsUndo = true
-        textView.usesFindBar = false
-        textView.smartInsertDeleteEnabled = false
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isAutomaticTextReplacementEnabled = false
-        textView.isAutomaticSpellingCorrectionEnabled = false
-        textView.backgroundColor = .clear
-        textView.drawsBackground = false
-        textView.textContainerInset = NSSize(width: 0, height: 4)
-        textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize),
-            .foregroundColor: MarkdownStyler.bodyTextColor
-        ]
-        textView.insertionPointColor = MarkdownStyler.bodyTextColor
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor = MarkdownEditorController(store: store, clock: clock, options: .daily)
 
         scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -144,20 +105,11 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
-        scrollView.documentView = textView
+        scrollView.documentView = editor.textView
 
         super.init(window: window)
         window.delegate = self
-        textView.delegate = self
-        textView.todoDelegate = self
-        textView.attachmentHandler = { [weak self] pasteboard in
-            guard let self = self else { return nil }
-            return Attachments.handlePaste(pasteboard, for: self.attachmentStore)
-        }
-        textView.attachmentResolver = { [weak self] reference in
-            guard let self = self else { return nil }
-            return Attachments.resolve(reference, for: self.attachmentStore)
-        }
+        editor.onTextChange = { [weak self] text in self?.dailyDocument.setBody(text) }
 
         setupLayout()
         closeButton.target = self
@@ -271,17 +223,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         textView.isEditable = !dailyDocument.isUnavailable
         let text = dailyDocument.isUnavailable ? DailyNoteWindowController.placeholder : dailyDocument.body
         guard textView.string != text else { return }
-        let oldSelection = textView.selectedRange()
-        let fullRange = NSRange(location: 0, length: textStorage.length)
-        textStorage.replaceCharacters(in: fullRange, with: text)
-        // The recorded undo operations refer to ranges in the text we just
-        // threw away; replaying them against the new string garbles it.
-        textView.undoManager?.removeAllActions()
-        MarkdownStyler.apply(to: textView)
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
-        let len = textStorage.length
-        let clamped = NSRange(location: min(oldSelection.location, len), length: 0)
-        textView.setSelectedRange(clamped)
+        editor.replaceText(text)
     }
 
     @objc private func applyAppearanceColors() {
@@ -290,11 +232,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         for button in [closeButton, collapseButton] {
             button.contentTintColor = Appearance.chromeInk
         }
-        textView.insertionPointColor = MarkdownStyler.bodyTextColor
-        textView.typingAttributes[.foregroundColor] = MarkdownStyler.bodyTextColor
-        MarkdownStyler.apply(to: textView)
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
-        textView.needsDisplay = true
+        editor.applyColors()
     }
 
     /// Write any debounced edit immediately, so quitting mid-sentence doesn't
@@ -397,9 +335,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// Re-apply styling after the shared text size changes.
     func restyleForTextSize() {
-        textView.font = NSFont.systemFont(ofSize: MarkdownStyler.baseFontSize)
-        MarkdownStyler.apply(to: textView)
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
+        editor.applyTextSize()
     }
 
     func dragZoneDidClick() {
@@ -479,40 +415,5 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
 
     func windowDidResignKey(_ notification: Notification) {
         dailyDocument.blur()
-    }
-
-    // MARK: - Text editing
-
-    func textDidChange(_ notification: Notification) {
-        dailyDocument.setBody(textView.string)
-        MarkdownStyler.apply(to: textView)
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
-    }
-
-    func textViewDidChangeSelection(_ notification: Notification) {
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
-    }
-
-    // MARK: - TodoTextViewDelegate
-
-    func textViewDidToggleCheckbox(at charIndex: Int) {
-        // Locate the bracket between `[` and `]` on the same line and flip
-        // its character. Mirrors the editing path used for regular notes.
-        let nsString = textStorage.string as NSString
-        let lineRange = nsString.lineRange(for: NSRange(location: charIndex, length: 0))
-        let line = nsString.substring(with: lineRange)
-        guard let openIdx = line.firstIndex(of: "["),
-              let closeIdx = line.firstIndex(of: "]"),
-              line.distance(from: openIdx, to: closeIdx) >= 2 else { return }
-        let bracketCharIdx = line.index(after: openIdx)
-        let absoluteCharIdx = lineRange.location + line.distance(from: line.startIndex, to: bracketCharIdx)
-        let current = (line[bracketCharIdx])
-        let replacement = (current == " ") ? "x" : " "
-        let replaceRange = NSRange(location: absoluteCharIdx, length: 1)
-        guard textView.shouldChangeText(in: replaceRange, replacementString: replacement) else { return }
-        textStorage.replaceCharacters(in: replaceRange, with: replacement)
-        textView.didChangeText()
-        MarkdownStyler.apply(to: textView)
-        MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
     }
 }

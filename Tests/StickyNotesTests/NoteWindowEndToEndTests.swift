@@ -50,7 +50,7 @@ final class NoteWindowEndToEndTests: XCTestCase {
     /// delegate callback that a real keystroke would.
     private func type(_ text: String, into controller: NoteWindowController) {
         controller.textView.string = text
-        controller.textDidChange(
+        controller.editor.textDidChange(
             Notification(name: NSText.didChangeNotification, object: controller.textView)
         )
     }

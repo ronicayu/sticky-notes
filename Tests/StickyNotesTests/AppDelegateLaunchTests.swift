@@ -103,7 +103,7 @@ final class AppDelegateLaunchTests: XCTestCase {
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         let controller = try XCTUnwrap(app.noteWindowControllers[note.id])
         controller.textView.string = "typed just before quitting"
-        controller.textDidChange(
+        controller.editor.textDidChange(
             Notification(name: NSText.didChangeNotification, object: controller.textView)
         )
         try setWritable(false, store.activeURL)
@@ -157,7 +157,7 @@ final class AppDelegateLaunchTests: XCTestCase {
 
         clock.advance(by: 86_400)
         controller.textView.string = "edited a day later"
-        controller.textDidChange(
+        controller.editor.textDidChange(
             Notification(name: NSText.didChangeNotification, object: controller.textView)
         )
         controller.flushPendingSave()
@@ -181,7 +181,7 @@ final class AppDelegateLaunchTests: XCTestCase {
         let daily = try XCTUnwrap(app.dailyNote)
         daily.window?.orderOut(nil)
         daily.textView.string = "daily text typed just before the disk failed"
-        daily.textDidChange(Notification(name: NSText.didChangeNotification, object: daily.textView))
+        daily.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: daily.textView))
         let folder = vault.appendingPathComponent("Daily", isDirectory: true)
         try setWritable(false, folder)
         addTeardownBlock { try? self.setWritable(true, folder) }
@@ -214,7 +214,7 @@ final class AppDelegateLaunchTests: XCTestCase {
         app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         let controller = try XCTUnwrap(app.noteWindowControllers[note.id])
         controller.textView.string = "note text typed just before quitting"
-        controller.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
+        controller.editor.textDidChange(Notification(name: NSText.didChangeNotification, object: controller.textView))
         try setWritable(false, store.activeURL)
         addTeardownBlock { [store = store!] in try? self.setWritable(true, store.activeURL) }
         _ = try openDailyNoteWithUnsavedTypingAndFailingWrites(app)
