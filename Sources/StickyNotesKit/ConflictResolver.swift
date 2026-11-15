@@ -71,41 +71,21 @@ enum ConflictResolver {
         return "\(local)\n\n\(divider(for: externalDate, now: now))\n\n\(external)"
     }
 
-    /// One version of a note's file that iCloud kept as a conflict, with what
-    /// `NSFileVersion` says about who saved it and when.
-    struct ConflictCandidate {
-        let note: Note
-        let savingComputer: String?
-        let modificationDate: Date?
+    /// The notes worth merging: the current file plus its conflict versions,
+    /// minus the ones that are an earlier save of this process's own writing.
+    /// `isOwnWrite` must be true only for text this process wrote to the file.
+    /// A conflict version is dropped only when both it and the current file
+    /// are such text; otherwise it may hold text the file lacks.
+    static func versionsToMerge(
+        current: Note,
+        conflicts: [Note],
+        isOwnWrite: (Note) -> Bool
+    ) -> [Note] {
+        guard isOwnWrite(current) else { return [current] + conflicts }
+        return [current] + conflicts.filter { !isOwnWrite($0) }
     }
 
-    /// The notes worth merging: the current file plus every conflict version
-    /// except this computer's own older saves. iCloud can keep an earlier save
-    /// from the same Mac as a "conflict"; when this Mac also wrote the current
-    /// file, it holds nothing the current file lacks, so appending it only
-    /// produces a "Conflicted copy" of the user's own words. If another Mac
-    /// wrote the current file, or nobody knows who did, the older save may be
-    /// the only copy of this Mac's text and is kept.
-    static func versionsToMerge(
-        current: Note?,
-        candidates: [ConflictCandidate],
-        currentSavingComputer: String?,
-        thisComputer: String?,
-        currentModified: Date?
-    ) -> [Note] {
-        var versions: [Note] = []
-        if let current { versions.append(current) }
-        for candidate in candidates {
-            if let thisComputer, currentSavingComputer == thisComputer,
-               candidate.savingComputer == thisComputer,
-               let saved = candidate.modificationDate, let currentModified,
-               saved <= currentModified {
-                continue
-            }
-            versions.append(candidate.note)
-        }
-        return versions
-    }
+    static func normalizedBody(_ body: String) -> String { normalize(body) }
 
     /// True when these versions actually disagree about anything worth
     /// merging. Identical copies are common — iCloud produces a conflict from
@@ -140,30 +120,40 @@ enum ConflictResolver {
         }
     }
 
-    /// True when `body` adds nothing to `base`: every line already occurs in
-    /// it. The last line may also be a prefix of a base line, because an older
-    /// save is often cut mid-word.
+    /// True when `body` adds nothing to `base`: each of its lines uses up one
+    /// matching line of `base`, so a repeated line still counts. The last line
+    /// may instead use up a base line it is a prefix of, because an older save
+    /// is often cut mid-word.
     private static func isCovered(_ body: String, by base: String) -> Bool {
-        let baseLines = lines(of: base)
-        let known = Set(baseLines)
+        var available: [String: Int] = [:]
+        for line in lines(of: base) { available[line, default: 0] += 1 }
         let bodyLines = lines(of: body)
-        for (index, line) in bodyLines.enumerated() where !known.contains(line) {
+        for (index, line) in bodyLines.enumerated() {
+            if let count = available[line], count > 0 {
+                available[line] = count - 1
+                continue
+            }
             let isLast = index == bodyLines.count - 1
-            guard isLast, baseLines.contains(where: { $0.hasPrefix(line) }) else { return false }
+            guard isLast,
+                  let match = available.first(where: { $0.value > 0 && $0.key.hasPrefix(line) })
+            else { return false }
+            available[match.key] = match.value - 1
         }
         return true
     }
 
-    /// True when `body` has every line of `base`, counting repeats: taking
-    /// `body` in place of `base` must not drop a second copy of a line.
+    /// True when `body` can replace `base` without undoing anything the user
+    /// did: `base` has text, and its lines all appear in `body` in the same
+    /// order, repeats counted. An outside append qualifies; a deletion, a
+    /// reorder or a cleared note does not.
     private static func isSuperset(_ body: String, of base: String) -> Bool {
-        var available: [String: Int] = [:]
-        for line in lines(of: body) { available[line, default: 0] += 1 }
-        for line in lines(of: base) {
-            guard let count = available[line], count > 0 else { return false }
-            available[line] = count - 1
+        let baseLines = lines(of: base)
+        guard !baseLines.isEmpty else { return false }
+        var next = baseLines.startIndex
+        for line in lines(of: body) where next < baseLines.endIndex && line == baseLines[next] {
+            next += 1
         }
-        return true
+        return next == baseLines.endIndex
     }
 
     private static func normalize(_ body: String) -> String {

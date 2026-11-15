@@ -147,7 +147,7 @@ final class NoteStore {
     func loadNote(id: UUID, archived: Bool = false) -> Note? {
         let dir = archived ? archiveURL : activeURL
         guard let url = existingURL(for: id, in: dir) else { return nil }
-        return read(url)
+        return readMain(url)
     }
 
     func archive(_ note: Note) {
@@ -174,7 +174,7 @@ final class NoteStore {
         markdownPathIndex[note.id] = to
 
         // Force-expand on restore so the content is immediately visible.
-        if var restored = read(to), restored.collapsed {
+        if var restored = readMain(to), restored.collapsed {
             restored.collapsed = false
             write(restored, to: to)
         }
@@ -426,7 +426,7 @@ final class NoteStore {
         }
         var match: URL?
         for url in files where url.pathExtension == fileExtension {
-            guard let note = read(url) else { continue }
+            guard let note = readMain(url) else { continue }
             markdownPathIndex[note.id] = url
             if note.id == id { match = url }
         }
@@ -469,30 +469,58 @@ final class NoteStore {
     /// conflict versions only exist inside iCloud.
     struct ConflictVersionHandle {
         let url: URL
-        let savingComputer: String?
-        let modificationDate: Date?
         let markResolved: () -> Void
     }
 
     var conflictVersionsProvider: (URL) -> [ConflictVersionHandle] = { url in
         (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []).map { version in
-            ConflictVersionHandle(
-                url: version.url,
-                savingComputer: version.localizedNameOfSavingComputer,
-                modificationDate: version.modificationDate,
-                markResolved: { version.isResolved = true }
-            )
+            ConflictVersionHandle(url: version.url, markResolved: { version.isResolved = true })
         }
-    }
-    var currentSavingComputerProvider: (URL) -> String? = { url in
-        NSFileVersion.currentVersionOfItem(at: url)?.localizedNameOfSavingComputer
     }
     var otherVersionsRemover: (URL) -> Void = { url in
         try? NSFileVersion.removeOtherVersionsOfItem(at: url)
     }
-    var thisComputerName: String? = NoteStore.computerName
 
-    private static let computerName = Host.current().localizedName
+    /// The bodies this process wrote to each file, as hashes, oldest first.
+    /// iCloud can keep an earlier save from this very process as a conflict
+    /// version. When the file still holds something we wrote, such a version
+    /// holds only text the user has since edited away, so it is not a conflict.
+    /// Any read that finds text we did not write ends the lineage: from then
+    /// on an old save of ours may hold the only copy of text that is not in
+    /// the file. It lives in memory only, so after a relaunch everything merges.
+    private var writeLineage: [String: [String]] = [:]
+    private static let lineageLimit = 50
+
+    private func recordWrite(_ note: Note, to url: URL) {
+        var hashes = writeLineage[NoteStore.lineageKey(url), default: []]
+        hashes.append(NoteStore.contentHash(note.content))
+        if hashes.count > NoteStore.lineageLimit { hashes.removeFirst(hashes.count - NoteStore.lineageLimit) }
+        writeLineage[NoteStore.lineageKey(url)] = hashes
+    }
+
+    private func isOwnWrite(_ note: Note, at url: URL) -> Bool {
+        writeLineage[NoteStore.lineageKey(url)]?.contains(NoteStore.contentHash(note.content)) ?? false
+    }
+
+    /// The same file reaches us as `/var/...` and `/private/var/...`.
+    private static func lineageKey(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().path
+    }
+
+    private static func contentHash(_ body: String) -> String {
+        let digest = SHA256.hash(data: Data(ConflictResolver.normalizedBody(body).utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Read a note's own file, ending the write lineage if it holds text this
+    /// process did not write.
+    private func readMain(_ url: URL) -> Note? {
+        guard let note = read(url) else { return nil }
+        if writeLineage[NoteStore.lineageKey(url)] != nil, !isOwnWrite(note, at: url) {
+            writeLineage[NoteStore.lineageKey(url)] = nil
+        }
+        return note
+    }
 
     /// Merge one file's conflict versions back into it. iCloud exposes losing
     /// versions through `NSFileVersion`; ignoring them, as we used to, silently
@@ -501,8 +529,11 @@ final class NoteStore {
         let conflicts = conflictVersionsProvider(url)
         guard !conflicts.isEmpty else { return false }
 
-        let current = read(url)
-        var candidates: [ConflictResolver.ConflictCandidate] = []
+        // Without the current file nothing can be judged, and resolving the
+        // versions now would discard the only readable copies.
+        guard let current = readMain(url) else { return false }
+
+        var conflictNotes: [Note] = []
         // A version that can't be read yet (iCloud has not downloaded it) is
         // left unresolved for a later sweep; resolving it now would lose it.
         var unreadable = Set<Int>()
@@ -511,11 +542,7 @@ final class NoteStore {
                 unreadable.insert(index)
                 continue
             }
-            candidates.append(.init(
-                note: note,
-                savingComputer: version.savingComputer,
-                modificationDate: version.modificationDate
-            ))
+            conflictNotes.append(note)
         }
 
         defer {
@@ -527,14 +554,10 @@ final class NoteStore {
             if unreadable.isEmpty { otherVersionsRemover(url) }
         }
 
-        let currentModified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-            .contentModificationDate
         let versions = ConflictResolver.versionsToMerge(
             current: current,
-            candidates: candidates,
-            currentSavingComputer: currentSavingComputerProvider(url),
-            thisComputer: thisComputerName,
-            currentModified: currentModified
+            conflicts: conflictNotes,
+            isOwnWrite: { isOwnWrite($0, at: url) }
         )
 
         guard ConflictResolver.needsMerge(versions),
@@ -544,7 +567,7 @@ final class NoteStore {
         // back through the watcher, which sweeps again — and a conflict that
         // won't clear would keep that cycle running every few seconds,
         // dropping the cache and reloading every window each time.
-        if let current, current.content == merged.content,
+        if current.content == merged.content,
            current.title == merged.title, current.labels == merged.labels {
             return false
         }
@@ -561,7 +584,7 @@ final class NoteStore {
         }
         var notes: [Note] = []
         for url in files where url.pathExtension == fileExtension {
-            guard let note = read(url) else { continue }
+            guard let note = readMain(url) else { continue }
             if format == .markdown {
                 markdownPathIndex[note.id] = url
             }
@@ -593,6 +616,7 @@ final class NoteStore {
         do {
             try writeOnce(note, to: url)
             recordSuccess()
+            recordWrite(note, to: url)
             return true
         } catch {
             try? FileManager.default.createDirectory(
@@ -602,6 +626,7 @@ final class NoteStore {
             do {
                 try writeOnce(note, to: url)
                 recordSuccess()
+                recordWrite(note, to: url)
                 return true
             } catch {
                 recordFailure(url: url, error: error)
