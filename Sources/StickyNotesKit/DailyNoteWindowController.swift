@@ -13,10 +13,11 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private let settings: Settings
     private let clock: AppClock
 
+    /// Which file today's note is, what it holds, and every save and merge
+    /// rule. The window draws it and forwards typing.
+    let dailyDocument: DailyDocument
+
     private var state: DailyNoteState
-    private var currentURL: URL?
-    private var currentDay: Date  // start-of-day for the URL we're showing
-    private var lastLoadedContent: String = ""
 
     private let dragZone: NoteDragZone
     private let dateLabel: CenteredTitleLabel
@@ -28,15 +29,7 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     private let layoutManager: NSLayoutManager
     private let scrollView: NSScrollView
 
-    private var saveWorkItem: DispatchWorkItem?
     private var fileWatcher: FileWatcher?
-    private var midnightTimer: Timer?
-    private var pendingExternalContent: String?
-
-    /// True when the file exists but couldn't be read. Saving is suspended so
-    /// a placeholder buffer never lands on top of the real content.
-    private var fileUnavailable = false
-    private var unavailableRetry: DispatchWorkItem?
 
     /// Height used when expanding back from a collapsed state. Captured at
     /// collapse time, since while collapsed the live window frame is just
@@ -52,12 +45,14 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         return f
     }()
 
-    init(settings: Settings, store: NoteStore, clock: AppClock) {
+    private static let placeholder = "Waiting for today's note to download…"
+
+    init(settings: Settings, store: NoteStore, clock: AppClock, scheduler: Scheduler = MainScheduler()) {
         self.settings = settings
         self.attachmentStore = store
         self.clock = clock
+        self.dailyDocument = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
         self.state = DailyNote.loadState(settings: settings)
-        self.currentDay = Calendar.current.startOfDay(for: clock.now())
         self.preCollapseHeight = CGFloat(state.height)
 
         let displayHeight: CGFloat = state.collapsed
@@ -171,10 +166,15 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         collapseButton.action = #selector(toggleCollapse)
         dragZone.delegate = self
 
-        loadCurrentFile()
+        dailyDocument.isEditing = { [weak self] in
+            guard let self = self, let window = self.window, window.isKeyWindow else { return false }
+            return window.firstResponder === self.textView
+        }
+        dailyDocument.onBodyReplaced = { [weak self] in self?.showDocument() }
+        dailyDocument.onFileChanged = { [weak self] in self?.startWatching() }
+        dailyDocument.load()
         startWatching()
-        scheduleMidnightRollover()
-        observeWake()
+        dailyDocument.startRollover()
         // Borderless window painting its own paper: nothing here follows the
         // system appearance on its own.
         NotificationCenter.default.addObserver(
@@ -208,11 +208,8 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     required init?(coder: NSCoder) { fatalError() }
 
     deinit {
-        midnightTimer?.invalidate()
         fileWatcher?.stop()
-        unavailableRetry?.cancel()
         NotificationCenter.default.removeObserver(self)
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     // MARK: - Layout
@@ -264,111 +261,19 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         ])
     }
 
-    // MARK: - File I/O
+    // MARK: - Showing the document
 
-    /// Resolve today's URL, load its body into the text view, and refresh
-    /// the date label. If the file doesn't exist yet and a template is
-    /// configured, the rendered template seeds the body and is written to
-    /// disk immediately — so Obsidian sees the same file the user is
-    /// editing here, with the same template Obsidian itself would apply.
-    private func loadCurrentFile() {
-        currentDay = Calendar.current.startOfDay(for: clock.now())
-        currentURL = DailyNote.resolvedURL(for: currentDay, settings: settings)
-        dateLabel.text = "Daily Note · " + DailyNoteWindowController.dateFormatter.string(from: currentDay)
-        // Before reading: a duplicate left by an earlier collision holds text
-        // that belongs in the file we're about to load.
-        healDuplicates()
-
-        guard let url = currentURL else {
-            fileUnavailable = false
-            lastLoadedContent = ""
-            applyExternalBody("")
-            return
-        }
-
-        if let raw = try? String(contentsOf: url, encoding: .utf8) {
-            fileUnavailable = false
-            lastLoadedContent = raw
-            applyExternalBody(raw)
-            return
-        }
-
-        // Today's note exists but we can't read it yet. Seeding the template
-        // here would overwrite real content, so hold off.
-        //
-        // An evicted iCloud file is the important case and it does *not*
-        // answer to `fileExists` — iCloud replaces it with a hidden
-        // `.<name>.icloud` stub until something asks for the download.
-        if FileManager.default.fileExists(atPath: url.path) || hasICloudPlaceholder(for: url) {
-            fileUnavailable = true
-            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
-            applyExternalBody("Waiting for today's note to download…")
-            // The watcher covers the usual case; this is the backstop for a
-            // read that fails for some reason a file event will never report,
-            // so the window can't sit on the placeholder forever.
-            scheduleUnavailableRetry()
-            return
-        }
-
-        // File doesn't exist yet. Seed the buffer from the template, but
-        // leave the file itself uncreated — see `seedBuffer`.
-        fileUnavailable = false
-        seedBuffer(with: DailyNote.renderedTemplate(for: currentDay, fileURL: url, settings: settings) ?? "", at: url)
-    }
-
-    /// Put today's starting text in the buffer, writing it to disk only if
-    /// the file is already there.
-    ///
-    /// Creating the file here is what made two Macs collide. The midnight
-    /// timer fires at the same wall-clock second on every machine, so each
-    /// one wrote the same brand-new path within milliseconds of the other,
-    /// and iCloud can't merge two independent creates — it keeps both and
-    /// renames one `<name> 2.md`. Holding an untouched template in the buffer
-    /// instead leaves the create to a person: opening the note on purpose
-    /// (`createTodaysFileIfMissing`) or typing in it. Writing over a file
-    /// that already exists is fine — that path is established, so it syncs as
-    /// an edit rather than a create.
-    private func seedBuffer(with body: String, at url: URL) {
-        if FileManager.default.fileExists(atPath: url.path) {
-            try? body.write(to: url, atomically: true, encoding: .utf8)
-        }
-        lastLoadedContent = body
-        applyExternalBody(body)
-    }
-
-    /// Reload from disk if the underlying file changed externally.
-    private func reloadIfExternallyChanged() {
-        guard let url = currentURL else { return }
-        // A duplicate arrives as an ordinary new file in the folder we watch.
-        // Heal first so the reload below picks up the merged text.
-        healDuplicatesIfDue()
-        // A failed read means the file is mid-sync or undecodable, not empty —
-        // treating it as empty would blank the buffer and then save that over
-        // the real content. If we were waiting on a download, this is it.
-        guard let body = try? String(contentsOf: url, encoding: .utf8) else { return }
-        if fileUnavailable {
-            fileUnavailable = false
-            lastLoadedContent = body
-            applyExternalBody(body)
-            return
-        }
-        if body == lastLoadedContent { return }
-
-        if let win = window, win.isKeyWindow,
-           win.firstResponder === textView {
-            // Defer the merge until the user steps away — overwriting an
-            // active edit would be jarring.
-            pendingExternalContent = body
-            return
-        }
-        lastLoadedContent = body
-        applyExternalBody(body)
-    }
-
-    private func applyExternalBody(_ body: String) {
+    /// Draw what the document holds. While today's file cannot be read the text
+    /// is a placeholder, and the view is read-only so nothing typed into it can
+    /// be lost when the file arrives.
+    private func showDocument() {
+        dateLabel.text = "Daily Note · " + DailyNoteWindowController.dateFormatter.string(from: dailyDocument.day)
+        textView.isEditable = !dailyDocument.isUnavailable
+        let text = dailyDocument.isUnavailable ? DailyNoteWindowController.placeholder : dailyDocument.body
+        guard textView.string != text else { return }
         let oldSelection = textView.selectedRange()
         let fullRange = NSRange(location: 0, length: textStorage.length)
-        textStorage.replaceCharacters(in: fullRange, with: body)
+        textStorage.replaceCharacters(in: fullRange, with: text)
         // The recorded undo operations refer to ranges in the text we just
         // threw away; replaying them against the new string garbles it.
         textView.undoManager?.removeAllActions()
@@ -379,16 +284,6 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         textView.setSelectedRange(clamped)
     }
 
-    private func scheduleSave() {
-        saveWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.saveNow() }
-        saveWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
-    }
-
-    /// Fold a deferred external edit into what the user has been typing. The
-    /// buffer hasn't necessarily been saved yet, so writing either side over
-    /// the other loses text.
     @objc private func applyAppearanceColors() {
         backgroundView.layer?.backgroundColor = NSColor(hex: state.color.bodyHex)?.cgColor
         dateLabel.textColor = Appearance.chromeInk
@@ -402,160 +297,25 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         textView.needsDisplay = true
     }
 
-    /// iCloud swaps an evicted file for a hidden `.<name>.icloud` stub, so
-    /// the note can be entirely real and still fail `fileExists`.
-    private func hasICloudPlaceholder(for url: URL) -> Bool {
-        let stub = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(url.lastPathComponent).icloud")
-        return FileManager.default.fileExists(atPath: stub.path)
-    }
-
-    private func scheduleUnavailableRetry() {
-        unavailableRetry?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self = self, self.fileUnavailable else { return }
-            self.unavailableRetry = nil
-            self.loadCurrentFile()
-        }
-        unavailableRetry = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
-    }
-
-    private func mergePendingExternalContent() {
-        guard let external = pendingExternalContent else { return }
-        pendingExternalContent = nil
-        let merged = ConflictResolver.mergeBodies(
-            local: textView.string,
-            external: external,
-            externalDate: clock.now()
-        )
-        guard merged != textView.string else { return }
-        applyExternalBody(merged)
-    }
-
     /// Write any debounced edit immediately, so quitting mid-sentence doesn't
-    /// drop it.
-    func flushPendingSave() {
-        guard saveWorkItem != nil else { return }
-        saveWorkItem?.cancel()
-        saveWorkItem = nil
-        saveNow()
-    }
-
-    private func saveNow() {
-        guard let url = currentURL, !fileUnavailable else { return }
-        // A deferred external edit has to be folded in first, or this write
-        // silently overwrites it.
-        mergePendingExternalContent()
-        let body = textView.string
-        if body == lastLoadedContent { return }
-
-        // Make sure the parent folder exists — Obsidian creates it lazily;
-        // we should too rather than failing the first write.
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        do {
-            try body.write(to: url, atomically: true, encoding: .utf8)
-            lastLoadedContent = body
-        } catch {
-            // Best-effort — the next debounce will retry.
-        }
-    }
-
-    // MARK: - Duplicate healing
-
-    /// Sweeping reads the whole folder, and the watcher fires on our own
-    /// saves too, so rate-limit it. iCloud takes far longer than this to
-    /// deliver a duplicate in the first place.
-    private static let duplicateSweepInterval: TimeInterval = 5
-    private var lastDuplicateSweep = Date.distantPast
-
-    private func healDuplicates() {
-        guard let url = currentURL else { return }
-        let now = clock.now()
-        lastDuplicateSweep = now
-        DailyNote.healDuplicates(in: url.deletingLastPathComponent(), now: now)
-    }
-
-    private func healDuplicatesIfDue() {
-        let now = clock.now()
-        guard now.timeIntervalSince(lastDuplicateSweep)
-            > DailyNoteWindowController.duplicateSweepInterval else { return }
-        healDuplicates()
+    /// drop it. False when the text did not reach disk.
+    @discardableResult
+    func flushPendingSave() -> Bool {
+        dailyDocument.flush()
     }
 
     // MARK: - Watching
 
     private func startWatching() {
         fileWatcher?.stop()
-        guard let url = currentURL else { return }
+        guard let url = dailyDocument.url else { return }
         let parent = url.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         let watcher = FileWatcher { [weak self] in
-            self?.reloadIfExternallyChanged()
+            self?.dailyDocument.storeDidChange()
         }
         watcher.watch([parent])
         fileWatcher = watcher
-    }
-
-    // MARK: - Midnight rollover
-
-    private func scheduleMidnightRollover() {
-        midnightTimer?.invalidate()
-        let calendar = Calendar.current
-        // A real timer fires on real time, so this stays on the wall clock.
-        guard let next = calendar.nextDate(
-            after: Date(),
-            matching: DateComponents(hour: 0, minute: 0, second: 1),
-            matchingPolicy: .strict
-        ) else { return }
-        let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
-            self?.handleMidnight()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        midnightTimer = timer
-    }
-
-    private func handleMidnight() {
-        // Flush any pending edits to the old day's file before swapping.
-        saveWorkItem?.cancel()
-        saveWorkItem = nil
-        saveNow()
-
-        loadCurrentFile()
-        startWatching()
-        scheduleMidnightRollover()
-    }
-
-    /// Swap to today's note if the calendar day advanced since we last
-    /// resolved the file. The midnight `Timer` doesn't fire while the Mac
-    /// sleeps, so a machine that slept through midnight keeps showing the
-    /// old day until something forces a re-resolve. Cheap no-op when the
-    /// day is unchanged.
-    private func rolloverIfNeeded() {
-        let today = Calendar.current.startOfDay(for: clock.now())
-        guard today != currentDay else { return }
-        handleMidnight()
-    }
-
-    private func observeWake() {
-        // Waking is exactly when the missed-midnight case surfaces — roll
-        // over immediately so an always-open window catches up without
-        // waiting for the next reopen, and re-arm the timer (the prior one
-        // may have fired late or been coalesced during sleep).
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(handleWake),
-            name: NSWorkspace.didWakeNotification,
-            object: nil
-        )
-    }
-
-    @objc private func handleWake() {
-        rolloverIfNeeded()
-        scheduleMidnightRollover()
     }
 
     // MARK: - State persistence
@@ -582,25 +342,14 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// Re-resolve the URL when the user changes the pattern at runtime.
     func patternDidChange() {
-        saveWorkItem?.cancel()
-        saveWorkItem = nil
-        saveNow()  // flush against the previous URL if it's still valid
-        loadCurrentFile()
-        startWatching()
+        dailyDocument.patternDidChange()
     }
 
     /// Re-seed today's note from the template if the file is currently
     /// empty. Called when the template path setting changes — covers the
     /// "I just configured a template, please apply it to today" case.
     func templateDidChange() {
-        guard let url = currentURL else { return }
-        let body = textView.string
-        let isEmpty = body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        guard isEmpty else { return }
-
-        if let templated = DailyNote.renderedTemplate(for: currentDay, fileURL: url, settings: settings) {
-            seedBuffer(with: templated, at: url)
-        }
+        dailyDocument.templateDidChange()
     }
 
     // MARK: - Show / hide
@@ -615,40 +364,18 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         // Re-resolve in case the day rolled over while hidden (the
         // belt-and-suspenders companion to the midnight timer and wake
         // observer — covers a reopen that races ahead of either).
-        rolloverIfNeeded()
-        if userInitiated { createTodaysFileIfMissing() }
+        dailyDocument.rolloverIfNeeded(now: clock.now())
+        if userInitiated { dailyDocument.createTodaysFileIfMissing() }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         persistVisibility(true)
     }
 
-    /// Write today's note out if it isn't on disk yet, so opening it here is
-    /// enough to make it real for Obsidian and for `[[wiki links]]`.
-    ///
-    /// The buffer is what gets written — the rendered template, or nothing at
-    /// all when none is configured — because that's what the user is looking
-    /// at, so it's what the file should say. Safe against the midnight race
-    /// in a way the rollover isn't: a person opening a window is not two
-    /// machines acting on the same clock tick.
+    /// Write today's note out if it isn't on disk yet. See
+    /// `DailyDocument.createTodaysFileIfMissing`.
     func createTodaysFileIfMissing() {
-        guard let url = currentURL, !fileUnavailable else { return }
-        // A file that exists — or is only waiting to come down from iCloud —
-        // must never be written over with an empty buffer.
-        guard !FileManager.default.fileExists(atPath: url.path),
-              !hasICloudPlaceholder(for: url) else { return }
-
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        let body = textView.string
-        do {
-            try body.write(to: url, atomically: true, encoding: .utf8)
-            lastLoadedContent = body
-        } catch {
-            // Best-effort — the first keystroke writes it anyway.
-        }
+        dailyDocument.createTodaysFileIfMissing()
     }
 
     // MARK: - Collapse / expand
@@ -751,18 +478,15 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        if pendingExternalContent != nil {
-            mergePendingExternalContent()
-            saveNow()
-        }
+        dailyDocument.blur()
     }
 
     // MARK: - Text editing
 
     func textDidChange(_ notification: Notification) {
+        dailyDocument.setBody(textView.string)
         MarkdownStyler.apply(to: textView)
         MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
-        scheduleSave()
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
@@ -790,6 +514,5 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NST
         textView.didChangeText()
         MarkdownStyler.apply(to: textView)
         MarkdownStyler.updateMarkerVisibility(in: textStorage, selection: textView.selectedRange())
-        scheduleSave()
     }
 }

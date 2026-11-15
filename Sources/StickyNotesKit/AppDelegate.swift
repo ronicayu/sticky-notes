@@ -69,10 +69,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// person get to choose between staying open and losing it.
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let unsaved = flushPendingSaves()
-        guard !unsaved.isEmpty else { return .terminateNow }
+        let dailyLost = dailyNoteController.map { !$0.flushPendingSave() && !writeDailyRecoveryFile(for: $0.dailyDocument) } ?? false
         let unrecovered = unsaved.filter { !writeRecoveryFile(for: $0.bufferedNote) }
-        guard !unrecovered.isEmpty else { return .terminateNow }
-        switch unsavedNotesChoice(unrecovered.count) {
+        let lostCount = unrecovered.count + (dailyLost ? 1 : 0)
+        guard lostCount > 0 else { return .terminateNow }
+        switch unsavedNotesChoice(lostCount) {
         case .keepTrying: return .terminateCancel
         case .quitAnyway: return .terminateNow
         }
@@ -104,6 +105,37 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         settings.localStorageRoot.appendingPathComponent("Recovered", isDirectory: true)
     }
 
+    private func makeDailyNoteController() -> DailyNoteWindowController {
+        let controller = DailyNoteWindowController(settings: settings, store: noteStore, clock: clock)
+        controller.dailyDocument.saveRecovery = { [weak self] body, day in
+            self?.writeDailyRecoveryFile(body: body, day: day) ?? false
+        }
+        return controller
+    }
+
+    private func writeDailyRecoveryFile(for document: DailyDocument) -> Bool {
+        writeDailyRecoveryFile(body: document.body, day: document.day)
+    }
+
+    private func writeDailyRecoveryFile(body: String, day: Date) -> Bool {
+        let stamp = AppDelegate.recoveryStamp.string(from: clock.now())
+        let name = AppDelegate.recoveryStamp.string(from: day).prefix(10)
+        let url = recoveryFolder.appendingPathComponent("Daily \(name) \(stamp).md")
+        do {
+            try FileManager.default.createDirectory(at: recoveryFolder, withIntermediateDirectories: true)
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// The Mac woke: the midnight timer does not fire in sleep, so a daily note
+    /// left open across midnight is brought to today now.
+    @objc func handleWake() {
+        dailyNoteController?.dailyDocument.wakeDidHappen()
+    }
+
     private func writeRecoveryFile(for note: Note) -> Bool {
         let stamp = AppDelegate.recoveryStamp.string(from: clock.now())
         let url = recoveryFolder.appendingPathComponent("\(note.id.uuidString) \(stamp).md")
@@ -118,9 +150,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     /// Drains every window's debounce. Returns the windows whose text did not reach disk.
     func flushPendingSaves() -> [NoteWindowController] {
-        let unsaved = windowControllers.values.filter { !$0.flushPendingSave() }
-        dailyNoteController?.flushPendingSave()
-        return unsaved
+        windowControllers.values.filter { !$0.flushPendingSave() }
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -128,6 +158,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         setupMenuBar()
         registerHotkeys()
         restoreActiveNotes()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(handleWake), name: NSWorkspace.didWakeNotification, object: nil
+        )
 
         NotificationCenter.default.addObserver(
             self,
@@ -163,7 +196,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let state = DailyNote.loadState(settings: settings)
         guard state.visible else { return }
         if dailyNoteController == nil {
-            dailyNoteController = DailyNoteWindowController(settings: settings, store: noteStore, clock: clock)
+            dailyNoteController = makeDailyNoteController()
         }
         // Reopening what was already on screen isn't a fresh request for
         // today's note, so it doesn't create the file — every Mac does this
@@ -176,6 +209,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         if let statusItem = statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
@@ -768,7 +802,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             return
         }
         if dailyNoteController == nil {
-            dailyNoteController = DailyNoteWindowController(settings: settings, store: noteStore, clock: clock)
+            dailyNoteController = makeDailyNoteController()
         }
         dailyNoteController?.show()
     }
@@ -985,7 +1019,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // Make sure it ends up visible regardless.
         if dailyNoteController?.window?.isVisible != true {
             if dailyNoteController == nil {
-                dailyNoteController = DailyNoteWindowController(settings: settings, store: noteStore, clock: clock)
+                dailyNoteController = makeDailyNoteController()
             }
             dailyNoteController?.show()
         }

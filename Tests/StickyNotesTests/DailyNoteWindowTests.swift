@@ -2,43 +2,39 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-/// End-to-end tests for the daily-note window against a temp vault: a real
-/// `DailyNoteWindowController`, real files, and the same delegate callback
-/// AppKit fires on a keystroke.
+/// A real `DailyNoteWindowController` against a temp vault, driven through the
+/// delegate callbacks AppKit fires. The rules (when the file is created, merging,
+/// rollover) are tested without a window in `DailyDocumentTests`; these prove the
+/// window forwards typing to the document and draws what the document holds.
 ///
-/// What these exist to pin down is *when the file gets created*. The rule:
-/// a person asking for today's note creates it, the clock never does.
-/// Creating it on the rollover is what let two Macs collide — that timer
-/// fires at the same wall-clock second on every machine, so both wrote the
-/// same new path and iCloud kept both, renaming one `<name> 2.md`.
-///
-/// Settings, the note store and the clock are injected, so nothing here
-/// touches the real preferences, Application Support or the wall clock; the
-/// window-state file (`_daily.json`) lands in a temp folder too.
+/// Settings, the note store, the clock and the scheduler are injected, so nothing
+/// here touches the real preferences, Application Support or the wall clock.
 final class DailyNoteWindowTests: XCTestCase {
     private var vault: URL!
     private var isolated: IsolatedSettings!
     private var store: NoteStore!
     private var clock: ManualClock!
+    private var scheduler: TestScheduler!
     private var settings: Settings { isolated.settings }
+    private var controllers: [DailyNoteWindowController] = []
 
     private let pattern = "Daily/{YYYY}-{MM}-{DD}.md"
 
     override func setUpWithError() throws {
         isolated = IsolatedSettings()
         clock = ManualClock()
-
+        scheduler = TestScheduler(clock: clock)
         vault = FileManager.default.temporaryDirectory
             .appendingPathComponent("DailyNoteWindow-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
         store = NoteStore(rootURL: vault.appendingPathComponent("StickyNotes"), format: .markdown)
-
         settings.obsidianVaultPath = vault.path
         settings.dailyNotesPattern = pattern
         settings.dailyTemplatePath = nil
     }
 
     override func tearDownWithError() throws {
+        controllers.forEach { $0.window?.close() }
         isolated.tearDown()
         try? FileManager.default.removeItem(at: vault)
     }
@@ -46,187 +42,118 @@ final class DailyNoteWindowTests: XCTestCase {
     // MARK: - Harness
 
     private func makeController() -> DailyNoteWindowController {
-        DailyNoteWindowController(settings: settings, store: store, clock: clock)
+        let controller = DailyNoteWindowController(settings: settings, store: store, clock: clock, scheduler: scheduler)
+        controllers.append(controller)
+        return controller
     }
 
-    private func todaysURL() throws -> URL {
-        try XCTUnwrap(DailyNote.resolvedURL(for: clock.now(), settings: settings))
+    private func url(daysFromNow days: Int = 0) throws -> URL {
+        try XCTUnwrap(DailyNote.resolvedURL(for: clock.now().addingTimeInterval(Double(days) * 86_400), settings: settings))
     }
 
-    private var todayExists: Bool {
-        guard let url = DailyNote.resolvedURL(for: clock.now(), settings: settings) else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
+    private func write(_ body: String, daysFromNow days: Int = 0) throws {
+        let file = try url(daysFromNow: days)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try body.write(to: file, atomically: true, encoding: .utf8)
     }
 
-    @discardableResult
-    private func configureTemplate(_ body: String) throws -> URL {
-        let url = vault.appendingPathComponent("Template.md")
-        try body.write(to: url, atomically: true, encoding: .utf8)
-        settings.dailyTemplatePath = url.path
-        return url
-    }
-
-    /// Type the way AppKit does: set the text, fire the delegate callback a
-    /// real keystroke would, then skip the debounce.
+    /// Type the way AppKit does: set the text, then fire the delegate callback a
+    /// real keystroke would.
     private func type(_ text: String, into controller: DailyNoteWindowController) {
         controller.textView.string = text
         controller.textDidChange(
             Notification(name: NSText.didChangeNotification, object: controller.textView)
         )
-        controller.flushPendingSave()
     }
 
-    // MARK: - Nothing the clock does creates the file
+    // MARK: - Wiring
 
-    /// The fix for the midnight race. Resolving today's note — at launch, at
-    /// the rollover, on wake — seeds the buffer and stops there. On a Mac
-    /// nobody is typing at, the file never appears.
-    func testResolvingTodaysNoteDoesNotCreateIt() throws {
-        try configureTemplate("## Today\n\n- [ ] ")
-        let controller = makeController()
-
-        XCTAssertEqual(controller.textView.string, "## Today\n\n- [ ] ", "the template still seeds the buffer")
-        XCTAssertFalse(todayExists, "the template must not reach disk before the user types")
-    }
-
-    func testResolvingTodaysNoteWithNoTemplateCreatesNothingEither() throws {
-        _ = makeController()
-        XCTAssertFalse(todayExists)
-    }
-
-    func testTheFirstKeystrokeCreatesTodaysFile() throws {
-        try configureTemplate("## Today\n\n")
-        let controller = makeController()
-        type("## Today\n\nbought milk", into: controller)
-
-        XCTAssertTrue(todayExists)
-        XCTAssertEqual(
-            try String(contentsOf: todaysURL(), encoding: .utf8),
-            "## Today\n\nbought milk",
-            "the seeded template is written along with what was typed"
-        )
-    }
-
-    /// The midnight rollover flushes the outgoing day before swapping. A day
-    /// the user never touched has nothing to flush, and writing the untouched
-    /// template there would put the collision back — one day late, and still
-    /// at the same second on both Macs.
-    func testFlushingAnUntouchedTemplateWritesNothing() throws {
-        try configureTemplate("## Today\n\n- [ ] ")
-        let controller = makeController()
-
-        // `patternDidChange` runs the same unconditional `saveNow()` the
-        // rollover does, without needing to fake a clock.
-        controller.patternDidChange()
-
-        XCTAssertFalse(todayExists, "an untouched buffer must not create the file")
-    }
-
-    // MARK: - Existing files
-
-    func testAnExistingFileIsLoadedRatherThanReseeded() throws {
-        try configureTemplate("## Today\n\n- [ ] ")
-        let url = try todaysURL()
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try "written on the other Mac".write(to: url, atomically: true, encoding: .utf8)
-
+    func testOpeningTheWindowShowsTheFileAndLeavesItUntouched() throws {
+        try write("written on the other Mac")
+        let before = try Data(contentsOf: url())
         let controller = makeController()
 
         XCTAssertEqual(controller.textView.string, "written on the other Mac")
-        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "written on the other Mac")
+        XCTAssertEqual(scheduler.pendingCount, 1, "only the midnight timer is armed")
+        XCTAssertTrue(controller.flushPendingSave())
+        XCTAssertEqual(try Data(contentsOf: url()), before)
     }
 
-    /// Reseeding from a newly configured template is a write to an
-    /// established path, so it doesn't race — but only when the file is
-    /// actually there.
-    func testChangingTheTemplateRewritesAnExistingEmptyFileButCreatesNone() throws {
-        let url = try todaysURL()
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try "".write(to: url, atomically: true, encoding: .utf8)
-
+    func testTypingCreatesTodaysFileOnceTheDebounceFires() throws {
         let controller = makeController()
-        try configureTemplate("## Today\n\n")
-        controller.templateDidChange()
-
-        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "## Today\n\n")
-    }
-
-    func testChangingTheTemplateDoesNotCreateAMissingFile() throws {
-        let controller = makeController()
-        try configureTemplate("## Today\n\n")
-        controller.templateDidChange()
-
-        XCTAssertEqual(controller.textView.string, "## Today\n\n", "the buffer still picks it up")
-        XCTAssertFalse(todayExists)
-    }
-
-    // MARK: - Creating on an explicit open
-
-    /// The counterpart: asking for today's note *is* a reason to create it,
-    /// so it lands in Obsidian whether or not anything gets typed. `show()`
-    /// calls this for the menu bar and the hotkey; the test drives the file
-    /// half directly, because showing a real window needs a screen.
-    func testOpeningTodaysNoteOnPurposeCreatesItFromTheTemplate() throws {
-        try configureTemplate("## Today\n\n- [ ] ")
-        let controller = makeController()
-        XCTAssertFalse(todayExists, "not until asked")
-
-        controller.createTodaysFileIfMissing()
-
-        XCTAssertEqual(try String(contentsOf: todaysURL(), encoding: .utf8), "## Today\n\n- [ ] ")
-        XCTAssertEqual(controller.textView.string, "## Today\n\n- [ ] ")
-    }
-
-    func testOpeningTodaysNoteWithNoTemplateCreatesAnEmptyOne() throws {
-        let controller = makeController()
-        controller.createTodaysFileIfMissing()
-
-        XCTAssertTrue(todayExists)
-        XCTAssertEqual(try String(contentsOf: todaysURL(), encoding: .utf8), "")
-    }
-
-    func testOpeningTodaysNoteLeavesAnExistingOneAlone() throws {
-        try configureTemplate("## Today\n\n- [ ] ")
-        let url = try todaysURL()
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
-        )
-        try "written on the other Mac".write(to: url, atomically: true, encoding: .utf8)
-
-        let controller = makeController()
-        controller.createTodaysFileIfMissing()
-
-        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "written on the other Mac")
-    }
-
-    /// The one that would cost real text: iCloud hides an evicted note behind
-    /// a `.<name>.icloud` stub, so the note is entirely real and still fails
-    /// `fileExists`. Creating it here would put an empty file on top of it.
-    func testOpeningTodaysNoteWaitsWhileItIsStillComingDownFromICloud() throws {
-        let url = try todaysURL()
-        let folder = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let stub = folder.appendingPathComponent(".\(url.lastPathComponent).icloud")
-        try Data().write(to: stub)
-
-        let controller = makeController()
-        controller.createTodaysFileIfMissing()
-
-        XCTAssertFalse(todayExists, "never write over a note that is only undownloaded")
-    }
-
-    /// Opening it a second time must not blank out what was typed in between.
-    func testOpeningTodaysNoteTwiceKeepsWhatWasTyped() throws {
-        let controller = makeController()
-        controller.createTodaysFileIfMissing()
         type("bought milk", into: controller)
 
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try url().path))
+        scheduler.advance(by: 0.6)
+        XCTAssertEqual(try String(contentsOf: url(), encoding: .utf8), "bought milk")
+    }
+
+    func testOpeningTodaysNoteOnPurposeCreatesIt() throws {
+        let controller = makeController()
         controller.createTodaysFileIfMissing()
 
-        XCTAssertEqual(try String(contentsOf: todaysURL(), encoding: .utf8), "bought milk")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try url().path))
+    }
+
+    func testAnOutsideEditIsDrawnInAnIdleWindow() throws {
+        try write("one")
+        let controller = makeController()
+
+        try write("one\ntwo")
+        controller.dailyDocument.storeDidChange()
+
+        XCTAssertEqual(controller.textView.string, "one\ntwo")
+    }
+
+    /// The window is not key, so the old code applied the file over the typing.
+    func testAnOutsideEditDoesNotReplaceUnsavedTypingInAWindowThatIsNotKey() throws {
+        try write("one")
+        let controller = makeController()
+        type("one plus mine", into: controller)
+
+        try write("one\nfrom the other Mac")
+        controller.dailyDocument.storeDidChange()
+
+        XCTAssertEqual(controller.textView.string, "one plus mine")
+        controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
+        XCTAssertTrue(controller.textView.string.contains("from the other Mac"), controller.textView.string)
+        XCTAssertTrue(try String(contentsOf: url(), encoding: .utf8).contains("one plus mine"))
+    }
+
+    /// The placeholder cannot be typed into, so nothing typed can be lost when
+    /// the file arrives.
+    func testAWaitingNoteShowsAPlaceholderThatCannotBeTypedInto() throws {
+        let file = try url()
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([0xff, 0xfe, 0xfd]).write(to: file)
+
+        let controller = makeController()
+
+        XCTAssertEqual(controller.textView.string, "Waiting for today's note to download…")
+        XCTAssertFalse(controller.textView.isEditable)
+
+        try write("the real note")
+        controller.dailyDocument.storeDidChange()
+
+        XCTAssertEqual(controller.textView.string, "the real note")
+        XCTAssertTrue(controller.textView.isEditable)
+    }
+
+    func testMidnightRedrawsTheWindowForTheNewDay() throws {
+        try write("today's note")
+        try write("tomorrow's note", daysFromNow: 1)
+        let controller = makeController()
+
+        scheduler.advance(by: 86_400)
+
+        XCTAssertEqual(controller.textView.string, "tomorrow's note")
+    }
+
+    func testFlushingWritesTextTypedSinceTheLastPause() throws {
+        let controller = makeController()
+        type("half a sentence", into: controller)
+
+        XCTAssertTrue(controller.flushPendingSave())
+        XCTAssertEqual(try String(contentsOf: url(), encoding: .utf8), "half a sentence")
     }
 }
