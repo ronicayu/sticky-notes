@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Merges the versions iCloud Drive produces when the same note is edited on
@@ -93,24 +94,10 @@ enum ConflictResolver {
         var isOurs: (Note) -> Bool
         /// The note is exactly the newest write.
         var isNewest: (Note) -> Bool
-        /// The text of the newest write, when it was kept.
-        var newestBody: String?
-    }
-
-    /// When the file is an earlier write of ours that was put back (an older copy
-    /// that Obsidian or a sync wrote over our newest save), our newest text is
-    /// what the merge treats as the current file, so that our other earlier saves
-    /// are dropped against it and it, not the stale copy, is written back. Every
-    /// line of the stale copy is in the newest write or was taken out by the
-    /// person, so nothing is lost. Otherwise `current` as it is.
-    static func standingInForStaleFile(
-        _ current: Note, newestBody: String?,
-        isEarlierBody: (String) -> Bool, isNewestBody: (String) -> Bool
-    ) -> Note {
-        guard let newestBody, !isNewestBody(current.content), isEarlierBody(current.content) else { return current }
-        var judged = current
-        judged.content = newestBody
-        return judged
+        /// Digests of the lines of the newest write, when they were kept.
+        var newestLines: [String]?
+        /// The newest write's text is one of the versions being merged.
+        var newestIsAdded = false
     }
 
     /// The notes worth merging: the current file plus its conflict versions,
@@ -126,14 +113,59 @@ enum ConflictResolver {
     /// A version that is not one of our writes, and the newest write itself, are
     /// never dropped.
     static func versionsToMerge(current: Note, conflicts: [Note], ours: OwnWrites) -> [Note] {
-        let newestSurvives = ours.isNewest(current)
-            || ours.newestBody.map { isCovered($0, by: current.content) } == true
+        let newestSurvives = ours.newestIsAdded
+            || ours.isNewest(current)
+            || ours.newestLines.map({ areCovered($0, by: current.content) }) == true
             || conflicts.contains(where: ours.isNewest)
         guard newestSurvives else { return [current] + conflicts }
         return [current] + conflicts.filter { ours.isNewest($0) || !ours.isOurs($0) }
     }
 
+    /// When the file is an earlier write of ours (an older copy that Obsidian or a
+    /// sync wrote over our newest save, or a restore the person made on purpose;
+    /// nothing tells the two apart), our newest text takes part in the merge.
+    /// If every line of the file is in the newest text, the file adds nothing and
+    /// the newest text stands in for it, to be written back. Otherwise the file
+    /// keeps its place and the newest text is returned as one more version, so
+    /// that our other earlier saves are dropped against it and both texts are
+    /// kept, one under a divider at worst. Needs the newest text, which is only
+    /// in memory: after a relaunch, or over the size cap, nothing changes.
+    static func handlingStaleFile(
+        _ current: Note, newestBody: String?,
+        isEarlierBody: (String) -> Bool, isNewestBody: (String) -> Bool
+    ) -> (current: Note, addedNewest: Note?) {
+        guard let newestBody, !isNewestBody(current.content), isEarlierBody(current.content) else {
+            return (current, nil)
+        }
+        var newest = current
+        newest.content = newestBody
+        if isCovered(current.content, by: newestBody) { return (newest, nil) }
+        newest.updatedAt = current.updatedAt.addingTimeInterval(-1)
+        return (current, newest)
+    }
+
     static func normalizedBody(_ body: String) -> String { normalize(body) }
+
+    /// A short digest of each non-empty line, trailing whitespace ignored, in
+    /// order. What is kept of a write instead of its text.
+    static func lineDigests(of body: String) -> [String] {
+        lines(of: body).map { line in
+            SHA256.hash(data: Data(line.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        }
+    }
+
+    /// True when each digest uses up one line of `base` (repeats counted). Like
+    /// `isCovered`, but without its rule for a cut-off last line, which a digest
+    /// cannot express: it keeps more versions, never fewer.
+    static func areCovered(_ digests: [String], by base: String) -> Bool {
+        var available: [String: Int] = [:]
+        for digest in lineDigests(of: base) { available[digest, default: 0] += 1 }
+        for digest in digests {
+            guard let count = available[digest], count > 0 else { return false }
+            available[digest] = count - 1
+        }
+        return true
+    }
 
     /// True when these versions actually disagree about anything worth
     /// merging. Identical copies are common — iCloud produces a conflict from

@@ -28,6 +28,7 @@ import AppKit
     let capture: CaptureCoordinator
     let storage: StorageCoordinator
     let menuBar: MenuBarController
+    private var sleepObserver: NSObjectProtocol?
 
     init(store: NoteStore, settings: Settings, clock: AppClock) {
         self.store = store
@@ -56,6 +57,7 @@ import AppKit
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         menuBar.install()
+        saveLineageBeforeSleep()
         capture.registerHotkeys()
         desk.restoreActiveNotes()
         desk.pruneLayout()
@@ -89,6 +91,14 @@ import AppKit
 
     public func applicationWillTerminate(_ notification: Notification) {
         WriteLineage.saveNow()
+    }
+
+    /// The lineage is saved on a long delay, so a sleep saves it at once: the Mac
+    /// may not wake with the app still running.
+    private func saveLineageBeforeSleep() {
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { _ in WriteLineage.saveNow() }
     }
 
     enum UnsavedNotesChoice { case keepTrying, quitAnyway }

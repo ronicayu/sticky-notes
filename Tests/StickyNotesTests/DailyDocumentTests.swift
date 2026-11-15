@@ -836,27 +836,35 @@ final class DailyDocumentTests: XCTestCase {
     func testAConflictMergeThatCouldNotBeWrittenIsRetried() throws {
         try write("from this Mac")
         var resolved = 0
+        var attempts = 0
         var versions: [NoteStore.ConflictVersionHandle] = []
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
-        document.conflictVersionsProvider = { _ in versions }
+        document.conflictVersionsProvider = { _ in attempts += 1; return versions }
         document.otherVersionsRemover = { _ in }
         document.load()
         versions = [try conflictVersion("from the laptop") { resolved += 1 }]
         let folder = try url().deletingLastPathComponent()
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path) }
+        let d = NoteDocument.retryDelay
 
+        attempts = 0
         document.storeDidChange()
         XCTAssertEqual(resolved, 0)
+        XCTAssertEqual(attempts, 1)
         XCTAssertEqual(try text(), "from this Mac", "the write was meant to fail")
 
-        scheduler.advance(by: NoteDocument.retryDelay)
-        XCTAssertEqual(resolved, 0, "the disk still refuses")
-        scheduler.advance(by: NoteDocument.retryDelay)
-        XCTAssertEqual(resolved, 0, "the second retry waits twice as long")
+        scheduler.advance(by: d - 1)
+        XCTAssertEqual(attempts, 1, "retried before the first delay")
+        scheduler.advance(by: 1)
+        XCTAssertEqual(attempts, 2, "no retry after the first delay")
+        scheduler.advance(by: 2 * d - 1)
+        XCTAssertEqual(attempts, 2, "the second retry did not wait twice as long")
+        scheduler.advance(by: 1)
+        XCTAssertEqual(attempts, 3)
 
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
-        scheduler.advance(by: NoteDocument.retryDelay * 2)
+        scheduler.advance(by: 4 * d)
 
         XCTAssertEqual(resolved, 1)
         XCTAssertTrue(try text().contains("from this Mac") && text().contains("from the laptop"))
@@ -887,10 +895,10 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertEqual(resolved, 1, "the dropped version must still be marked resolved")
     }
 
-    /// Obsidian put back an older copy of this Mac's own text while iCloud kept
-    /// another earlier save as a conflict version: the newest text stands, with no
-    /// divider and no older copy of our own text.
-    func testAnOlderOwnDailySaveIsDroppedWhenAnEarlierOwnCopyWasPutBack() throws {
+    /// Obsidian put back an older copy of this Mac's own text that the newest text
+    /// covers, while iCloud kept another earlier save as a conflict version: the
+    /// newest text stands in for the copy, with no divider.
+    func testAnOlderOwnDailySaveIsDroppedWhenACoveredEarlierOwnCopyWasPutBack() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
         var versions: [NoteStore.ConflictVersionHandle] = []
         var resolved = 0
@@ -899,18 +907,43 @@ final class DailyDocumentTests: XCTestCase {
         document.load()
         document.setBody("a line")
         scheduler.advance(by: 1)
-        document.setBody("a line\nsecond line")
+        document.setBody("a line\ntypo")
         scheduler.advance(by: 1)
-        let older = try conflictVersion("a line\nsecond line") { resolved += 1 }
-        document.setBody("better line\nsecond line")
+        let older = try conflictVersion("a line\ntypo") { resolved += 1 }
+        document.setBody("a line\nsecond line")
         scheduler.advance(by: 1)
         try write("a line")
 
         versions = [older]
         document.storeDidChange()
 
-        XCTAssertEqual(try text(), "better line\nsecond line")
-        XCTAssertEqual(document.body, "better line\nsecond line")
+        XCTAssertEqual(try text(), "a line\nsecond line")
+        XCTAssertEqual(document.body, "a line\nsecond line")
+        XCTAssertEqual(resolved, 1)
+    }
+
+    /// The person deleted a line on this Mac and the other Mac put it back on
+    /// purpose: the file equals an earlier write of ours, and the sweep keeps it.
+    func testADeliberateRestoreOnTheOtherMacSurvivesTheDailySweep() throws {
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        var resolved = 0
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("A\nP")
+        scheduler.advance(by: 1)
+        let earlier = try conflictVersion("A\nP") { resolved += 1 }
+        document.setBody("A")
+        scheduler.advance(by: 1)
+        try write("A\nP")
+
+        versions = [earlier]
+        document.storeDidChange()
+
+        let saved = try text()
+        XCTAssertTrue(saved.contains("P"), "the restored line was written over: \(saved)")
+        XCTAssertTrue(document.body.contains("P"), document.body)
         XCTAssertEqual(resolved, 1)
     }
 

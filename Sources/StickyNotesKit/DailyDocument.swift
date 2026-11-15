@@ -184,20 +184,22 @@ final class DailyFile: NoteRepository {
         }
 
         let history = WriteLineage.history(for: NoteStore.lineageKey(url))
-        let judged = ConflictResolver.standingInForStaleFile(
+        let handled = ConflictResolver.handlingStaleFile(
             current, newestBody: history.newestBody,
             isEarlierBody: { history.contains(body: NoteStore.contentHash(body: $0)) },
             isNewestBody: { history.newest?.body == NoteStore.contentHash(body: $0) }
         )
+        let judged = handled.current
         let versions = ConflictResolver.versionsToMerge(
             current: judged,
             conflicts: conflictNotes,
             ours: ConflictResolver.OwnWrites(
                 isOurs: { history.contains(full: NoteStore.contentHash($0)) },
                 isNewest: { history.isNewest(full: NoteStore.contentHash($0)) },
-                newestBody: history.newestBody
+                newestLines: history.newestLines,
+                newestIsAdded: handled.addedNewest != nil
             )
-        )
+        ) + (handled.addedNewest.map { [$0] } ?? [])
         guard ConflictResolver.needsMerge(versions) || judged.content != current.content,
               let merged = ConflictResolver.merge(versions, now: clock.now()),
               merged.content != current.content else { return .unchanged }

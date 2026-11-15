@@ -170,17 +170,17 @@ final class OwnWriteLineageTests: XCTestCase {
         XCTAssertTrue(content.contains("teh cat") && content.contains("something else entirely"), content)
     }
 
-    /// Obsidian put back an older copy of our own text, and iCloud kept another
-    /// earlier save of ours as a conflict version. Our newest text is what the
-    /// note stands for: the older save is dropped, and the newest text is written
-    /// back over the stale copy, with no divider.
-    func testAnOlderOwnSaveIsDroppedWhenAnEarlierOwnCopyWasPutBack() throws {
+    /// Obsidian put back an older copy of our own text that our newest text covers
+    /// ("a line" is in "a line\nsecond"), and iCloud kept another earlier save of
+    /// ours. The copy adds nothing: our newest text stands in for it, the older
+    /// save is dropped, and the newest text is written back with no divider.
+    func testAnOlderOwnSaveIsDroppedWhenACoveredEarlierOwnCopyWasPutBack() throws {
         var note = makeNote("a line")
         store.save(note)
-        note.content = "a line\nsecond line"
+        note.content = "a line\ntypo"
         store.save(note)
-        let older = try version(note.id, "a line\nsecond line")
-        note.content = "better line\nsecond line"
+        let older = try version(note.id, "a line\ntypo")
+        note.content = "a line\nsecond line"
         store.save(note)
         try writeOutside(note.id, "a line")
         var resolved = 0
@@ -190,17 +190,17 @@ final class OwnWriteLineageTests: XCTestCase {
         XCTAssertEqual(store.resolveConflicts(), 1)
 
         XCTAssertEqual(resolved, 1)
-        XCTAssertEqual(try onDisk(note.id), "better line\nsecond line")
+        XCTAssertEqual(try onDisk(note.id), "a line\nsecond line")
     }
 
     /// The same with the window open on the note: it holds back Obsidian's older
     /// copy while the caret is in the text, and its newest text is not on disk.
-    func testTheSweepKeepsTheWindowsNewestTextWhenAnEarlierOwnCopyWasPutBack() throws {
+    func testTheSweepKeepsTheWindowsNewestTextWhenACoveredEarlierOwnCopyWasPutBack() throws {
         let document = open(makeNote("a line"))
-        document.edit { $0.content = "a line\nsecond line" }
+        document.edit { $0.content = "a line\ntypo" }
         scheduler.advance(by: 1)
-        let older = try version(document.id, "a line\nsecond line")
-        document.edit { $0.content = "better line\nsecond line" }
+        let older = try version(document.id, "a line\ntypo")
+        document.edit { $0.content = "a line\nsecond line" }
         scheduler.advance(by: 1)
         document.isEditing = { true }
         try writeOutside(document.id, "a line")
@@ -214,9 +214,68 @@ final class OwnWriteLineageTests: XCTestCase {
         document.storeDidChange()
         scheduler.advance(by: 1)
 
+        XCTAssertEqual(try onDisk(document.id), "a line\nsecond line")
+        XCTAssertEqual(body(of: document.buffer), "a line\nsecond line")
+    }
+
+    /// The same when the older copy has a line our newest text lacks. That may be a
+    /// restore the person made on purpose, so nothing is replaced: the older save
+    /// is dropped, and both texts are kept.
+    func testAnEarlierOwnCopyThatTheNewestTextDoesNotCoverIsKeptNextToIt() throws {
+        var note = makeNote("a line")
+        store.save(note)
+        note.content = "a line\nsecond line"
+        store.save(note)
+        let older = try version(note.id, "a line\nsecond line")
+        note.content = "better line\nsecond line"
+        store.save(note)
+        try writeOutside(note.id, "a line")
+        var resolved = 0
+        store.conflictVersionsProvider = { _ in [.init(url: older.url, markResolved: { resolved += 1 })] }
+        store.otherVersionsRemover = { _ in }
+
+        _ = store.resolveConflicts()
+
+        XCTAssertEqual(resolved, 1)
+        let saved = try onDisk(note.id)
+        XCTAssertTrue(saved.contains("a line") && saved.contains("better line"), saved)
+        XCTAssertEqual(count(of: "second line", in: saved), 1, "the older save came back too: \(saved)")
+        XCTAssertLessThanOrEqual(count(of: "Conflicted copy", in: saved), 1, saved)
+    }
+
+    /// The person deleted a line on this Mac; the other Mac put it back on purpose,
+    /// so the file now equals an earlier write of ours. The sweep must not write
+    /// our newer text over it.
+    func testADeliberateRestoreOnTheOtherMacSurvivesTheSweep() throws {
+        var note = makeNote("A\nP")
+        store.save(note)
+        let earlier = try version(note.id, "A\nP")
+        note.content = "A"
+        store.save(note)
+        try writeOutside(note.id, "A\nP")
+        store.conflictVersionsProvider = { _ in [earlier] }
+        store.otherVersionsRemover = { _ in }
+
+        _ = store.resolveConflicts()
+
+        XCTAssertTrue(try onDisk(note.id).contains("P"), "the restored line was written over")
+    }
+
+    /// The window holds a deliberate restore back, then meets it with the person's
+    /// typing on top. Neither the restored line nor the typing is lost.
+    func testADeliberateRestoreMetByTheWindowKeepsTheLineAndTheTyping() throws {
+        let document = open(makeNote("A\nP"))
+        document.edit { $0.content = "A" }
+        scheduler.advance(by: 1)
+        document.isEditing = { true }
+        document.edit { $0.content = "A\nmore typing" }
+        try writeOutside(document.id, "A\nP")
+        document.storeDidChange()
+
+        document.blur()
+
         let saved = try onDisk(document.id)
-        XCTAssertEqual(saved, "better line\nsecond line")
-        XCTAssertEqual(body(of: document.buffer), "better line\nsecond line")
+        XCTAssertTrue(saved.contains("P") && saved.contains("more typing"), saved)
     }
 
     func testAnOlderOwnSaveIsStillDroppedAfterAnOutsideWriteAndAfterARelaunch() throws {
@@ -271,7 +330,8 @@ final class OwnWriteLineageTests: XCTestCase {
         XCTAssertTrue(WriteLineage.history(for: "key-0").entries.isEmpty, "the oldest file was kept")
         let newest = WriteLineage.history(for: "long-history")
         XCTAssertEqual(newest.entries.count, WriteLineage.savedWritesPerFile)
-        XCTAssertEqual(newest.newestBody, "long \(WriteLineage.savedWritesPerFile + 29)")
+        XCTAssertEqual(newest.newestLines, ConflictResolver.lineDigests(of: "long \(WriteLineage.savedWritesPerFile + 29)"))
+        XCTAssertNil(newest.newestBody, "the text of a write is never saved")
         let saved = try Data(contentsOf: lineageFile)
         let files = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])["files"] as? [String: Any]
         XCTAssertLessThanOrEqual(files?.count ?? 0, WriteLineage.savedFiles)
@@ -352,21 +412,28 @@ final class OwnWriteLineageTests: XCTestCase {
         let note = makeNote("this Mac")
         store.save(note)
         var resolved = 0
+        var attempts = 0
         let other = try version(note.id, "the other Mac") { resolved += 1 }
-        store.conflictVersionsProvider = { _ in resolved == 0 ? [other] : [] }
+        store.conflictVersionsProvider = { _ in attempts += 1; return resolved == 0 ? [other] : [] }
         store.otherVersionsRemover = { _ in }
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: store.activeURL.path)
+        let d = NoteDocument.retryDelay
 
         XCTAssertEqual(store.resolveConflicts(), 0, "the write was meant to fail")
         XCTAssertEqual(resolved, 0, "the version was resolved though its text was not written")
+        XCTAssertEqual(attempts, 1)
 
-        scheduler.advance(by: NoteDocument.retryDelay)
-        XCTAssertEqual(resolved, 0, "the retry cannot succeed while the disk refuses")
-        scheduler.advance(by: NoteDocument.retryDelay)
-        XCTAssertEqual(resolved, 0, "the second retry came after the first delay, not after a doubled one")
+        scheduler.advance(by: d - 1)
+        XCTAssertEqual(attempts, 1, "retried before the first delay")
+        scheduler.advance(by: 1)
+        XCTAssertEqual(attempts, 2, "no retry after the first delay")
+        scheduler.advance(by: 2 * d - 1)
+        XCTAssertEqual(attempts, 2, "the second retry did not wait twice as long")
+        scheduler.advance(by: 1)
+        XCTAssertEqual(attempts, 3)
 
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: store.activeURL.path)
-        scheduler.advance(by: NoteDocument.retryDelay * 2)
+        scheduler.advance(by: 4 * d)
 
         XCTAssertEqual(resolved, 1)
         let content = try onDisk(note.id)
@@ -388,5 +455,95 @@ final class OwnWriteLineageTests: XCTestCase {
         scheduler.advance(by: NoteDocument.retryDelay)
 
         XCTAssertEqual(resolved, 1)
+    }
+
+    // MARK: - What the saved lineage holds, and when a path forgets it
+
+    func testTheSavedLineageHoldsHashesAndNoNoteText() throws {
+        WriteLineage.useFile(lineageFile)
+        WriteLineage.record(body: "a very private sentence\nand another one", for: "key")
+        WriteLineage.saveNow()
+
+        let saved = try String(contentsOf: lineageFile, encoding: .utf8)
+
+        XCTAssertFalse(saved.contains("private"), saved)
+        XCTAssertFalse(saved.contains("another"), saved)
+        WriteLineage.reset()
+        WriteLineage.useFile(lineageFile)
+        XCTAssertEqual(WriteLineage.history(for: "key").entries.count, 1)
+        XCTAssertNil(WriteLineage.history(for: "key").newestBody, "the text is kept in memory only")
+    }
+
+    func testAWriteDoesNotSaveTheLineageAtOnce() throws {
+        WriteLineage.useFile(lineageFile)
+
+        WriteLineage.record(body: "text", for: "key")
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lineageFile.path), "every write rewrote the whole file")
+        WriteLineage.saveNow()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lineageFile.path))
+    }
+
+    func testALineageThatEndedStaysEndedAfterARelaunch() throws {
+        WriteLineage.useFile(lineageFile)
+        WriteLineage.record(body: "one\ntwo", for: "key")
+        WriteLineage.adopted("something else", over: nil, for: "key")
+        XCTAssertTrue(WriteLineage.history(for: "key").entries.isEmpty)
+        WriteLineage.saveNow()
+
+        WriteLineage.reset()
+        WriteLineage.useFile(lineageFile)
+
+        XCTAssertTrue(WriteLineage.history(for: "key").entries.isEmpty)
+    }
+
+    func testAnEarlierOwnSaveIsKeptWhenTheNewestTextIsOverTheSizeCap() throws {
+        var note = makeNote("short")
+        store.save(note)
+        note.content = "short\nintermediate line"
+        store.save(note)
+        let intermediate = try version(note.id, "short\nintermediate line")
+        note.content = "short\n" + String(repeating: "x", count: WriteLineage.newestBodyLimit + 10)
+        store.save(note)
+        try writeOutside(note.id, "short")
+        XCTAssertNil(WriteLineage.history(for: NoteStore.lineageKey(try activeFile())).newestBody)
+        store.conflictVersionsProvider = { _ in [intermediate] }
+        store.otherVersionsRemover = { _ in }
+
+        _ = store.resolveConflicts()
+
+        XCTAssertTrue(try onDisk(note.id).contains("intermediate line"), "the only copy of the line was dropped")
+    }
+
+    func testAFileThatLeavesItsPathForgetsItsLineage() throws {
+        let note = makeNote("text")
+        store.save(note)
+        let key = NoteStore.lineageKey(try activeFile())
+        XCTAssertFalse(WriteLineage.history(for: key).entries.isEmpty)
+
+        store.archive(note)
+        XCTAssertTrue(WriteLineage.history(for: key).entries.isEmpty, "archiving kept the old path's lineage")
+
+        store.restore(note)
+        let restored = NoteStore.lineageKey(try activeFile())
+        store.save(note)
+        XCTAssertFalse(WriteLineage.history(for: restored).entries.isEmpty)
+        store.archive(note)
+        store.deleteForever(note)
+        let trashed = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: store.trashURL, includingPropertiesForKeys: nil).first)
+        WriteLineage.record(body: "text", for: NoteStore.lineageKey(trashed))
+        XCTAssertEqual(store.purgeExpiredTrash(now: clock.now().addingTimeInterval(NoteStore.trashRetention + 1)), 1)
+        XCTAssertTrue(WriteLineage.history(for: NoteStore.lineageKey(trashed)).entries.isEmpty)
+    }
+
+    func testALeftStorageRootForgetsItsLineage() throws {
+        let note = makeNote("text")
+        store.save(note)
+        let key = NoteStore.lineageKey(try activeFile())
+
+        store.reconfigure(rootURL: root.appendingPathComponent("elsewhere"))
+
+        XCTAssertTrue(WriteLineage.history(for: key).entries.isEmpty)
     }
 }

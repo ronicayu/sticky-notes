@@ -105,22 +105,29 @@ struct MigrationReport {
 /// case holds only while the person was the one who changed the text from E to
 /// N, so it ends (`adopted`) as soon as a document takes over text that lacks
 /// lines it showed: an outside version replaced them, or the document started
-/// from a file that does not hold them. After that an earlier write may hold the
-/// only copy of a line, and is merged like any other version. A document that
-/// keeps its buffer against an outside version (an older copy of our own text
-/// put back, an append) takes nothing out and leaves the list alone.
+/// from a file that does not hold them. Every code path that takes over outside
+/// text for a document must call `NoteRepository.textAdopted`, or an earlier
+/// write is trusted when it holds the only copy of a line. After the list ends
+/// an earlier write is merged like any other version. A document that keeps its
+/// buffer against an outside version takes nothing out and leaves the list alone.
 ///
 /// Within that, `ConflictResolver.versionsToMerge` drops an earlier write only
 /// while N's text is itself still in the merge (the file covers it, or N is one
 /// of the versions), and never N itself. When the file is an earlier write of
-/// ours that was put back, N's text stands in for it (`resolveConflict`), so
-/// N itself is what survives. An older own body as the current file never lets
-/// a newer own save be dropped: that save is N, which is not dropped on this
-/// evidence. A foreign version is never in the list, and a version with a line
-/// none of our writes had is not an earlier write, so text found only in the
-/// other version is merged as before.
+/// ours that N covers, N's text stands in for it; when it is one that N does
+/// not cover it may be a restore the person made on purpose, so N's text is added
+/// as one more version and nothing is replaced (`ConflictResolver.handlingStaleFile`).
+/// A foreign version is never in the list, and a version with a line none of
+/// our writes had is not an earlier write, so text found only in another
+/// version is merged as before.
+///
+/// Privacy. The saved file holds hashes only: of each write, and of each line of
+/// the newest write. The text of the newest write is kept in memory, never saved.
+/// After a relaunch the hashes still show that an outside append left the newest
+/// write in the file, but a stale file can no longer be replaced by it.
 ///
 /// The list is saved in a machine-local file (`useFile`), so a relaunch keeps it.
+/// A key is a file path: a file that is moved, deleted or purged forgets its list.
 enum WriteLineage {
     struct Entry: Codable, Equatable {
         /// `NoteStore.contentHash` of body, title and labels.
@@ -132,7 +139,11 @@ enum WriteLineage {
     /// What one file's list says, as a value a merge can use without the lock.
     struct History {
         var entries: [Entry] = []
-        /// The text of the newest write, when it was kept.
+        /// Digests of the lines of the newest write (`ConflictResolver.lineDigests`);
+        /// nil when the write was over the size cap.
+        var newestLines: [String]?
+        /// The text of the newest write, in memory only; nil after a relaunch or
+        /// over the size cap.
         var newestBody: String?
 
         var newest: Entry? { entries.last }
@@ -143,13 +154,13 @@ enum WriteLineage {
 
     private struct Stored: Codable {
         var writes: [Entry]
-        var newestBody: String?
+        var newestLines: [String]?
         /// Orders files by their latest write, to keep the most recent ones.
         var touched: Int
     }
 
     private struct FileContents: Codable {
-        var version = 1
+        var version = 2
         var files: [String: Stored]
     }
 
@@ -157,14 +168,17 @@ enum WriteLineage {
     private static let limit = 1000
     static let savedWritesPerFile = 64
     static let savedFiles = 300
-    /// A newest write longer than this is not kept as text; coverage then falls
-    /// back to the exact-match test.
+    /// A newest write longer than this many UTF-8 bytes is not kept as lines or
+    /// text; only the exact-match test is left for it.
     static let newestBodyLimit = 20_000
-    private static let saveDelay: TimeInterval = 2
+    /// Every write arms a save of the whole file, so the save waits and gathers
+    /// them. Quit and sleep save at once (`saveNow`).
+    static let saveDelay: TimeInterval = 45
 
     private static let lock = NSLock()
     // Every access holds `lock`.
     nonisolated(unsafe) private static var files: [String: Stored] = [:]
+    nonisolated(unsafe) private static var texts: [String: String] = [:]
     nonisolated(unsafe) private static var counter = 0
     nonisolated(unsafe) private static var fileURL: URL?
     nonisolated(unsafe) private static var saveScheduled = false
@@ -175,14 +189,17 @@ enum WriteLineage {
             full: NoteStore.contentHash(body: body, title: title, labels: labels),
             body: NoteStore.contentHash(body: body)
         )
+        let small = body.utf8.count <= newestBodyLimit
+        let lines = small ? ConflictResolver.lineDigests(of: body) : nil
         lock.lock()
         counter += 1
-        var stored = files[key] ?? Stored(writes: [], newestBody: nil, touched: 0)
+        var stored = files[key] ?? Stored(writes: [], newestLines: nil, touched: 0)
         stored.writes.append(entry)
         if stored.writes.count > limit { stored.writes.removeFirst(stored.writes.count - limit) }
-        stored.newestBody = body.utf8.count <= newestBodyLimit ? body : nil
+        stored.newestLines = lines
         stored.touched = counter
         files[key] = stored
+        texts[key] = small ? body : nil
         let needsSave = markDirtyLocked()
         lock.unlock()
         if needsSave { scheduleSave() }
@@ -207,16 +224,45 @@ enum WriteLineage {
     static func adopted(_ body: String, over previous: String?, for key: String) {
         lock.lock()
         guard let stored = files[key] else { lock.unlock(); return }
-        let reference = previous ?? stored.newestBody
         let kept: Bool
-        if let reference {
-            kept = ConflictResolver.isCovered(reference, by: body)
+        if let previous {
+            kept = ConflictResolver.isCovered(previous, by: body)
+        } else if let lines = stored.newestLines {
+            kept = ConflictResolver.areCovered(lines, by: body)
         } else {
             kept = stored.writes.last?.body == NoteStore.contentHash(body: body)
         }
         if kept { lock.unlock(); return }
-        files[key] = nil
+        forgetLocked(key)
         let needsSave = markDirtyLocked()
+        lock.unlock()
+        if needsSave { scheduleSave() }
+    }
+
+    /// Call with `lock` held.
+    private static func forgetLocked(_ key: String) {
+        files[key] = nil
+        texts[key] = nil
+    }
+
+    /// The file at `key` was moved, deleted or purged, or its folder was left: its
+    /// list says nothing about whatever is at that path next.
+    static func forget(_ key: String) {
+        lock.lock()
+        let had = files[key] != nil
+        forgetLocked(key)
+        let needsSave = had && markDirtyLocked()
+        lock.unlock()
+        if needsSave { scheduleSave() }
+    }
+
+    /// Forget every file under the folder `path`.
+    static func forgetFiles(under path: String) {
+        let prefix = path.hasSuffix("/") ? path : path + "/"
+        lock.lock()
+        let keys = files.keys.filter { $0.hasPrefix(prefix) }
+        keys.forEach(forgetLocked)
+        let needsSave = !keys.isEmpty && markDirtyLocked()
         lock.unlock()
         if needsSave { scheduleSave() }
     }
@@ -224,7 +270,7 @@ enum WriteLineage {
     static func history(for key: String) -> History {
         lock.lock(); defer { lock.unlock() }
         guard let stored = files[key] else { return History() }
-        return History(entries: stored.writes, newestBody: stored.newestBody)
+        return History(entries: stored.writes, newestLines: stored.newestLines, newestBody: texts[key])
     }
 
     /// True when `hash` (of body, title and labels) is anywhere in the list for `key`.
@@ -251,23 +297,26 @@ enum WriteLineage {
     // MARK: - The machine-local file
 
     /// Keep the list in `url` from now on, and load what an earlier run left
-    /// there. The file must be in a folder that does not sync and is not a storage
-    /// root. Nil keeps the list in memory only, as a test does.
+    /// there. The file belongs in a folder that does not sync. (Settings puts it
+    /// in the machine files folder; in local mode that folder is the storage root,
+    /// where the store reads only `notes`, `archive`, `.trash` and `attachments`
+    /// and so ignores it.) Nil keeps the list in memory only, as a test does.
     static func useFile(_ url: URL?) {
         var loaded: [String: Stored] = [:]
         if let url, let data = try? Data(contentsOf: url),
-           let contents = try? JSONDecoder().decode(FileContents.self, from: data), contents.version == 1 {
+           let contents = try? JSONDecoder().decode(FileContents.self, from: data), contents.version == 2 {
             loaded = contents.files
         }
         lock.lock()
         fileURL = url
         saveScheduled = false
         files = loaded
+        texts = [:]
         counter = loaded.values.map(\.touched).max() ?? 0
         lock.unlock()
     }
 
-    /// Write the list now, for a quit.
+    /// Write the list now, for a quit or a sleep.
     static func saveNow() {
         fileQueue.sync { write() }
     }
@@ -296,6 +345,7 @@ enum WriteLineage {
     static func reset() {
         lock.lock()
         files = [:]
+        texts = [:]
         fileURL = nil
         saveScheduled = false
         lock.unlock()
@@ -685,6 +735,7 @@ final class NoteStore {
                 change = .moved(note.id, from: .active, to: .trash)
             } else {
                 try? FileManager.default.removeItem(at: url)
+                WriteLineage.forget(NoteStore.lineageKey(url))
             }
         }
         pathIndex.removeValue(forKey: note.id)
@@ -724,6 +775,7 @@ final class NoteStore {
                 // Couldn't reach the trash — fall back to removing it, since
                 // the user asked for the note to be gone.
                 try? FileManager.default.removeItem(at: url)
+                WriteLineage.forget(NoteStore.lineageKey(url))
             }
         }
         pathIndex.removeValue(forKey: note.id)
@@ -792,7 +844,10 @@ final class NoteStore {
         for url in files where url.pathExtension == NoteStore.fileExtension {
             guard let deleted = NoteStore.deletionDate(of: url) else { continue }
             guard now.timeIntervalSince(deleted) > NoteStore.trashRetention else { continue }
-            if (try? fm.removeItem(at: url)) != nil { removed += 1 }
+            if (try? fm.removeItem(at: url)) != nil {
+                removed += 1
+                WriteLineage.forget(NoteStore.lineageKey(url))
+            }
         }
         if removed > 0 { notifyChange(.reset) }
         return removed
@@ -848,6 +903,8 @@ final class NoteStore {
         conflictRetries.values.forEach { $0.cancel() }
         conflictRetries = [:]
         conflictRetryAttempts = [:]
+        // Paths in either root may be reused by other notes later.
+        for root in [rootURL, newRoot] { WriteLineage.forgetFiles(under: NoteStore.lineageKey(root)) }
         invalidateCache()
 
         // Heals duplicate ids the way every load does, so each note is copied once.
@@ -1703,20 +1760,22 @@ final class NoteStore {
         }
 
         let history = WriteLineage.history(for: NoteStore.lineageKey(url))
-        let judged = ConflictResolver.standingInForStaleFile(
+        let handled = ConflictResolver.handlingStaleFile(
             current, newestBody: history.newestBody,
             isEarlierBody: { history.contains(body: NoteStore.contentHash(body: $0)) },
             isNewestBody: { history.newest?.body == NoteStore.contentHash(body: $0) }
         )
+        let judged = handled.current
         let versions = ConflictResolver.versionsToMerge(
             current: judged,
             conflicts: conflictNotes,
             ours: ConflictResolver.OwnWrites(
                 isOurs: { history.contains(full: NoteStore.contentHash($0)) },
                 isNewest: { history.isNewest(full: NoteStore.contentHash($0)) },
-                newestBody: history.newestBody
+                newestLines: history.newestLines,
+                newestIsAdded: handled.addedNewest != nil
             )
-        )
+        ) + (handled.addedNewest.map { [$0] } ?? [])
 
         guard ConflictResolver.needsMerge(versions) || judged.content != current.content,
               var merged = ConflictResolver.merge(versions, now: clock.now()) else { return nil }
@@ -1858,8 +1917,10 @@ final class NoteStore {
     private func moveFile(from: URL, to: URL) -> Bool {
         let fm = FileManager.default
         try? fm.removeItem(at: to)
+        WriteLineage.forget(NoteStore.lineageKey(to))
         do {
             try fm.moveItem(at: from, to: to)
+            WriteLineage.forget(NoteStore.lineageKey(from))
             recordSuccess()
             return true
         } catch {

@@ -378,25 +378,25 @@ final class ConflictResolverTests: XCTestCase {
 
         let covered = ConflictResolver.versionsToMerge(
             current: current, conflicts: [own, theirs],
-            ours: .init(isOurs: isOurs, isNewest: isNewest, newestBody: "newest own save")
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: ConflictResolver.lineDigests(of: "newest own save"))
         )
         XCTAssertEqual(covered.map(\.content), [current.content, "from another Mac"], "the file covers the newest write")
 
         let newestIsAVersion = ConflictResolver.versionsToMerge(
             current: current, conflicts: [own, note("newest own save", updated: 150)],
-            ours: .init(isOurs: isOurs, isNewest: isNewest, newestBody: nil)
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: nil)
         )
         XCTAssertEqual(newestIsAVersion.map(\.content), [current.content, "newest own save"])
 
         let lost = ConflictResolver.versionsToMerge(
             current: current, conflicts: [own, theirs],
-            ours: .init(isOurs: isOurs, isNewest: isNewest, newestBody: "a line only the newest write had")
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: ConflictResolver.lineDigests(of: "a line only the newest write had"))
         )
         XCTAssertEqual(lost.count, 3, "the newest write is nowhere, so an earlier one may hold the only copy")
 
         let unknown = ConflictResolver.versionsToMerge(
             current: current, conflicts: [own, theirs],
-            ours: .init(isOurs: isOurs, isNewest: isNewest, newestBody: nil)
+            ours: .init(isOurs: isOurs, isNewest: isNewest, newestLines: nil)
         )
         XCTAssertEqual(unknown.count, 3)
     }

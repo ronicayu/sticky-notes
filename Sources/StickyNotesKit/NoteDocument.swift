@@ -350,11 +350,13 @@ final class NoteDocument {
         if externalChangedBody {
             if !localChangedBody {
                 taken.content = external.content
-            } else if repository.isEarlierOwnBody(external.content, ofNote: buffer.id) {
+            } else if repository.isEarlierOwnBody(external.content, ofNote: buffer.id),
+                      ConflictResolver.isCovered(external.content, by: persistedContent) {
                 // An older copy of what the person wrote, put back by Obsidian or
-                // a sync: every line in it was typed here, and the buffer holds
-                // what the person kept of it. Merging it would add it back as
-                // someone else's text.
+                // a sync: every line in it was typed here, and it adds nothing to
+                // what the window last wrote or read, so the buffer is kept.
+                // One that has a line the base lacks may be a restore the other
+                // Mac made on purpose, and is merged like any outside text.
                 taken.content = buffer.content
             } else {
                 taken.content = Self.mergedBody(
