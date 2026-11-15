@@ -381,7 +381,10 @@ final class DailyDocument {
     func storeDidChange() {
         guard url != nil else { return }
         // A duplicate arrives as an ordinary new file in the folder watched.
-        // Heal first so the read below picks up the merged text.
+        // Heal first so the read below picks up the merged text. The typing is
+        // written before that, so the healed file has it: merged afterwards it
+        // would come back as a second copy.
+        if duplicateSweepIsDue(now: clock.now()) { flush() }
         healDuplicatesIfDue(now: clock.now())
         resolveConflictVersions()
         // A failed read means the file is mid-sync or undecodable, not empty:
@@ -415,8 +418,12 @@ final class DailyDocument {
         DailyNote.healDuplicates(in: url.deletingLastPathComponent(), now: now)
     }
 
+    private func duplicateSweepIsDue(now: Date) -> Bool {
+        now.timeIntervalSince(lastDuplicateSweep) > Self.duplicateSweepInterval
+    }
+
     private func healDuplicatesIfDue(now: Date) {
-        guard now.timeIntervalSince(lastDuplicateSweep) > Self.duplicateSweepInterval else { return }
+        guard duplicateSweepIsDue(now: now) else { return }
         healDuplicates(now: now)
     }
 

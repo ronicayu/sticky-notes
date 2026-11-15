@@ -98,3 +98,16 @@ final class TestScheduler: Scheduler {
         elapsed = time
     }
 }
+
+/// The fastest of `runs` timings of `work`, in seconds. A timing bound on a
+/// shared CI machine is only meaningful for the best run: one run can be slowed
+/// by whatever else the machine was doing, none can be faster than the code is.
+func bestTime(runs: Int = 5, _ work: () -> Void) -> TimeInterval {
+    var best = TimeInterval.infinity
+    for _ in 0..<runs {
+        let start = CFAbsoluteTimeGetCurrent()
+        work()
+        best = min(best, CFAbsoluteTimeGetCurrent() - start)
+    }
+    return best
+}

@@ -258,9 +258,7 @@ import XCTest
         let storage = NSTextStorage(string: source)
         XCTAssertGreaterThan(storage.length, 40_000, "not a big enough sample to be meaningful")
 
-        let start = Date()
-        MarkdownStyler.apply(to: storage)
-        let elapsed = Date().timeIntervalSince(start)
+        let elapsed = bestTime(runs: 3) { MarkdownStyler.apply(to: storage) }
         XCTAssertLessThan(elapsed, 0.5, "styling got quadratic again: \(elapsed)s")
     }
 

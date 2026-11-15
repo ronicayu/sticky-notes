@@ -1072,7 +1072,8 @@ final class NoteDocumentTests: XCTestCase {
     }
 
     /// Base `a`: Obsidian appends `b` while the person types `c`, then appends `d`
-    /// before the debounce. Only the newest file is merged.
+    /// before the debounce. Only the newest file is merged, and the person's
+    /// appended line goes after the outside lines, each once.
     func testAHeldBackEditThatChangedAgainIsMergedOnceNotTwice() throws {
         let document = open(content: "a")
         document.setBody("a\nc")
@@ -1083,8 +1084,8 @@ final class NoteDocumentTests: XCTestCase {
         scheduler.advance(by: 1)
 
         let saved = try fileNote(document).content
-        XCTAssertEqual(count(of: divider, in: saved), 1, saved)
         XCTAssertEqual(saved.components(separatedBy: "\n").filter { $0 == "b" }.count, 1, saved)
+        XCTAssertEqual(saved.components(separatedBy: "\n").filter { $0 == "a" }.count, 1, saved)
         XCTAssertTrue(saved.contains("c") && saved.contains("d"), saved)
     }
 
@@ -1152,5 +1153,77 @@ final class NoteDocumentTests: XCTestCase {
         let saved = try XCTUnwrap(store.snapshot(id: note.id)).note.content
         XCTAssertTrue(saved.hasPrefix("newer elsewhere"), saved)
         XCTAssertTrue(saved.contains("current"), saved)
+    }
+
+    // MARK: - Each part is merged on its own
+
+    /// The other Mac renamed the note and deleted a line while this Mac appended one.
+    func testAnOutsideRenameAndDeletionSurviveWhileTheUserAppends() throws {
+        let document = open(title: "Groceries", content: "milk\neggs")
+        document.setBody("milk\neggs\nbread")
+        try outsideEdit(document, title: "Shopping", body: "milk")
+
+        document.flush()
+
+        let saved = try fileNote(document)
+        XCTAssertEqual(saved.title, "Shopping")
+        XCTAssertEqual(saved.content, "milk\nbread")
+        XCTAssertEqual(document.buffer.content, "milk\nbread")
+    }
+
+    /// Both renamed it, and only the outside changed the body, mid-line.
+    func testBothRenamingAndOnlyTheOutsideChangingTheBodyAddsNoDivider() throws {
+        let document = open(title: "Groceries", content: "milk\neggs")
+        document.isEditingTitle = { false }
+        document.setTitle("Mine")
+        try outsideEdit(document, title: "Theirs", body: "milk\nbread")
+
+        document.flush()
+
+        let saved = try fileNote(document)
+        XCTAssertEqual(saved.title, "Mine")
+        XCTAssertFalse(saved.content.contains(divider), saved.content)
+        XCTAssertTrue(saved.content.hasPrefix("milk\nbread"), saved.content)
+        XCTAssertTrue(saved.content.contains("Also titled: Theirs"), saved.content)
+    }
+
+    /// Both bodies changed but read the same; the person renamed it and left the title field.
+    func testARenameIsKeptWhenBothBodiesChangedToTheSameText() throws {
+        let document = open(title: "Groceries", content: "milk")
+        document.isEditingTitle = { false }
+        document.setTitle("Mine")
+        document.setBody("milk\nbread  ")
+        try outsideEdit(document, title: "Groceries", body: "milk\nbread")
+
+        document.flush()
+
+        XCTAssertEqual(try fileNote(document).title, "Mine")
+        XCTAssertFalse(try fileNote(document).content.contains(divider))
+    }
+
+    func testAnAppendToAnOutsideEditedBodyIsAddedOnceWhenTheOutsideAlreadyHasIt() throws {
+        let document = open(content: "milk\neggs")
+        document.setBody("milk\neggs\nbread")
+        try outsideEdit(document, body: "milk\nbread")
+        document.flush()
+        try outsideEdit(document, body: "milk\nbread")
+
+        document.flush()
+
+        XCTAssertEqual(try fileNote(document).content, "milk\nbread")
+    }
+
+    func testAFileThatMatchesTheBufferBecomesTheBaseForLaterMerges() throws {
+        let document = open(content: "a")
+        document.setBody("a\nb")
+        try outsideEdit(document, body: "a\nb")
+        document.setBody("a\nb\nc")
+        try outsideEdit(document, body: "a\nb\nd")
+
+        document.flush()
+
+        let saved = try fileNote(document).content
+        XCTAssertTrue(saved.contains("c") && saved.contains("d"), saved)
+        XCTAssertEqual(saved.components(separatedBy: "\n").filter { $0 == "b" }.count, 1, saved)
     }
 }

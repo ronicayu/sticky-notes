@@ -1007,4 +1007,28 @@ final class DailyDocumentTests: XCTestCase {
 
         XCTAssertEqual(try text(), "from the other Mac")
     }
+
+    /// iCloud drops a numbered duplicate in while the person has unsaved typing:
+    /// the typing is written before the duplicate is folded in.
+    func testADuplicateIsHealedAfterTheUnsavedTypingIsWritten() throws {
+        try write("A")
+        let document = makeDocument()
+        document.setBody("A\ntyping")
+        let file = try url()
+        try "B".write(
+            to: file.deletingLastPathComponent().appendingPathComponent("\(file.deletingPathExtension().lastPathComponent) 2.md"),
+            atomically: true, encoding: .utf8
+        )
+        clock.advance(by: DailyDocument.duplicateSweepInterval + 1)
+
+        document.storeDidChange()
+        scheduler.advance(by: 1)
+
+        let saved = try text()
+        XCTAssertEqual(saved.components(separatedBy: "Conflicted copy").count - 1, 1, saved)
+        XCTAssertEqual(saved.components(separatedBy: "\n").filter { $0 == "A" }.count, 1, saved)
+        XCTAssertTrue(saved.contains("typing") && saved.contains("B"), saved)
+        XCTAssertEqual(document.body, saved)
+        XCTAssertFalse(document.hasUnsavedEdits)
+    }
 }

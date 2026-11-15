@@ -198,6 +198,9 @@ final class NoteDocument {
             return
         }
         if updated.content == buffer.content, updated.title == buffer.title {
+            // The file holds what the buffer holds, so that is the base now.
+            persistedContent = updated.content
+            persistedTitle = updated.title
             adoptFingerprint(fingerprint, ifLabelsMatch: updated)
             return
         }
@@ -236,12 +239,14 @@ final class NoteDocument {
     /// buffer has not necessarily been saved yet, so writing either side over
     /// the other loses text.
     ///
-    /// What the document last wrote or read is the base of a three-way merge. A
-    /// part only one side changed away from the base is that side's, with no
-    /// merge: a properties-only rewrite never reverts the person's typing, and
-    /// an untouched buffer takes the outside text whole. Where both sides
-    /// changed the body or the title, `ConflictResolver` keeps both. Labels are
-    /// always added together.
+    /// What the document last wrote or read is the base of a three-way merge,
+    /// decided for the body and the title separately. A part only one side
+    /// changed away from the base is that side's, with no merge: a properties-only
+    /// rewrite never reverts the person's typing, and an untouched buffer takes
+    /// the outside text whole. A body both sides changed is merged by
+    /// `ConflictResolver`, which keeps both. A title both sides changed stays the
+    /// person's, and the other is added to the text as an "Also titled" line.
+    /// Labels are always added together.
     ///
     /// `fingerprint` is that of the file `external` was read from, when known.
     /// Otherwise the file is read again, and its newest version is merged in
@@ -255,46 +260,56 @@ final class NoteDocument {
             fingerprint = fresh.fingerprint
         }
 
-        let bodyChangedOnBothSides = external.content != persistedContent && buffer.content != persistedContent
-        let titleChangedOnBothSides = external.title != persistedTitle && buffer.title != persistedTitle
-            && external.title != buffer.title
-        if !bodyChangedOnBothSides && !titleChangedOnBothSides {
-            var taken = buffer
-            if external.content != persistedContent { taken.content = external.content }
-            if external.title != persistedTitle { taken.title = external.title }
-            taken.labels = buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
-            apply(taken, from: external, fingerprint: fingerprint)
-            return
+        // Each part is decided on its own, against the base.
+        var taken = buffer
+        let externalChangedBody = external.content != persistedContent
+        let localChangedBody = buffer.content != persistedContent
+        if externalChangedBody {
+            taken.content = localChangedBody
+                ? Self.mergedBody(
+                    base: persistedContent, local: buffer.content,
+                    external: external.content, externalDate: external.updatedAt, now: clock.now()
+                )
+                : external.content
         }
 
-        // Nothing of the person's own to protect: take the outside note as it is.
-        // Merging would let the newer local stamp win, and an empty base is
-        // never a superset, so the outside text would come back appended under
-        // a "Conflicted copy" divider.
-        if Self.isBlank(buffer) {
-            var taken = external
-            taken.labels = buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
-            apply(taken, from: external, fingerprint: fingerprint)
-            return
+        let externalChangedTitle = external.title != persistedTitle
+        let localChangedTitle = buffer.title != persistedTitle
+        if externalChangedTitle && external.title != buffer.title {
+            if !localChangedTitle || buffer.title.isEmpty {
+                taken.title = external.title
+            } else if !external.title.isEmpty {
+                // Both renamed it: the person's title stays, and the other is kept
+                // as text, as `ConflictResolver` does.
+                let line = "Also titled: \(external.title)"
+                if !taken.content.contains(line) { taken.content += "\n\n" + line }
+            }
         }
 
-        var local = buffer
-        local.updatedAt = clock.now()
+        taken.labels = buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
+        apply(taken, from: external, fingerprint: fingerprint)
+    }
 
-        // The title is edited in its own field, and `needsMerge` only weighs
-        // bodies and labels, so a title-only difference used to fall through
-        // to "apply theirs" and wipe a rename the person was still typing.
-        let localTitleWins = local.title != external.title && isEditingTitle()
-
-        guard ConflictResolver.needsMerge([local, external]),
-              var merged = ConflictResolver.merge([local, external], now: clock.now())
-        else {
-            if localTitleWins { return }
-            apply(external, from: external, fingerprint: fingerprint)
-            return
+    /// Merge a body both sides changed. When one side only added lines at the end
+    /// of the base, that addition is put at the end of the other side's version,
+    /// so the other side's edits and deletions stand. Anything else is
+    /// `ConflictResolver`'s: both texts are kept.
+    private static func mergedBody(base: String, local: String, external: String, externalDate: Date, now: Date) -> String {
+        func appendedLines(in changed: String) -> String? {
+            guard !base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  changed.hasPrefix(base) else { return nil }
+            let tail = String(changed.dropFirst(base.count))
+            guard !tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  tail.hasPrefix("\n") || base.hasSuffix("\n") else { return nil }
+            return tail
         }
-        if localTitleWins { merged.title = local.title }
-        apply(merged, from: external, fingerprint: fingerprint)
+        if let tail = appendedLines(in: local) {
+            return external.contains(tail) ? external : external + tail
+        }
+        if let tail = appendedLines(in: external) {
+            return local.contains(tail) ? local : local + tail
+        }
+        return ConflictResolver.mergeBodies(local: local, external: external, externalDate: externalDate, now: now)
     }
 
     /// Make `updated` the buffer's text. It came from the outside version
