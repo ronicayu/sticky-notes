@@ -814,6 +814,11 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertTrue(
             saved.contains("and typing") && saved.contains("from the laptop") && saved.contains("from this Mac"), saved
         )
+        XCTAssertEqual(saved.components(separatedBy: "Conflicted copy").count - 1, 1, "nested dividers: \(saved)")
+        XCTAssertEqual(saved.components(separatedBy: "and typing").count - 1, 1, "the typing was duplicated: \(saved)")
+        XCTAssertEqual(saved.components(separatedBy: "from this Mac").count - 1, 1, "duplicated: \(saved)")
+        XCTAssertEqual(document.body, saved)
+        XCTAssertFalse(document.hasUnsavedEdits)
     }
 
     /// iCloud keeps this Mac's earlier saves as conflict versions. While the file
@@ -917,5 +922,89 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertEqual(document.body, "one\ntwo")
         XCTAssertEqual(resolved, 1)
         XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: try url().path)[.modificationDate] as? Date, before)
+    }
+
+    func testAConflictVersionIsLeftForLaterWhenTheTypingCannotBeWritten() throws {
+        try write("from this Mac")
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        var resolved = 0
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("from this Mac\nand typing")
+        try lockDailyFolder()
+
+        versions = [try conflictVersion("from the laptop") { resolved += 1 }]
+        document.storeDidChange()
+
+        XCTAssertEqual(resolved, 0, "merged without the typing")
+        XCTAssertEqual(try text(), "from this Mac")
+        XCTAssertTrue(document.hasUnsavedEdits)
+    }
+
+    func testAVersionsSaveDateDecidesWhichDailyTextLeads() throws {
+        try write("current")
+        let newer = try conflictVersion("saved later elsewhere")
+        let handle = NoteStore.ConflictVersionHandle(
+            url: newer.url, markResolved: {}, modificationDate: Date(timeIntervalSince1970: 4_000_000_000)
+        )
+
+        let document = makeDocument(conflicts: [handle])
+
+        XCTAssertTrue(document.body.hasPrefix("saved later elsewhere"), document.body)
+        XCTAssertTrue(document.body.contains("current"), document.body)
+    }
+
+    func testAVersionWithAnOlderSaveDateLeavesTheCurrentTextOnTop() throws {
+        try write("current")
+        let older = try conflictVersion("saved long ago elsewhere")
+        let handle = NoteStore.ConflictVersionHandle(
+            url: older.url, markResolved: {}, modificationDate: Date(timeIntervalSince1970: 1)
+        )
+
+        let document = makeDocument(conflicts: [handle])
+
+        XCTAssertTrue(document.body.hasPrefix("current"), document.body)
+        XCTAssertTrue(document.body.contains("saved long ago elsewhere"), document.body)
+    }
+
+    /// The template write is this Mac's newest write like any other. Left out of
+    /// the lineage it ended it, and iCloud's older copy of an earlier save came
+    /// back as a "Conflicted copy".
+    func testAnOlderOwnSaveIsStillDroppedAfterTheTemplateIsApplied() throws {
+        try write("")
+        let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        var versions: [NoteStore.ConflictVersionHandle] = []
+        document.conflictVersionsProvider = { _ in versions }
+        document.otherVersionsRemover = { _ in }
+        document.load()
+        document.setBody("teh cat")
+        scheduler.advance(by: 1)
+        let older = try conflictVersion("teh cat")
+        document.setBody("")
+        scheduler.advance(by: 1)
+        try configureTemplate("## Today")
+        document.templateDidChange()
+        XCTAssertEqual(try text(), "## Today")
+
+        versions = [older]
+        document.storeDidChange()
+
+        XCTAssertEqual(document.body, "## Today")
+        XCTAssertEqual(try text(), "## Today")
+    }
+
+    func testChangingTheTemplateDoesNotOverwriteAFileThatChangedSinceItWasRead() throws {
+        try write("")
+        let document = makeDocument()
+        try configureTemplate("## Today")
+        let file = try url()
+        // The write that lands between the template's read of the blank file and its own.
+        try "from the other Mac".write(to: file, atomically: true, encoding: .utf8)
+
+        document.templateDidChange()
+
+        XCTAssertEqual(try text(), "from the other Mac")
     }
 }

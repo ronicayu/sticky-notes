@@ -189,8 +189,18 @@ final class NoteDocument {
     func externalChange(_ updated: Note, fingerprint: Fingerprint? = nil) {
         // Our own write, echoed back by the watcher. Mid-burst it is the text as
         // of the last debounce, which is not an outside edit.
-        if updated.content == persistedContent, updated.title == persistedTitle { return }
-        if updated.content == buffer.content, updated.title == buffer.title { return }
+        // The file may still be new to us: a rewrite that kept the text, such as a
+        // move on the other Mac or a property edited in Obsidian. Its fingerprint
+        // is taken, or the next save would meet it as a conflict. Labels the
+        // buffer lacks are left to that conflict, which unions them.
+        if updated.content == persistedContent, updated.title == persistedTitle {
+            adoptFingerprint(fingerprint, ifLabelsMatch: updated)
+            return
+        }
+        if updated.content == buffer.content, updated.title == buffer.title {
+            adoptFingerprint(fingerprint, ifLabelsMatch: updated)
+            return
+        }
 
         // Anything typed since the last write only exists in this buffer, so
         // applying the incoming version over it would discard it. Defer and let
@@ -209,6 +219,11 @@ final class NoteDocument {
         apply(updated, from: updated, fingerprint: fingerprint)
     }
 
+    private func adoptFingerprint(_ fingerprint: Fingerprint?, ifLabelsMatch note: Note) {
+        guard let fingerprint, note.labels == buffer.labels else { return }
+        persistedFingerprint = fingerprint
+    }
+
     /// The window lost focus: fold in an outside edit that was held back.
     @discardableResult
     func blur() -> Bool {
@@ -219,13 +234,38 @@ final class NoteDocument {
 
     /// Fold a held-back outside edit into what the person has been typing. The
     /// buffer has not necessarily been saved yet, so writing either side over
-    /// the other loses text; `ConflictResolver` keeps both.
+    /// the other loses text.
     ///
-    /// `fingerprint` is that of the file `external` was read from, when known;
-    /// otherwise the file is read again.
-    private func mergePendingExternal(fingerprint: Fingerprint? = nil) {
-        guard let external = pendingExternal else { return }
+    /// What the document last wrote or read is the base of a three-way merge. A
+    /// part only one side changed away from the base is that side's, with no
+    /// merge: a properties-only rewrite never reverts the person's typing, and
+    /// an untouched buffer takes the outside text whole. Where both sides
+    /// changed the body or the title, `ConflictResolver` keeps both. Labels are
+    /// always added together.
+    ///
+    /// `fingerprint` is that of the file `external` was read from, when known.
+    /// Otherwise the file is read again, and its newest version is merged in
+    /// place of the held-back one, so a file that changed twice is merged once.
+    private func mergePendingExternal(fingerprint knownFingerprint: Fingerprint? = nil) {
+        guard var external = pendingExternal else { return }
         pendingExternal = nil
+        var fingerprint = knownFingerprint
+        if fingerprint == nil, let fresh = repository.snapshot(id: buffer.id, archived: false) {
+            external = fresh.note
+            fingerprint = fresh.fingerprint
+        }
+
+        let bodyChangedOnBothSides = external.content != persistedContent && buffer.content != persistedContent
+        let titleChangedOnBothSides = external.title != persistedTitle && buffer.title != persistedTitle
+            && external.title != buffer.title
+        if !bodyChangedOnBothSides && !titleChangedOnBothSides {
+            var taken = buffer
+            if external.content != persistedContent { taken.content = external.content }
+            if external.title != persistedTitle { taken.title = external.title }
+            taken.labels = buffer.labels + external.labels.filter { !buffer.labels.contains($0) }
+            apply(taken, from: external, fingerprint: fingerprint)
+            return
+        }
 
         // Nothing of the person's own to protect: take the outside note as it is.
         // Merging would let the newer local stamp win, and an empty base is
@@ -271,11 +311,12 @@ final class NoteDocument {
         // Otherwise the file has moved on since `source` was read, and the stale
         // fingerprint stays, so the next save meets it as a conflict and merges.
 
-        // The buffer now is this version, so it is what the buffer is compared
-        // against. A stale record made every later outside edit look like it
-        // landed on unsaved work and get deferred.
-        persistedContent = updated.content
-        persistedTitle = updated.title
+        // The file holds `source`, so that is the baseline the buffer is compared
+        // against; a merged buffer differs from it until the save that follows.
+        // A stale record made every later outside edit look like it landed on
+        // unsaved work and get deferred.
+        persistedContent = source.content
+        persistedTitle = source.title
         var applied = Applied()
         if updated.title != buffer.title {
             buffer.title = updated.title

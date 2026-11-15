@@ -183,12 +183,17 @@ enum DailyNote {
     /// duplicate's text is merged in first, and the file itself goes to the
     /// Trash rather than being deleted, so a wrong guess is recoverable.
     ///
+    /// `write` replaces the original's text only if the original still has the
+    /// bytes this read; by default it also records the write in the daily file's
+    /// lineage.
+    ///
     /// Returns how many duplicates were folded in.
     @discardableResult
     static func healDuplicates(
         in directory: URL,
         now: Date = Date(),
-        dispose: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+        dispose: (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) },
+        write: (URL, String, Fingerprint) -> Bool = { DailyFile.replaceFile(at: $0, with: $1, expecting: $2) != nil }
     ) -> Int {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return 0 }
@@ -207,7 +212,8 @@ enum DailyNote {
                 .appendingPathExtension(duplicate.pathExtension)
             guard fm.fileExists(atPath: original.path),
                   let duplicateBody = try? String(contentsOf: duplicate, encoding: .utf8),
-                  let originalBody = try? String(contentsOf: original, encoding: .utf8)
+                  let originalData = try? Data(contentsOf: original),
+                  let originalBody = String(data: originalData, encoding: .utf8)
             else { continue }
 
             let merged = ConflictResolver.mergeBodies(
@@ -217,10 +223,10 @@ enum DailyNote {
                 now: now
             )
             if merged != originalBody {
-                // A failed write means the duplicate is still the only copy
-                // of its text, so leave it where it is.
-                do { try merged.write(to: original, atomically: true, encoding: .utf8) }
-                catch { continue }
+                // A failed write, or a file that changed since it was read, means
+                // the duplicate is still the only copy of its text, so leave it
+                // where it is.
+                guard write(original, merged, Fingerprint(of: originalData)) else { continue }
             }
             do { try dispose(duplicate) } catch { continue }
             healed += 1

@@ -52,7 +52,7 @@ final class DailyFile: NoteRepository {
         guard let body = String(data: data, encoding: .utf8) else { return .unreadable }
         // A file that is not our newest write ends the lineage: from then on an
         // older save of ours may hold the only copy of some text.
-        if !WriteLineage.isNewest(NoteStore.contentHash(note(body: body)), for: NoteStore.lineageKey(url)) {
+        if !WriteLineage.isNewest(NoteStore.contentHash(body: body), for: NoteStore.lineageKey(url)) {
             WriteLineage.clear(NoteStore.lineageKey(url))
         }
         return .file(data, body)
@@ -87,10 +87,23 @@ final class DailyFile: NoteRepository {
     }
 
     private func write(_ data: Data, to url: URL) throws -> Fingerprint {
+        try Self.writeRecording(data, to: url)
+    }
+
+    private static func writeRecording(_ data: Data, to url: URL) throws -> Fingerprint {
         try data.write(to: url, options: .atomic)
         let body = String(decoding: data, as: UTF8.self)
-        WriteLineage.record(NoteStore.contentHash(note(body: body)), for: NoteStore.lineageKey(url))
+        WriteLineage.record(NoteStore.contentHash(body: body), for: NoteStore.lineageKey(url))
         return Fingerprint(of: data)
+    }
+
+    /// Replace the file's text, only if it still has the bytes `expected` was
+    /// taken from, and record the write in the lineage. For a writer that is not
+    /// the document, such as healing a duplicate or applying a template. Returns
+    /// the new fingerprint, or nil when the file changed or could not be written.
+    static func replaceFile(at url: URL, with body: String, expecting expected: Fingerprint) -> Fingerprint? {
+        guard let data = try? Data(contentsOf: url), Fingerprint(of: data) == expected else { return nil }
+        return try? writeRecording(Data(body.utf8), to: url)
     }
 
     func loadNote(id: UUID, archived: Bool) -> Note? {
@@ -112,20 +125,23 @@ final class DailyFile: NoteRepository {
 
     // MARK: - Conflict versions
 
-    /// Merge the file's iCloud conflict versions into it, as `NoteStore` does
-    /// for a note: nothing is thrown away, except an older copy of this Mac's
-    /// own save while the file still holds its newest. A version that cannot be
-    /// read yet is left unresolved for a later sweep. Returns whether the file
-    /// was rewritten.
+    func unresolvedConflicts() -> [NoteStore.ConflictVersionHandle] {
+        guard let url = url else { return [] }
+        return conflictVersionsProvider(url)
+    }
+
+    /// Merge the file's iCloud conflict versions (`unresolvedConflicts()`) into
+    /// it, as `NoteStore` does for a note: nothing is thrown away, except an
+    /// older copy of this Mac's own save while the file still holds its newest.
+    /// A version that cannot be read yet is left unresolved for a later sweep.
+    /// Returns whether the file was rewritten.
     @discardableResult
-    func resolveConflicts() -> Bool {
-        guard let url = url else { return false }
-        let conflicts = conflictVersionsProvider(url)
-        guard !conflicts.isEmpty else { return false }
+    func resolveConflicts(_ conflicts: [NoteStore.ConflictVersionHandle]) -> Bool {
+        guard let url = url, !conflicts.isEmpty else { return false }
         // Without the current file nothing can be judged, and resolving the
         // versions now would discard the only readable copies.
         guard case let .file(data, body) = read(url) else { return false }
-        let current = note(body: body, updatedAt: modificationDate(of: url))
+        let current = note(body: body, updatedAt: Self.modificationDate(of: url) ?? .distantPast)
 
         var conflictNotes: [Note] = []
         var unreadable = Set<Int>()
@@ -134,7 +150,8 @@ final class DailyFile: NoteRepository {
                 unreadable.insert(index)
                 continue
             }
-            conflictNotes.append(note(body: raw, updatedAt: modificationDate(of: version.url)))
+            let saved = version.modificationDate ?? Self.modificationDate(of: version.url) ?? .distantPast
+            conflictNotes.append(note(body: raw, updatedAt: saved))
         }
 
         // Cleared when the merged text did not reach the file: the versions may
@@ -170,8 +187,8 @@ final class DailyFile: NoteRepository {
         return true
     }
 
-    private func modificationDate(of url: URL) -> Date {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? clock.now()
+    private static func modificationDate(of url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
     }
 }
 
@@ -295,8 +312,9 @@ final class DailyDocument {
         // Before reading: a duplicate left by an earlier collision holds text
         // that belongs in the file about to be loaded.
         healDuplicates(now: now)
-        // Likewise iCloud's conflict versions: another Mac's text may be only there.
-        file.resolveConflicts()
+        // Likewise iCloud's conflict versions: another Mac's text may be only
+        // there. The document holds nothing unsaved here: every caller wrote it first.
+        file.resolveConflicts(file.unresolvedConflicts())
 
         guard let url = url else {
             adopt("", unavailable: false)
@@ -365,9 +383,7 @@ final class DailyDocument {
         // A duplicate arrives as an ordinary new file in the folder watched.
         // Heal first so the read below picks up the merged text.
         healDuplicatesIfDue(now: clock.now())
-        // Not rate-limited like the folder sweep: it asks about one file, and a
-        // conflict version should be merged as soon as it arrives.
-        file.resolveConflicts()
+        resolveConflictVersions()
         // A failed read means the file is mid-sync or undecodable, not empty:
         // treating it as empty would blank the buffer and then save that over
         // the real content. If we were waiting on a download, this is it.
@@ -379,6 +395,18 @@ final class DailyDocument {
             return
         }
         document.externalChange(snapshot.note, fingerprint: snapshot.fingerprint)
+    }
+
+    /// Merge iCloud's conflict versions of today's file. Unsaved typing is written
+    /// first, so the merge is made with it: merged afterwards, a version that
+    /// already holds the typing comes back as a second copy of it. If that write
+    /// fails the versions wait for the next change. Not rate-limited like the
+    /// folder sweep: it asks about one file, and the file itself says whether it
+    /// has any.
+    private func resolveConflictVersions() {
+        let conflicts = file.unresolvedConflicts()
+        guard !conflicts.isEmpty, flush() else { return }
+        file.resolveConflicts(conflicts)
     }
 
     private func healDuplicates(now: Date) {
@@ -473,16 +501,22 @@ final class DailyDocument {
         else { return }
         // The buffer can be behind the file by the watcher's delay. Text on disk
         // is the note, not a blank to fill: take it in, and write no template.
-        if let onDisk = try? String(contentsOf: url, encoding: .utf8), !Self.isBlank(onDisk) {
+        let onDisk = file.snapshot()
+        if let onDisk, !Self.isBlank(onDisk.note.content) {
             storeDidChange()
             return
         }
         var fingerprint: Fingerprint?
-        if FileManager.default.fileExists(atPath: url.path) {
-            try? templated.write(to: url, atomically: true, encoding: .utf8)
-            if let written = file.snapshot(), written.note.content == templated {
-                fingerprint = written.fingerprint
+        if let onDisk {
+            // Only over the blank file just read; if it changed since, take that in.
+            guard let written = DailyFile.replaceFile(at: url, with: templated, expecting: onDisk.fingerprint) else {
+                storeDidChange()
+                return
             }
+            fingerprint = written
+        } else if FileManager.default.fileExists(atPath: url.path) {
+            // Present but unreadable: nothing is known about it, so it is left alone.
+            return
         }
         adopt(templated, fingerprint: fingerprint, unavailable: false)
     }

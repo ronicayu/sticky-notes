@@ -71,6 +71,16 @@ final class NoteDocumentTests: XCTestCase {
             .write(to: file, atomically: true, encoding: .utf8)
     }
 
+    /// An outside write the document hears about: the file is rewritten and the
+    /// document is handed what it now holds, as the watcher would.
+    private func outsideEdit(
+        _ document: NoteDocument, title: String = "Note", body: String, updated: String = "2027-01-15T07:59:59Z"
+    ) throws {
+        try writeOutsideWithoutTellingTheDocument(document, title: title, body: body, updated: updated)
+        let snapshot = try XCTUnwrap(store.snapshot(id: document.id))
+        document.externalChange(snapshot.note, fingerprint: snapshot.fingerprint)
+    }
+
     /// Makes every write into the notes folder fail, as a full disk or a
     /// revoked permission would; the folder is made writable again on teardown.
     private func failWrites() throws {
@@ -420,10 +430,7 @@ final class NoteDocumentTests: XCTestCase {
     func testADeferredExternalEditSurvivesTheNextDebouncedSave() throws {
         let document = open()
         document.setBody("typed on this Mac")
-        var external = try onDisk(document)
-        external.content = "written in Obsidian"
-        external.updatedAt = clock.now().addingTimeInterval(-1)
-        document.externalChange(external)
+        try outsideEdit(document, body: "written in Obsidian")
         XCTAssertNotNil(document.pendingExternal)
 
         scheduler.advance(by: 1)
@@ -439,10 +446,7 @@ final class NoteDocumentTests: XCTestCase {
     func testArchivingDoesNotDropADeferredExternalEdit() throws {
         let document = open()
         document.setBody("mine")
-        var external = try onDisk(document)
-        external.content = "theirs"
-        external.updatedAt = clock.now().addingTimeInterval(-1)
-        document.externalChange(external)
+        try outsideEdit(document, body: "theirs")
 
         _ = document.close(.archive)
 
@@ -454,10 +458,7 @@ final class NoteDocumentTests: XCTestCase {
     func testLosingFocusMergesAHeldBackEditAndSavesIt() throws {
         let document = open()
         document.setBody("mine")
-        var external = try onDisk(document)
-        external.content = "theirs"
-        external.updatedAt = clock.now().addingTimeInterval(-1)
-        document.externalChange(external)
+        try outsideEdit(document, body: "theirs")
 
         document.blur()
 
@@ -482,11 +483,7 @@ final class NoteDocumentTests: XCTestCase {
         let document = open(title: "Plan", content: "one")
         document.isEditingTitle = { true }
         document.setTitle("Plan for the wee")
-        var external = try onDisk(document)
-        external.title = "Renamed elsewhere"
-        external.content = "one\ntwo"
-        external.updatedAt = clock.now().addingTimeInterval(-1)
-        document.externalChange(external)
+        try outsideEdit(document, title: "Renamed elsewhere", body: "one\ntwo")
 
         document.flush()
 
@@ -499,10 +496,7 @@ final class NoteDocumentTests: XCTestCase {
         let document = open(title: "Plan", content: "one")
         document.isEditingTitle = { true }
         document.setTitle("Plan for the wee")
-        var external = try onDisk(document)
-        external.title = "Renamed elsewhere"
-        external.updatedAt = clock.now().addingTimeInterval(-1)
-        document.externalChange(external)
+        try outsideEdit(document, title: "Renamed elsewhere", body: "one")
 
         document.flush()
 
@@ -515,10 +509,7 @@ final class NoteDocumentTests: XCTestCase {
         let document = open(title: "Plan", content: "one")
         document.isEditingTitle = { false }
         document.setBody("one")
-        var external = try onDisk(document)
-        external.title = "Renamed elsewhere"
-        external.updatedAt = clock.now().addingTimeInterval(-1)
-        document.externalChange(external)
+        try outsideEdit(document, title: "Renamed elsewhere", body: "one")
 
         document.flush()
 
@@ -996,5 +987,170 @@ final class NoteDocumentTests: XCTestCase {
         scheduler.advance(by: 1)
         let saved = try fileNote(document).content
         XCTAssertTrue(saved.contains("changed since") && saved.contains("plus typing"), saved)
+    }
+
+    // MARK: - Rewrites that keep the text, and merging against the base
+
+    private func count(of needle: String, in text: String) -> Int {
+        text.components(separatedBy: needle).count - 1
+    }
+
+    private let divider = "Conflicted copy"
+
+    /// The other Mac moved or recoloured the note: the file changed, the text did not.
+    func testAFrontmatterOnlyOutsideWriteThenAnEditAddsNoDivider() throws {
+        let document = open(content: "milk\neggs")
+        try outsideEdit(document, body: "milk\neggs", updated: "2031-01-01T00:00:00Z")
+
+        document.setBody("milk\nbread")
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try fileNote(document).content, "milk\nbread")
+        XCTAssertEqual(document.persistedFingerprint, store.snapshot(id: document.id)?.fingerprint)
+    }
+
+    /// The same, before the watcher reports it: the save meets it as a conflict.
+    func testAnUnreportedFrontmatterOnlyOutsideWriteThenAnEditAddsNoDivider() throws {
+        let document = open(content: "milk\neggs")
+        try writeOutsideWithoutTellingTheDocument(document, body: "milk\neggs", updated: "2031-01-01T00:00:00Z")
+
+        document.setBody("milk\nbread")
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try fileNote(document).content, "milk\nbread")
+        XCTAssertEqual(document.buffer.content, "milk\nbread")
+    }
+
+    func testARenameTypedRightAfterAFrontmatterOnlyOutsideWriteSurvives() throws {
+        let document = open(title: "Plan", content: "one")
+        document.isEditingTitle = { false }
+        try outsideEdit(document, title: "Plan", body: "one", updated: "2031-01-01T00:00:00Z")
+
+        document.setTitle("Renamed")
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try fileNote(document).title, "Renamed")
+    }
+
+    /// Obsidian rewrites properties inside the debounce, after the title was
+    /// typed and Return was pressed: the old title in the file is not an edit.
+    func testARenameSurvivesAnUnreportedPropertyWriteInsideTheDebounce() throws {
+        let document = open(title: "Plan", content: "one")
+        document.isEditingTitle = { false }
+        document.setTitle("Renamed")
+        try writeOutsideWithoutTellingTheDocument(document, title: "Plan", body: "one", updated: "2031-01-01T00:00:00Z")
+
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try fileNote(document).title, "Renamed")
+        XCTAssertEqual(document.buffer.title, "Renamed")
+    }
+
+    func testAPropertiesOnlyOutsideWriteNeverRevertsTypingOrTheTitle() throws {
+        let document = open(title: "Plan", content: "one")
+        document.isEditingTitle = { false }
+        document.setTitle("Renamed")
+        document.setBody("one\nand two")
+        try outsideEdit(document, title: "Plan", body: "one", updated: "2031-01-01T00:00:00Z")
+
+        document.flush()
+
+        let saved = try fileNote(document)
+        XCTAssertEqual(saved.title, "Renamed")
+        XCTAssertEqual(saved.content, "one\nand two")
+    }
+
+    /// An untouched buffer has nothing to protect: the outside body is the note.
+    func testAnOutsideBodyEditLandsInABufferThatOnlyChangedItsColour() throws {
+        let document = open(content: "one")
+        document.edit { $0.color = .blue }
+        try outsideEdit(document, body: "one\ntwo is not a superset-only edit")
+
+        scheduler.advance(by: 1)
+
+        XCTAssertEqual(try fileNote(document).content, "one\ntwo is not a superset-only edit")
+    }
+
+    /// Base `a`: Obsidian appends `b` while the person types `c`, then appends `d`
+    /// before the debounce. Only the newest file is merged.
+    func testAHeldBackEditThatChangedAgainIsMergedOnceNotTwice() throws {
+        let document = open(content: "a")
+        document.setBody("a\nc")
+        try outsideEdit(document, body: "a\nb")
+        XCTAssertNotNil(document.pendingExternal)
+        try writeOutsideWithoutTellingTheDocument(document, body: "a\nb\nd")
+
+        scheduler.advance(by: 1)
+
+        let saved = try fileNote(document).content
+        XCTAssertEqual(count(of: divider, in: saved), 1, saved)
+        XCTAssertEqual(saved.components(separatedBy: "\n").filter { $0 == "b" }.count, 1, saved)
+        XCTAssertTrue(saved.contains("c") && saved.contains("d"), saved)
+    }
+
+    // MARK: - Conflict versions and unsaved text
+
+    private func conflictVersionFile(
+        of note: Note, content: String, updated: String = "1970-01-01T00:00:01Z"
+    ) throws -> URL {
+        let url = root.appendingPathComponent("version-\(UUID().uuidString).md")
+        try "---\nid: \(note.id.uuidString)\nupdated: \(updated)\n---\n\(content)\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    /// The sweep runs while the window holds unsaved text. The text is written
+    /// first, so the version is merged into a file that has it, and the window
+    /// then takes the merged file as it is.
+    func testAConflictVersionIsMergedAfterTheWindowsUnsavedTextIsWritten() throws {
+        let note = makeNote(content: "a\nx")
+        store.save(note)
+        let document = NoteDocument(note: note, repository: store, scheduler: scheduler, clock: clock)
+        document.setBody("a\nx\nmine")
+        let version = try conflictVersionFile(of: note, content: "a\ny")
+        store.conflictVersionsProvider = { _ in [.init(url: version, markResolved: {})] }
+        store.otherVersionsRemover = { _ in }
+        store.beforeResolvingConflicts = { id in id == document.id ? document.flush() : true }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+        document.storeDidChange()
+
+        let saved = try fileNote(document).content
+        XCTAssertEqual(count(of: divider, in: saved), 1, saved)
+        XCTAssertEqual(count(of: "mine", in: saved), 1, saved)
+        XCTAssertEqual(saved.components(separatedBy: "\n").filter { $0 == "x" }.count, 1, saved)
+        XCTAssertEqual(document.buffer.content, saved)
+        XCTAssertFalse(document.hasUnsavedEdits)
+    }
+
+    func testAConflictVersionIsLeftForLaterWhenTheWindowCannotWriteItsText() throws {
+        let note = makeNote(content: "a")
+        store.save(note)
+        let version = try conflictVersionFile(of: note, content: "other")
+        var resolved = 0
+        store.conflictVersionsProvider = { _ in [.init(url: version, markResolved: { resolved += 1 })] }
+        store.otherVersionsRemover = { _ in }
+        store.beforeResolvingConflicts = { _ in false }
+
+        XCTAssertEqual(store.resolveConflicts(), 0)
+        XCTAssertEqual(resolved, 0)
+        XCTAssertEqual(try XCTUnwrap(store.snapshot(id: note.id)).note.content, "a")
+    }
+
+    /// The system's save date for a version, not what its file says, orders the merge.
+    func testAConflictVersionsSaveDateDecidesWhichTextLeads() throws {
+        let note = makeNote(content: "current")
+        store.save(note)
+        let version = try conflictVersionFile(of: note, content: "newer elsewhere")
+        store.conflictVersionsProvider = { _ in
+            [.init(url: version, markResolved: {}, modificationDate: Date(timeIntervalSince1970: 4_000_000_000))]
+        }
+        store.otherVersionsRemover = { _ in }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+
+        let saved = try XCTUnwrap(store.snapshot(id: note.id)).note.content
+        XCTAssertTrue(saved.hasPrefix("newer elsewhere"), saved)
+        XCTAssertTrue(saved.contains("current"), saved)
     }
 }

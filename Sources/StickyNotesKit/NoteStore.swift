@@ -718,11 +718,23 @@ final class NoteStore {
     struct ConflictVersionHandle {
         let url: URL
         let markResolved: () -> Void
+        /// When the version was saved, as the system reports it. Nil when it
+        /// does not say; the merge then goes by what the version's file holds.
+        var modificationDate: Date?
     }
 
     static func systemConflictVersions(of url: URL) -> [ConflictVersionHandle] {
-        (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []).map { version in
-            ConflictVersionHandle(url: version.url, markResolved: { version.isResolved = true })
+        // Asking for versions is a round trip to another process, and the watcher
+        // fires after every save. The file knows whether it has any.
+        if let flag = try? url.resourceValues(forKeys: [.ubiquitousItemHasUnresolvedConflictsKey])
+            .ubiquitousItemHasUnresolvedConflicts, !flag {
+            return []
+        }
+        return (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []).map { version in
+            ConflictVersionHandle(
+                url: version.url, markResolved: { version.isResolved = true },
+                modificationDate: version.modificationDate
+            )
         }
     }
     static func systemRemoveOtherVersions(of url: URL) {
@@ -731,6 +743,12 @@ final class NoteStore {
 
     var conflictVersionsProvider: (URL) -> [ConflictVersionHandle] = NoteStore.systemConflictVersions(of:)
     var otherVersionsRemover: (URL) -> Void = NoteStore.systemRemoveOtherVersions(of:)
+
+    /// Called with a note's id before its conflict versions are merged, so an
+    /// owner holding unsaved text for it can write that first; the merge would
+    /// otherwise be made without it, and the text would come back as a second
+    /// copy. Returning false leaves the versions for a later sweep.
+    var beforeResolvingConflicts: (UUID) -> Bool = { _ in true }
 
     private func recordWrite(_ note: Note, to url: URL) {
         WriteLineage.record(NoteStore.contentHash(note), for: NoteStore.lineageKey(url))
@@ -752,8 +770,12 @@ final class NoteStore {
     /// Covers everything a merge keeps, so a version that differs from ours
     /// only in its title or labels is never taken for our own save.
     static func contentHash(_ note: Note) -> String {
-        let fields = [ConflictResolver.normalizedBody(note.content), note.title]
-            + note.labels.sorted()
+        contentHash(body: note.content, title: note.title, labels: note.labels)
+    }
+
+    static func contentHash(body: String, title: String = "", labels: [String] = []) -> String {
+        let fields = [ConflictResolver.normalizedBody(body), title]
+            + labels.sorted()
         let digest = SHA256.hash(data: Data(fields.joined(separator: "\u{0}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -783,6 +805,9 @@ final class NoteStore {
 
         // Without the current file nothing can be judged, and resolving the
         // versions now would discard the only readable copies.
+        guard let first = readMainSnapshot(url) else { return nil }
+        guard beforeResolvingConflicts(first.note.id) else { return nil }
+        // Read again: the owner may have just written its text into the file.
         guard let snapshot = readMainSnapshot(url) else { return nil }
         let current = snapshot.note
 
@@ -791,10 +816,11 @@ final class NoteStore {
         // left unresolved for a later sweep; resolving it now would lose it.
         var unreadable = Set<Int>()
         for (index, version) in conflicts.enumerated() {
-            guard let note = read(version.url) else {
+            guard var note = read(version.url) else {
                 unreadable.insert(index)
                 continue
             }
+            if let saved = version.modificationDate { note.updatedAt = saved }
             conflictNotes.append(note)
         }
 

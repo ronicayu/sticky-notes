@@ -28,6 +28,11 @@ import AppKit
         self.recovery = recovery
         super.init()
         MarkdownStyler.baseFontSize = settings.bodyFontSize
+        // The store sweeps on the main queue. A window with unsaved text writes
+        // it before its conflict versions are merged, so the merge has it.
+        store.beforeResolvingConflicts = { [weak self] id in
+            MainActor.assumeIsolated { self?.windowControllers[id]?.flushPendingSave() ?? true }
+        }
     }
 
     deinit {
