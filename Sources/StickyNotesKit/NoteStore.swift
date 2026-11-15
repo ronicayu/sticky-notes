@@ -17,6 +17,51 @@ struct StorageFailure {
     var fileName: String { url.lastPathComponent }
 }
 
+/// The body hashes this process wrote to each file, oldest first, shared by
+/// every `NoteStore` in the process (a second store on the same folder must
+/// honour the first one's writes). iCloud can keep an earlier save from this
+/// very process as a conflict version. While the file still holds our newest
+/// write, such a version holds only text the user has since edited away, so
+/// it is not a conflict. Any read that finds anything else ends the lineage:
+/// from then on an older save of ours may hold the only copy of some text.
+/// In memory only, so after a relaunch everything merges.
+enum WriteLineage {
+    private static let lock = NSLock()
+    private static var hashes: [String: [String]] = [:]
+    private static let limit = 1000
+
+    static func record(_ hash: String, for key: String) {
+        lock.lock(); defer { lock.unlock() }
+        var list = hashes[key, default: []]
+        list.append(hash)
+        if list.count > limit { list.removeFirst(list.count - limit) }
+        hashes[key] = list
+    }
+
+    /// True when `hash` is the most recent write recorded for `key`.
+    static func isNewest(_ hash: String, for key: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return hashes[key]?.last == hash
+    }
+
+    /// True when `hash` is anywhere in the lineage for `key`.
+    static func contains(_ hash: String, for key: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return hashes[key]?.contains(hash) ?? false
+    }
+
+    static func clear(_ key: String) {
+        lock.lock(); defer { lock.unlock() }
+        hashes[key] = nil
+    }
+
+    /// What a relaunch does.
+    static func reset() {
+        lock.lock(); defer { lock.unlock() }
+        hashes = [:]
+    }
+}
+
 final class NoteStore {
     static let didChange = Notification.Name("NoteStore.didChange")
 
@@ -481,25 +526,16 @@ final class NoteStore {
         try? NSFileVersion.removeOtherVersionsOfItem(at: url)
     }
 
-    /// The bodies this process wrote to each file, as hashes, oldest first.
-    /// iCloud can keep an earlier save from this very process as a conflict
-    /// version. When the file still holds something we wrote, such a version
-    /// holds only text the user has since edited away, so it is not a conflict.
-    /// Any read that finds text we did not write ends the lineage: from then
-    /// on an old save of ours may hold the only copy of text that is not in
-    /// the file. It lives in memory only, so after a relaunch everything merges.
-    private var writeLineage: [String: [String]] = [:]
-    private static let lineageLimit = 50
-
     private func recordWrite(_ note: Note, to url: URL) {
-        var hashes = writeLineage[NoteStore.lineageKey(url), default: []]
-        hashes.append(NoteStore.contentHash(note.content))
-        if hashes.count > NoteStore.lineageLimit { hashes.removeFirst(hashes.count - NoteStore.lineageLimit) }
-        writeLineage[NoteStore.lineageKey(url)] = hashes
+        WriteLineage.record(NoteStore.contentHash(note.content), for: NoteStore.lineageKey(url))
+    }
+
+    private func isNewestOwnWrite(_ note: Note, at url: URL) -> Bool {
+        WriteLineage.isNewest(NoteStore.contentHash(note.content), for: NoteStore.lineageKey(url))
     }
 
     private func isOwnWrite(_ note: Note, at url: URL) -> Bool {
-        writeLineage[NoteStore.lineageKey(url)]?.contains(NoteStore.contentHash(note.content)) ?? false
+        WriteLineage.contains(NoteStore.contentHash(note.content), for: NoteStore.lineageKey(url))
     }
 
     /// The same file reaches us as `/var/...` and `/private/var/...`.
@@ -512,12 +548,13 @@ final class NoteStore {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Read a note's own file, ending the write lineage if it holds text this
-    /// process did not write.
+    /// Read a note's own file. Unless it holds the newest text this process
+    /// wrote, the lineage ends: the file is not ours to vouch for any more.
     private func readMain(_ url: URL) -> Note? {
         guard let note = read(url) else { return nil }
-        if writeLineage[NoteStore.lineageKey(url)] != nil, !isOwnWrite(note, at: url) {
-            writeLineage[NoteStore.lineageKey(url)] = nil
+        let key = NoteStore.lineageKey(url)
+        if !WriteLineage.isNewest(NoteStore.contentHash(note.content), for: key) {
+            WriteLineage.clear(key)
         }
         return note
     }
@@ -556,8 +593,9 @@ final class NoteStore {
 
         let versions = ConflictResolver.versionsToMerge(
             current: current,
+            currentIsOurNewest: isNewestOwnWrite(current, at: url),
             conflicts: conflictNotes,
-            isOwnWrite: { isOwnWrite($0, at: url) }
+            isOurs: { isOwnWrite($0, at: url) }
         )
 
         guard ConflictResolver.needsMerge(versions),

@@ -74,16 +74,18 @@ enum ConflictResolver {
 
     /// The notes worth merging: the current file plus its conflict versions,
     /// minus the ones that are an earlier save of this process's own writing.
-    /// `isOwnWrite` must be true only for text this process wrote to the file.
-    /// A conflict version is dropped only when both it and the current file
-    /// are such text; otherwise it may hold text the file lacks.
+    /// A conflict version is dropped only when the current file is this
+    /// process's newest write (`currentIsOurNewest`) and the version is
+    /// something this process wrote (`isOurs`); otherwise it may hold text
+    /// the file lacks.
     static func versionsToMerge(
         current: Note,
+        currentIsOurNewest: Bool,
         conflicts: [Note],
-        isOwnWrite: (Note) -> Bool
+        isOurs: (Note) -> Bool
     ) -> [Note] {
-        guard isOwnWrite(current) else { return [current] + conflicts }
-        return [current] + conflicts.filter { !isOwnWrite($0) }
+        guard currentIsOurNewest else { return [current] + conflicts }
+        return [current] + conflicts.filter { !isOurs($0) }
     }
 
     static func normalizedBody(_ body: String) -> String { normalize(body) }

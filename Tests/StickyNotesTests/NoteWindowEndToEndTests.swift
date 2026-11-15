@@ -254,6 +254,21 @@ final class NoteWindowEndToEndTests: XCTestCase {
         XCTAssertEqual(try onDisk(controller).content, "a\nX\nb")
     }
 
+    /// A note created with text (clipboard, Service, URL) is saved before its
+    /// window exists, and the watcher reports that write a moment later. It
+    /// must not be taken for an outside edit and merged against a quick edit.
+    func testACreationEchoOfACapturedNoteIsNotMergedAsAConflict() throws {
+        let controller = try openNote(content: "captured text")
+        type("captured txt", into: controller)
+
+        controller.handleStoreChange()
+        controller.flushPendingSave()
+
+        let content = try onDisk(controller).content
+        XCTAssertEqual(content, "captured txt")
+        XCTAssertFalse(content.contains("Conflicted copy"), "got \(content)")
+    }
+
     // MARK: - Round trip through the vault
 
     /// What a vault user actually does: edit in Obsidian, come back, edit

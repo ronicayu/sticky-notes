@@ -315,16 +315,17 @@ final class ConflictResolverTests: XCTestCase {
         let current = note("current", updated: 200)
         let own = note("older own save", updated: 100)
         let theirs = note("from another Mac", updated: 100)
+        let isOurs: (Note) -> Bool = { $0.content == "older own save" }
 
-        let bothOurs = ConflictResolver.versionsToMerge(
-            current: current, conflicts: [own, theirs], isOwnWrite: { $0.content != "from another Mac" }
+        let ours = ConflictResolver.versionsToMerge(
+            current: current, currentIsOurNewest: true, conflicts: [own, theirs], isOurs: isOurs
         )
-        XCTAssertEqual(bothOurs.map(\.content), ["current", "from another Mac"])
+        XCTAssertEqual(ours.map(\.content), ["current", "from another Mac"])
 
-        let fileNotOurs = ConflictResolver.versionsToMerge(
-            current: current, conflicts: [own, theirs], isOwnWrite: { $0.content == "older own save" }
+        let notOurs = ConflictResolver.versionsToMerge(
+            current: current, currentIsOurNewest: false, conflicts: [own, theirs], isOurs: isOurs
         )
-        XCTAssertEqual(fileNotOurs.count, 3)
+        XCTAssertEqual(notOurs.count, 3)
     }
 
     // MARK: - needsMerge
@@ -694,6 +695,7 @@ final class ConflictSweepTests: XCTestCase {
         note.updatedAt = Date()
         store.save(note)
 
+        WriteLineage.reset()
         let relaunched = NoteStore(rootURL: root, format: .markdown)
         relaunched.conflictVersionsProvider = { _ in [typo] }
         relaunched.otherVersionsRemover = { _ in }
@@ -702,5 +704,68 @@ final class ConflictSweepTests: XCTestCase {
 
         let content = try XCTUnwrap(relaunched.loadNote(id: note.id)).content
         XCTAssertTrue(content.contains("teh cat"), "got \(content)")
+    }
+
+    /// Mac B saved an older body again while Mac A had moved on, so the
+    /// current file holds an older body of ours and the conflict holds our
+    /// newer one. The newer text exists nowhere else.
+    func testANewerOwnSaveIsKeptWhenTheCurrentFileHoldsAnOlderOwnBody() throws {
+        var note = savedNote("A")
+        let url = try fileURL()
+        note.content = "A\nnew line"
+        note.updatedAt = Date()
+        store.save(note)
+        let newer = try version(of: note, content: "A\nnew line")
+        try rawNote(id: note.id, content: "A", updated: "2026-12-01T00:00:00Z")
+            .write(to: url, atomically: true, encoding: .utf8)
+        store.conflictVersionsProvider = { _ in [newer] }
+        store.otherVersionsRemover = { _ in }
+
+        XCTAssertEqual(store.resolveConflicts(), 1)
+
+        let content = try XCTUnwrap(store.loadNote(id: note.id)).content
+        XCTAssertTrue(content.contains("new line"), "lost the newer save: \(content)")
+    }
+
+    /// The same, when the sweep was skipped: the window adopts the older body
+    /// and the user types on from it.
+    func testANewerOwnSaveIsKeptAfterTheWindowAdoptsAnOlderOwnBody() throws {
+        var note = savedNote("A")
+        let url = try fileURL()
+        note.content = "A\nnew line"
+        note.updatedAt = Date()
+        store.save(note)
+        let newer = try version(of: note, content: "A\nnew line")
+        try rawNote(id: note.id, content: "A", updated: "2026-12-01T00:00:00Z")
+            .write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try XCTUnwrap(store.loadNote(id: note.id)).content
+            .trimmingCharacters(in: .whitespacesAndNewlines), "A")
+        note.content = "A!"
+        note.updatedAt = Date()
+        store.save(note)
+        store.conflictVersionsProvider = { _ in [newer] }
+        store.otherVersionsRemover = { _ in }
+
+        store.resolveConflicts()
+
+        let content = try XCTUnwrap(store.loadNote(id: note.id)).content
+        XCTAssertTrue(content.contains("new line"), "lost the newer save: \(content)")
+    }
+
+    /// A second store on the same folder (the daily note keeps one for
+    /// attachments) must honour what the first one wrote.
+    func testASecondStoreOnTheSameFolderHonoursTheFirstStoresWrites() throws {
+        var note = savedNote("teh cat\nsat down")
+        let typo = try version(of: note, content: "teh cat\nsat down")
+        note.content = "the cat\nsat down"
+        note.updatedAt = Date()
+        store.save(note)
+
+        let second = NoteStore(rootURL: root, format: .markdown)
+        second.conflictVersionsProvider = { _ in [typo] }
+        second.otherVersionsRemover = { _ in }
+
+        XCTAssertEqual(second.resolveConflicts(), 0)
+        XCTAssertEqual(try XCTUnwrap(second.loadNote(id: note.id)).content, "the cat\nsat down")
     }
 }
