@@ -1106,6 +1106,9 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             }
             return
         }
+        // A change that names the notes it touched is not about this file unless
+        // this note is one of them.
+        if case let .external(ids) = NoteStore.change(in: notification), !ids.contains(note.id) { return }
         handleStoreChange()
     }
 

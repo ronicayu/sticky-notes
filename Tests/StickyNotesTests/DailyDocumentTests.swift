@@ -42,6 +42,7 @@ final class DailyDocumentTests: XCTestCase {
 
     private func makeDocument() -> DailyDocument {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         document.load()
         return document
     }
@@ -528,6 +529,7 @@ final class DailyDocumentTests: XCTestCase {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 14 * 3600)!
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler, calendar: { calendar })
+        document.offMain = .inline
         document.load()
         let before = document.day
 
@@ -757,6 +759,7 @@ final class DailyDocumentTests: XCTestCase {
 
     private func makeDocument(conflicts: [NoteStore.ConflictVersionHandle]) -> DailyDocument {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         document.conflictVersionsProvider = { _ in conflicts }
         document.otherVersionsRemover = { _ in }
         document.load()
@@ -771,6 +774,7 @@ final class DailyDocumentTests: XCTestCase {
         var removed = false
         let version = try conflictVersion("from the laptop\nsecond line") { resolved += 1 }
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         document.conflictVersionsProvider = { _ in [version] }
         document.otherVersionsRemover = { _ in removed = true }
 
@@ -786,12 +790,14 @@ final class DailyDocumentTests: XCTestCase {
     func testAConflictVersionThatArrivesWhileTheNoteIsOpenIsMergedOnTheNextChange() throws {
         try write("from this Mac")
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
         document.load()
 
         versions = [try conflictVersion("from the laptop")]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertTrue(document.body.contains("from this Mac") && document.body.contains("from the laptop"), document.body)
@@ -801,6 +807,7 @@ final class DailyDocumentTests: XCTestCase {
     func testAConflictVersionMergedWhileTypingKeepsTheTypingAndTheVersion() throws {
         try write("from this Mac")
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
@@ -808,6 +815,7 @@ final class DailyDocumentTests: XCTestCase {
         document.setBody("from this Mac\nand typing")
 
         versions = [try conflictVersion("from the laptop")]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
         scheduler.advance(by: 1)
 
@@ -826,6 +834,7 @@ final class DailyDocumentTests: XCTestCase {
         try write("")
         let document = makeDocument(conflicts: [try conflictVersion("from the laptop\nsecond line")])
 
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertEqual(document.body.trimmingCharacters(in: .whitespacesAndNewlines), "from the laptop\nsecond line")
@@ -840,6 +849,7 @@ final class DailyDocumentTests: XCTestCase {
         var attempts = 0
         var versions: [NoteStore.ConflictVersionHandle] = []
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         document.conflictVersionsProvider = { _ in attempts += 1; return versions }
         document.otherVersionsRemover = { _ in }
         document.load()
@@ -850,6 +860,7 @@ final class DailyDocumentTests: XCTestCase {
         let d = NoteDocument.retryDelay
 
         attempts = 0
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
         XCTAssertEqual(resolved, 0)
         XCTAssertEqual(attempts, 1)
@@ -876,6 +887,7 @@ final class DailyDocumentTests: XCTestCase {
     /// holds our newest save, such a copy holds only text since edited away.
     func testAnOlderOwnDailySaveWithATypoFixedLaterIsDroppedWithNoDivider() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         var resolved = 0
         document.conflictVersionsProvider = { _ in versions }
@@ -888,6 +900,7 @@ final class DailyDocumentTests: XCTestCase {
         scheduler.advance(by: 1)
 
         versions = [typo]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertEqual(try text(), "the cat\nsat down")
@@ -901,6 +914,7 @@ final class DailyDocumentTests: XCTestCase {
     /// newest text stands in for the copy, with no divider.
     func testAnOlderOwnDailySaveIsDroppedWhenACoveredEarlierOwnCopyWasPutBack() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         var resolved = 0
         document.conflictVersionsProvider = { _ in versions }
@@ -916,6 +930,7 @@ final class DailyDocumentTests: XCTestCase {
         try write("a line")
 
         versions = [older]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertEqual(try text(), "a line\nsecond line")
@@ -927,6 +942,7 @@ final class DailyDocumentTests: XCTestCase {
     /// purpose: the file equals an earlier write of ours, and the sweep keeps it.
     func testADeliberateRestoreOnTheOtherMacSurvivesTheDailySweep() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         var resolved = 0
         document.conflictVersionsProvider = { _ in versions }
@@ -940,6 +956,7 @@ final class DailyDocumentTests: XCTestCase {
         try write("A\nP")
 
         versions = [earlier]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         let saved = try text()
@@ -950,6 +967,7 @@ final class DailyDocumentTests: XCTestCase {
 
     func testAnotherWritersVersionIsMergedEvenAfterThisMacSavedTheNote() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
@@ -958,6 +976,7 @@ final class DailyDocumentTests: XCTestCase {
         scheduler.advance(by: 1)
 
         versions = [try conflictVersion("a line from another Mac")]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertTrue(document.body.contains("the cat") && document.body.contains("a line from another Mac"), document.body)
@@ -969,6 +988,7 @@ final class DailyDocumentTests: XCTestCase {
     /// something and is merged.
     func testAnOlderOwnSaveIsMergedOnceAnotherWriterHasReplacedTheFile() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
@@ -977,9 +997,11 @@ final class DailyDocumentTests: XCTestCase {
         scheduler.advance(by: 1)
         let older = try conflictVersion("morning notes\nlunch plan")
         try write("evening notes only")
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         versions = [older]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertTrue(document.body.contains("evening notes only"), document.body)
@@ -993,6 +1015,7 @@ final class DailyDocumentTests: XCTestCase {
         let readable = try conflictVersion("from the laptop") { resolved.append("readable") }
         let missing = try conflictVersion(nil) { resolved.append("missing") }
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         document.conflictVersionsProvider = { _ in [readable, missing] }
         document.otherVersionsRemover = { _ in removed = true }
 
@@ -1030,6 +1053,7 @@ final class DailyDocumentTests: XCTestCase {
     func testAConflictVersionIsLeftForLaterWhenTheTypingCannotBeWritten() throws {
         try write("from this Mac")
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         var resolved = 0
         document.conflictVersionsProvider = { _ in versions }
@@ -1039,6 +1063,7 @@ final class DailyDocumentTests: XCTestCase {
         try lockDailyFolder()
 
         versions = [try conflictVersion("from the laptop") { resolved += 1 }]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertEqual(resolved, 0, "merged without the typing")
@@ -1078,6 +1103,7 @@ final class DailyDocumentTests: XCTestCase {
     func testAnOlderOwnSaveIsStillDroppedAfterTheTemplateIsApplied() throws {
         try write("")
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
@@ -1092,6 +1118,7 @@ final class DailyDocumentTests: XCTestCase {
         XCTAssertEqual(try text(), "## Today")
 
         versions = [older]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertEqual(document.body, "## Today")
@@ -1124,6 +1151,7 @@ final class DailyDocumentTests: XCTestCase {
         )
         clock.advance(by: DailyDocument.duplicateSweepInterval + 1)
 
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
         scheduler.advance(by: 1)
 
@@ -1140,6 +1168,7 @@ final class DailyDocumentTests: XCTestCase {
     /// after our next one. It is not our own earlier save, and the line survives.
     func testARestoreThatArrivesAsADailyConflictVersionKeepsTheLine() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
@@ -1154,6 +1183,7 @@ final class DailyDocumentTests: XCTestCase {
         scheduler.advance(by: 10)
 
         versions = [try conflictVersion("A\nP", modified: t0.addingTimeInterval(15), computer: "The Other Mac")]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         let saved = try text()
@@ -1162,6 +1192,7 @@ final class DailyDocumentTests: XCTestCase {
 
     func testAnOlderOwnDailySaveThatThisMacSavedBeforeItsNextWriteIsStillDropped() throws {
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         var versions: [NoteStore.ConflictVersionHandle] = []
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
@@ -1174,6 +1205,7 @@ final class DailyDocumentTests: XCTestCase {
         scheduler.advance(by: 10)
 
         versions = [try conflictVersion("teh cat\nsat down", modified: t0.addingTimeInterval(1), computer: "This Mac")]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertEqual(try text(), "the cat\nsat down")
@@ -1194,6 +1226,7 @@ final class DailyDocumentTests: XCTestCase {
         document.isEditing = { true }
         document.setBody("## Today\nline one\nline two")
         try write("## Today")
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         document.flush()
@@ -1209,6 +1242,7 @@ final class DailyDocumentTests: XCTestCase {
         try write("")
         var versions: [NoteStore.ConflictVersionHandle] = []
         let document = DailyDocument(settings: settings, clock: clock, scheduler: scheduler)
+        document.offMain = .inline
         document.conflictVersionsProvider = { _ in versions }
         document.otherVersionsRemover = { _ in }
         document.load()
@@ -1224,6 +1258,7 @@ final class DailyDocumentTests: XCTestCase {
         try write("## Today")
 
         versions = [typo]
+        clock.advance(by: DailyDocument.conflictCheckInterval + 1)
         document.storeDidChange()
 
         XCTAssertEqual(try text(), "## Today\nthe line")

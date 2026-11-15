@@ -243,8 +243,12 @@ final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, Not
         guard let url = dailyDocument.url else { return }
         let parent = url.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-        let watcher = FileWatcher { [weak self] in
-            self?.dailyDocument.storeDidChange()
+        let watcher = FileWatcher(accepts: DailyNote.watchFilter(for: url)) { [weak self] events in
+            guard let self else { return }
+            // A change of attributes alone is iCloud touching the file after a write,
+            // and means something only to a note that is waiting for its download.
+            guard events.everything || !events.changed.isEmpty || self.dailyDocument.isUnavailable else { return }
+            self.dailyDocument.storeDidChange()
         }
         watcher.watch([parent])
         fileWatcher = watcher

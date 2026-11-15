@@ -98,7 +98,7 @@ import XCTest
         await fulfillment(of: [merged], timeout: 10)
 
         XCTAssertGreaterThanOrEqual(asked.value, 3, "every note is asked about")
-        XCTAssertEqual(asked.calledOnMain, 1, "only the note that has a conflict is asked about again on the main thread")
+        XCTAssertEqual(asked.calledOnMain, 0, "the main thread was asked about a note's versions")
         XCTAssertTrue(try fileText(of: note).contains("only in the conflict version"))
         XCTAssertTrue(controller.textView.string.contains("only in the conflict version"), controller.textView.string)
     }

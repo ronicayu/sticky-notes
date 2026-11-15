@@ -10,9 +10,9 @@ import AppKit
     private let undo: UndoCenter?
     private var settingsController: SettingsWindowController?
 
-    private lazy var prefetcher = ICloudPrefetcher { [weak self] in
-        // Manual nudge in case FSEvents missed the materialization.
-        self?.desk.handleStoreChange()
+    private lazy var prefetcher = ICloudPrefetcher { [weak self] urls in
+        // A download that ends changes little the watcher reports, so the store is told.
+        self?.store.filesDidMaterialize(urls)
     }
 
     init(store: NoteStore, settings: Settings, desk: DeskController, undo: UndoCenter? = nil) {

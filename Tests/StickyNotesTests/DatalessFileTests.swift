@@ -2,6 +2,8 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
+private final class OnlyReader: @unchecked Sendable { var value: String? }
+
 /// Files that iCloud keeps in the cloud and not on disk. A real one cannot be made
 /// on a test machine, so each test names the files that count as dataless through
 /// the store's (or the daily note's) `isDataless` seam and watches what is read
@@ -79,16 +81,16 @@ import XCTest
     func testRefusingMaterializationOnAThreadLeavesOrdinaryReadsAlone() throws {
         let file = root.appendingPathComponent("plain.md")
         try "text".write(to: file, atomically: true, encoding: .utf8)
-        var text: String?
+        let text = OnlyReader()
         // The policy belongs to the thread, so it is set on one this test can lose.
         let done = DispatchSemaphore(value: 0)
         Thread.detachNewThread {
             DatalessFiles.refuseMaterializingOnThisThread()
-            text = try? String(contentsOf: file, encoding: .utf8)
+            text.value = try? String(contentsOf: file, encoding: .utf8)
             done.signal()
         }
         done.wait()
-        XCTAssertEqual(text, "text")
+        XCTAssertEqual(text.value, "text")
     }
 
     func testAnOrdinaryFileAndAMissingFileAreNotDataless() throws {

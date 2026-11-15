@@ -7,6 +7,11 @@ import CoreServices
 /// fires when an external editor (Obsidian, an iCloud sync agent, etc.)
 /// rewrites a `.md` inside the watched tree.
 ///
+/// What this process writes itself is not reported: the stream marks the events
+/// of our own writes, and they are dropped, since whoever wrote already knows.
+/// What the report holds is the paths that changed, so the owner can look at
+/// those and nothing else.
+///
 /// `@unchecked Sendable`: it is used from the main thread only, and `onChange`
 /// runs on the main queue; the compiler cannot see that, and owners call
 /// `stop()` from `deinit`.
@@ -19,6 +24,53 @@ import CoreServices
 final class FileWatcher: @unchecked Sendable {
     private static let eventQueue = DispatchQueue(label: "StickyNotes.FileWatcher.events")
 
+    /// What happened since the last report.
+    struct Events: Equatable {
+        /// Paths whose content, name or existence changed, by another process.
+        var changed: Set<String> = []
+        /// Paths where only the attributes changed: extended attributes, flags, owner.
+        /// iCloud does that to a file after every write, and when a download ends.
+        var metadataOnly: Set<String> = []
+        /// The system lost track of what changed (dropped events, a moved root, a
+        /// volume mounted): anything may have changed.
+        var everything = false
+
+        static let all = Events(everything: true)
+
+        var isEmpty: Bool { changed.isEmpty && metadataOnly.isEmpty && !everything }
+
+        mutating func merge(_ other: Events) {
+            changed.formUnion(other.changed)
+            metadataOnly.formUnion(other.metadataOnly)
+            everything = everything || other.everything
+        }
+    }
+
+    /// What one event says, from its path and flags.
+    enum Verdict: Equatable {
+        /// Our own write, or nothing a reader could see.
+        case ignore
+        case changed(String)
+        case metadataOnly(String)
+        case everything
+    }
+
+    /// Sorts one event. A flag that means the system lost track wins over every
+    /// other, our own write included, because then the paths cannot be trusted.
+    static func verdict(path: String, flags: UInt32) -> Verdict {
+        let lostTrack = kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagUserDropped
+            | kFSEventStreamEventFlagKernelDropped | kFSEventStreamEventFlagEventIdsWrapped
+            | kFSEventStreamEventFlagRootChanged | kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount
+        if flags & UInt32(lostTrack) != 0 { return .everything }
+        if flags & UInt32(kFSEventStreamEventFlagOwnEvent) != 0 { return .ignore }
+        let content = kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved
+            | kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemModified
+        if flags & UInt32(content) != 0 { return .changed(path) }
+        let attributes = kFSEventStreamEventFlagItemXattrMod | kFSEventStreamEventFlagItemInodeMetaMod
+            | kFSEventStreamEventFlagItemFinderInfoMod | kFSEventStreamEventFlagItemChangeOwner
+        return flags & UInt32(attributes) != 0 ? .metadataOnly(path) : .ignore
+    }
+
     /// What the stream's callback reaches. The stream owns it (the context's retain
     /// and release), so the callback never touches the watcher itself: the watcher
     /// can then be released on the main thread whatever the stream is doing, and
@@ -28,24 +80,53 @@ final class FileWatcher: @unchecked Sendable {
             weak var watcher: FileWatcher?
         }
         private let target = WeakWatcher()
+        private let accepts: (@Sendable (String) -> Bool)?
 
-        init(_ watcher: FileWatcher) { target.watcher = watcher }
+        init(_ watcher: FileWatcher, accepts: (@Sendable (String) -> Bool)?) {
+            target.watcher = watcher
+            self.accepts = accepts
+        }
 
         /// Called on the stream's queue.
-        func fire() {
+        func receive(count: Int, paths: NSArray, flags: UnsafePointer<FSEventStreamEventFlags>) {
+            var events = Events()
+            for index in 0..<count {
+                guard let path = paths[index] as? String else { continue }
+                // The filter is about paths; "anything may have changed" has none.
+                switch FileWatcher.verdict(path: path, flags: flags[index]) {
+                case .ignore: break
+                case let .changed(path): if accepts?(path) ?? true { events.changed.insert(path) }
+                case let .metadataOnly(path): if accepts?(path) ?? true { events.metadataOnly.insert(path) }
+                case .everything: events.everything = true
+                }
+            }
+            guard !events.isEmpty else { return }
             let target = target
-            DispatchQueue.main.async { target.watcher?.scheduleFire() }
+            let found = events
+            DispatchQueue.main.async { target.watcher?.absorb(found) }
         }
     }
 
     private var stream: FSEventStreamRef?
     private var pending = false
+    private var gathered = Events()
     private let debounce: TimeInterval
-    private let onChange: () -> Void
+    private let accepts: (@Sendable (String) -> Bool)?
+    private let onChange: (Events) -> Void
 
-    init(debounce: TimeInterval = 0.25, onChange: @escaping () -> Void) {
+    /// `accepts` is asked, on the stream's queue, about each changed path, so a watcher
+    /// on a folder that holds much else hears only about its own files.
+    init(
+        debounce: TimeInterval = 0.25, accepts: (@Sendable (String) -> Bool)? = nil,
+        onChange: @escaping (Events) -> Void
+    ) {
         self.debounce = debounce
+        self.accepts = accepts
         self.onChange = onChange
+    }
+
+    convenience init(debounce: TimeInterval = 0.25, onChange: @escaping () -> Void) {
+        self.init(debounce: debounce) { _ in onChange() }
     }
 
     deinit { stop() }
@@ -55,7 +136,7 @@ final class FileWatcher: @unchecked Sendable {
         guard !directories.isEmpty else { return }
 
         let paths = directories.map { $0.path } as CFArray
-        let sink = EventSink(self)
+        let sink = EventSink(self, accepts: accepts)
         var context = FSEventStreamContext(
             version: 0,
             info: Unmanaged.passUnretained(sink).toOpaque(),
@@ -73,11 +154,15 @@ final class FileWatcher: @unchecked Sendable {
         let flags = UInt32(
             kFSEventStreamCreateFlagFileEvents |
             kFSEventStreamCreateFlagNoDefer |
-            kFSEventStreamCreateFlagWatchRoot
+            kFSEventStreamCreateFlagWatchRoot |
+            kFSEventStreamCreateFlagMarkSelf |
+            kFSEventStreamCreateFlagUseCFTypes
         )
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        let callback: FSEventStreamCallback = { _, info, count, rawPaths, rawFlags, _ in
             guard let info = info else { return }
-            Unmanaged<EventSink>.fromOpaque(info).takeUnretainedValue().fire()
+            let paths = unsafeBitCast(rawPaths, to: NSArray.self)
+            Unmanaged<EventSink>.fromOpaque(info).takeUnretainedValue()
+                .receive(count: count, paths: paths, flags: rawFlags)
         }
         guard let created = FSEventStreamCreate(
             kCFAllocatorDefault,
@@ -106,13 +191,16 @@ final class FileWatcher: @unchecked Sendable {
     }
 
     /// On the main queue.
-    private func scheduleFire() {
+    private func absorb(_ events: Events) {
+        gathered.merge(events)
         if pending { return }
         pending = true
         DispatchQueue.main.asyncAfter(deadline: .now() + debounce) { [weak self] in
             guard let self = self else { return }
             self.pending = false
-            self.onChange()
+            let events = self.gathered
+            self.gathered = Events()
+            self.onChange(events)
         }
     }
 }

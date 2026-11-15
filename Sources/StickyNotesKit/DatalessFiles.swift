@@ -5,7 +5,7 @@ import Foundation
 /// The file is listed and has a size, but reading it makes the system fetch it
 /// first, and the reader waits for the download. On the main thread that is a
 /// frozen app.
-enum DatalessFiles {
+public enum DatalessFiles {
     /// `SF_DATALESS` in `<sys/stat.h>`, which Swift does not import.
     private static let datalessFlag: UInt32 = 0x4000_0000
 
@@ -17,9 +17,13 @@ enum DatalessFiles {
         return info.st_flags & datalessFlag != 0
     }
 
-    /// Ask iCloud to download `url`. A file that is not in iCloud is not an error.
+    private static let downloadQueue = DispatchQueue(label: "StickyNotes.Downloads", qos: .utility)
+
+    /// Ask iCloud to download `url`, from a queue of its own: the call goes to
+    /// iCloud's daemon, which may take a long time to answer. A file that is not in
+    /// iCloud is not an error.
     static func startDownloading(_ url: URL) {
-        try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+        downloadQueue.async { try? FileManager.default.startDownloadingUbiquitousItem(at: url) }
     }
 
     /// Whether a read failed because the file is dataless and this thread is not
@@ -39,7 +43,7 @@ enum DatalessFiles {
     /// `EDEADLK` instead of waiting for the download. A backstop: every reader
     /// checks `isDataless` first, so this only catches a file that went dataless
     /// between the check and the read, or a read nobody guarded.
-    static func refuseMaterializingOnThisThread() {
+    public static func refuseMaterializingOnThisThread() {
         _ = setiopolicy_np(
             IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
     }
@@ -55,7 +59,7 @@ final class DatalessGuard {
     static let requestInterval: TimeInterval = 60
 
     var isDataless: (URL) -> Bool = DatalessFiles.isDataless
-    var startDownload: (URL) -> Void = DatalessFiles.startDownloading
+    var startDownload: (URL) -> Void = { DatalessFiles.startDownloading($0) }
     var now: () -> Date = Date.init
     /// How a file's bytes are read. A test makes it throw what a refused read of a
     /// dataless file throws.
@@ -94,6 +98,11 @@ final class DatalessGuard {
         case notDownloaded
         /// Missing, or unreadable for another reason.
         case unreadable
+
+        var isNotDownloaded: Bool {
+            if case .notDownloaded = self { return true }
+            return false
+        }
     }
 
     /// The bytes of the file at `url`, unless it is dataless. `beforeReading` runs
@@ -101,12 +110,20 @@ final class DatalessGuard {
     func read(_ url: URL, beforeReading: () -> Void = {}) -> Read {
         if blocks(url) { return .notDownloaded }
         beforeReading()
+        let result = Self.classify(url, isDataless: { _ in false }, readData: readData)
+        if case .notDownloaded = result { request(url) }
+        return result
+    }
+
+    /// The bytes of a file, or why there are none, without asking for anything: for a
+    /// reader that is not on the main thread, which hands a `.notDownloaded` result
+    /// to the main thread to be asked for.
+    static func classify(_ url: URL, isDataless: (URL) -> Bool, readData: (URL) throws -> Data) -> Read {
+        if isDataless(url) { return .notDownloaded }
         do {
             return .bytes(try readData(url))
         } catch {
-            guard DatalessFiles.isNotMaterializedError(error) else { return .unreadable }
-            request(url)
-            return .notDownloaded
+            return DatalessFiles.isNotMaterializedError(error) ? .notDownloaded : .unreadable
         }
     }
 

@@ -210,6 +210,25 @@ enum DailyNote {
         return full.hasPrefix(root) && String(full.dropFirst(root.count)).lowercased() == wanted
     }
 
+    /// What a watcher on the daily note's folder takes notice of: the day's file, its
+    /// placeholder, and iCloud's numbered copies of it, and only in that folder. The
+    /// stream also reports everything below the folder, which in a vault with the
+    /// pattern at its root is the whole vault, our own note store included.
+    static func watchFilter(for file: URL) -> @Sendable (String) -> Bool {
+        let folder = file.deletingLastPathComponent().resolvingSymlinksInPath().path
+        let name = file.lastPathComponent
+        let stem = file.deletingPathExtension().lastPathComponent
+        let ext = file.pathExtension.lowercased()
+        return { path in
+            let url = URL(fileURLWithPath: path)
+            guard url.deletingLastPathComponent().resolvingSymlinksInPath().path == folder else { return false }
+            let last = url.lastPathComponent
+            if last == name || last == ".\(name).icloud" { return true }
+            guard url.pathExtension.lowercased() == ext else { return false }
+            return duplicateBase(of: url.deletingPathExtension().lastPathComponent) == stem
+        }
+    }
+
     // MARK: - Duplicate healing
 
     /// iCloud's name for a losing copy: `2026-08-26 2.md` sitting beside

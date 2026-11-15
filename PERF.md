@@ -25,6 +25,10 @@ source /tmp/ds-env.sh && STICKY_BENCH=1 /Applications/Xcode.app/Contents/Develop
 | Disk reads per save (one pause in typing), 40 notes open, notes panel created and then closed | `IdleCostBenchTests` | 10.7 | 5.3 | item 3.4 |
 | CPU per save, same set-up | `IdleCostBenchTests` | 14.8 ms | 3.6 ms | item 3.4 |
 | Notes panel list rebuilds per save, same set-up | `IdleCostBenchTests` | 1.1 | 0 | item 3.4 |
+| Main-thread busy time per save, from the save to the end of what the file watcher's report sets off, 200 notes, 40 open, 20 files dataless | `DatalessBenchTests` | 663 ms | 12.9 ms | dataless reads, own FSEvents echo |
+| Main-thread CPU time, same | `DatalessBenchTests` | 292 ms | 10.4 ms | same |
+| File reads per save, same | `DatalessBenchTests` | 401 | 1.0 | same |
+| Of those, reads of dataless files | `DatalessBenchTests` | 40 | 0 | same |
 
 The same 40-note set-up with no panel created costs 5.3 disk reads and 3.4 ms CPU per
 save before and after the change, so the panel's own share was 5.3 reads and 11 ms and is
@@ -40,3 +44,18 @@ a task and a bullet.
 
 A full restyle (load, text size, appearance) is no faster than before: it now looks for
 bare URLs one paragraph at a time, which costs about what the saved regex builds gained.
+
+The dataless rows are the median of three runs. A test machine has no dataless files, so
+the benchmark names 20 of the 200 note files (10 with an open window, 10 without) as
+dataless through the store's `isDataless` seam, and every read of one that gets
+through costs 5 ms on the main thread, a stand-in: a real read waits for a download, which
+takes anything from tens of milliseconds to minutes. "Before" is the tree before the change
+with only that seam and its stall added, so the reads go ahead and stall; "after" is the
+tree with the change, where the seam makes the store skip the read. The 663 ms is therefore
+mostly the stall times the 40 dataless reads per save (200 ms) and the reads and parses
+that surround them; with a real download in place of 5 ms, each of the 40 reads would be
+a freeze of its own. The save writes through the real file system, so the watcher reports
+the write (before) or, flagged as our own, does not (after), and the desk and the 40 windows
+react as in the app: before, every window reads its file and the desk lists and reads all
+200; after, the one read is the compare-and-swap read inside the save. The benchmark
+measures the time the main run loop spends running work, plus the save call itself.

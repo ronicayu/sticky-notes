@@ -284,6 +284,14 @@ final class DailyDocument {
     /// too, so it is rate-limited. iCloud takes far longer than this to deliver
     /// a duplicate.
     static let duplicateSweepInterval: TimeInterval = 5
+    /// Asking whether the file has conflict versions goes to iCloud's daemons, and
+    /// the watcher reports every outside change to the file, so the question is
+    /// asked at most this often; a change that comes sooner is checked when the
+    /// interval is up.
+    static let conflictCheckInterval: TimeInterval = 30
+
+    /// Where the questions for iCloud's daemons are asked; see `OffMain`.
+    var offMain: OffMain = .background
 
     private let settings: Settings
     private let clock: AppClock
@@ -309,6 +317,8 @@ final class DailyDocument {
     private var rolloverRetry: ScheduledWork?
     private var conflictRetry: ScheduledWork?
     private var conflictRetryAttempts = 0
+    private var conflictCheckTask: ScheduledWork?
+    private var lastConflictCheck = Date.distantPast
     private var lastDuplicateSweep = Date.distantPast
 
     /// Where conflict versions of today's file come from. A test supplies its own.
@@ -367,6 +377,7 @@ final class DailyDocument {
     }
 
     deinit {
+        conflictCheckTask?.cancel()
         unavailableRetry?.cancel()
         rolloverTask?.cancel()
         rolloverRetry?.cancel()
@@ -386,6 +397,14 @@ final class DailyDocument {
 
     /// Resolve the file for `now` and put its text in the buffer.
     private func load(now: Date) {
+        loadFile(now: now)
+        // After the file is read: another Mac's text may be only in a conflict
+        // version, and asking for those is slow. The document holds nothing unsaved
+        // here: every caller wrote it first.
+        checkConflictVersions(force: true)
+    }
+
+    private func loadFile(now: Date) {
         unavailableRetry?.cancel()
         unavailableRetry = nil
         day = calendar.startOfDay(for: now)
@@ -394,9 +413,6 @@ final class DailyDocument {
         // Before reading: a duplicate left by an earlier collision holds text
         // that belongs in the file about to be loaded.
         healDuplicates(now: now)
-        // Likewise iCloud's conflict versions: another Mac's text may be only
-        // there. The document holds nothing unsaved here: every caller wrote it first.
-        file.resolveConflicts(file.unresolvedConflicts())
 
         guard let url = url else {
             adopt("", unavailable: false)
@@ -461,6 +477,10 @@ final class DailyDocument {
 
     /// The folder changed: pick up an outside edit, a duplicate, or a download.
     func storeDidChange() {
+        refreshFromDisk(forcingConflictCheck: false)
+    }
+
+    private func refreshFromDisk(forcingConflictCheck: Bool) {
         guard url != nil else { return }
         // A duplicate arrives as an ordinary new file in the folder watched.
         // Heal first so the read below picks up the merged text. The typing is
@@ -468,7 +488,12 @@ final class DailyDocument {
         // would come back as a second copy.
         if duplicateSweepIsDue(now: clock.now()) { flush() }
         healDuplicatesIfDue(now: clock.now())
-        resolveConflictVersions()
+        checkConflictVersions(force: forcingConflictCheck)
+        adoptDiskState()
+    }
+
+    /// Take what the file holds now into the buffer, as an outside change.
+    private func adoptDiskState() {
         // A failed read means the file is mid-sync or undecodable, not empty:
         // treating it as empty would blank the buffer and then save that over
         // the real content. If we were waiting on a download, this is it.
@@ -482,16 +507,39 @@ final class DailyDocument {
         document.externalChange(snapshot.note, fingerprint: snapshot.fingerprint)
     }
 
+    /// Ask whether today's file has conflict versions, off the main thread, and merge
+    /// them when it does. Rate-limited to `conflictCheckInterval`; a check that is
+    /// not due yet is made when it is.
+    private func checkConflictVersions(force: Bool) {
+        guard let url = url else { return }
+        let now = clock.now()
+        let wait = Self.conflictCheckInterval - now.timeIntervalSince(lastConflictCheck)
+        if !force, wait > 0 {
+            if conflictCheckTask == nil {
+                conflictCheckTask = scheduler.schedule(after: wait) { [weak self] in
+                    self?.conflictCheckTask = nil
+                    self?.checkConflictVersions(force: true)
+                }
+            }
+            return
+        }
+        lastConflictCheck = now
+        conflictCheckTask?.cancel()
+        conflictCheckTask = nil
+        let provider = UncheckedSendable(file.conflictVersionsProvider)
+        offMain.ask({ UncheckedSendable(provider.value(url)) }) { [weak self] found in
+            guard let self, self.url == url else { return }
+            self.resolveConflictVersions(found.value)
+        }
+    }
+
     /// Merge iCloud's conflict versions of today's file. Unsaved typing is written
     /// first, so the merge is made with it: merged afterwards, a version that
     /// already holds the typing comes back as a second copy of it. If that write
-    /// fails, or the merged text cannot be written, a retry is armed. Not rate-limited like the
-    /// folder sweep: it asks about one file, and the file itself says whether it
-    /// has any.
-    private func resolveConflictVersions() {
+    /// fails, or the merged text cannot be written, a retry is armed.
+    private func resolveConflictVersions(_ conflicts: [NoteStore.ConflictVersionHandle]) {
         conflictRetry?.cancel()
         conflictRetry = nil
-        let conflicts = file.unresolvedConflicts()
         guard !conflicts.isEmpty else {
             conflictRetryAttempts = 0
             return
@@ -505,6 +553,8 @@ final class DailyDocument {
         } else {
             conflictRetryAttempts = 0
         }
+        // Asked for after the folder's change was already taken in: the merge is a change too.
+        adoptDiskState()
     }
 
     /// A merge that waited on a write, or could not be written, is tried again
@@ -515,7 +565,7 @@ final class DailyDocument {
         conflictRetry = scheduler.schedule(after: delay) { [weak self] in
             guard let self = self else { return }
             self.conflictRetry = nil
-            self.storeDidChange()
+            self.refreshFromDisk(forcingConflictCheck: true)
         }
     }
 

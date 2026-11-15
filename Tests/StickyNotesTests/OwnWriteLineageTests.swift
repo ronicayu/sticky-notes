@@ -21,6 +21,7 @@ final class OwnWriteLineageTests: XCTestCase {
         clock = ManualClock()
         scheduler = TestScheduler(clock: clock)
         store = NoteStore(rootURL: root.appendingPathComponent("notes"), clock: clock, scheduler: scheduler)
+        store.offMain = .inline
     }
 
     override func tearDownWithError() throws {
@@ -292,6 +293,7 @@ final class OwnWriteLineageTests: XCTestCase {
         WriteLineage.reset()
         WriteLineage.useFile(lineageFile)
         let relaunched = NoteStore(rootURL: root.appendingPathComponent("notes"), clock: clock, scheduler: scheduler)
+        relaunched.offMain = .inline
         defer { relaunched.stopWatching() }
         try writeOutside(note.id, "the cat\nsat down\nadded in Obsidian")
         relaunched.conflictVersionsProvider = { _ in [older] }
@@ -309,6 +311,7 @@ final class OwnWriteLineageTests: XCTestCase {
         store.stopWatching()
         WriteLineage.reset()
         let relaunched = NoteStore(rootURL: root.appendingPathComponent("notes"), clock: clock, scheduler: scheduler)
+        relaunched.offMain = .inline
         defer { relaunched.stopWatching() }
         relaunched.conflictVersionsProvider = { _ in [older] }
         relaunched.otherVersionsRemover = { _ in }

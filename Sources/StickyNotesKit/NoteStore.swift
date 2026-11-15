@@ -453,7 +453,7 @@ enum WriteLineage {
 }
 
 /// A value handed to another queue that only that queue reads.
-private struct UncheckedSendable<Value>: @unchecked Sendable {
+struct UncheckedSendable<Value>: @unchecked Sendable {
     let value: Value
     init(_ value: Value) { self.value = value }
 }
@@ -1567,12 +1567,102 @@ final class NoteStore {
         try? fm.createDirectory(at: trashURL, withIntermediateDirectories: true)
     }
 
-    /// What the watcher does with an event. Internal so a test can stand in for
-    /// the watcher without waiting for FSEvents.
-    func handleFileSystemEvent() {
-        resolveConflictsIfDue()
-        noticeOlderVersionFiles()
-        notifyChange(.reset)
+    /// What the watcher does with what it heard, which is never this store's own
+    /// writes: those are announced by the write itself. Internal so a test can
+    /// stand in for the watcher without waiting for FSEvents; with no argument it
+    /// reports that anything may have changed.
+    ///
+    /// Only the notes whose files were named are read again, and a window learns
+    /// which notes those are, so the rest of the desk does no disk reads for it.
+    func handleFileSystemEvent(_ events: FileWatcher.Events = .all) {
+        guard !events.everything else {
+            resolveConflictsIfDue()
+            noticeOlderVersionFiles()
+            notifyChange(.reset)
+            return
+        }
+        let reported = events.changed.union(events.metadataOnly).map { URL(fileURLWithPath: $0) }
+        let reportedNotes = reported.filter { $0.pathExtension == NoteStore.fileExtension }
+        // A change of attributes alone says nothing about a note, unless its file was
+        // not downloaded: the download ending shows as one.
+        let touched = events.changed.map { URL(fileURLWithPath: $0) }.filter { $0.pathExtension == NoteStore.fileExtension }
+            + events.metadataOnly.map { URL(fileURLWithPath: $0) }.filter(isAwaitingDownload)
+        // A conflict is flagged on the file, which looks like a change of attributes.
+        if !reportedNotes.isEmpty { resolveConflictsInBackground(files: reportedNotes) }
+        if events.changed.contains(where: { $0.hasSuffix(".json") }) { noticeOlderVersionFiles() }
+        guard !touched.isEmpty else { return }
+        if let ids = refreshCache(forChangedFiles: touched) {
+            notifyObservers(.external(ids))
+        } else {
+            notifyChange(.reset)
+        }
+    }
+
+    /// Files in iCloud have been downloaded.
+    func filesDidMaterialize(_ urls: [URL]) {
+        var events = FileWatcher.Events()
+        for url in urls where url.pathExtension == NoteStore.fileExtension { events.changed.insert(url.path) }
+        guard !events.isEmpty else { return }
+        handleFileSystemEvent(events)
+    }
+
+    private func isAwaitingDownload(_ url: URL) -> Bool {
+        guard url.pathExtension == NoteStore.fileExtension else { return false }
+        if dataless.isWaiting(for: url) { return true }
+        let key = fileKey(url)
+        return cache[dirKey(url.deletingLastPathComponent())]?.skipped.contains { fileKey($0) == key } == true
+    }
+
+    /// A file's identity in the cache: its folder as `dirKey` names it, and its name.
+    private func fileKey(_ url: URL) -> String {
+        dirKey(url.deletingLastPathComponent()) + "/" + url.lastPathComponent
+    }
+
+    /// Bring the cached folders in line with files that were seen to change, reading
+    /// each of them again and nothing else. Returns the ids of the notes that were
+    /// in them before or are now, or nil when it cannot say which notes changed:
+    /// a file is in a folder that is not cached, so the cache says nothing about it.
+    private func refreshCache(forChangedFiles urls: [URL]) -> Set<UUID>? {
+        var ids = Set<UUID>()
+        var known = true
+        for url in urls {
+            let dir = dirKey(url.deletingLastPathComponent())
+            // The index of a folder stops being complete when a file comes or goes.
+            indexedDirs.remove(dir)
+            guard var directory = cache[dir] else {
+                known = false
+                continue
+            }
+            let key = fileKey(url)
+            var position: Int?
+            if let index = directory.entries.firstIndex(where: { fileKey($0.url) == key }) {
+                ids.insert(directory.entries[index].note.id)
+                directory.entries.remove(at: index)
+                position = index
+            }
+            directory.skipped.removeAll { fileKey($0) == key }
+            switch readFile(url) {
+            case let .snapshot(snapshot):
+                let note = snapshot.note
+                ids.insert(note.id)
+                if directory.entries.contains(where: { $0.note.id == note.id }) {
+                    // Two files with one id: the next load of the folder heals it.
+                    cache[dir] = nil
+                    continue
+                }
+                directory.entries.insert(.init(url: url, note: note), at: min(position ?? directory.entries.count, directory.entries.count))
+                pathIndex[note.id] = url
+                knownIds.insert(note.id)
+            case .notDownloaded:
+                directory.skipped.append(url)
+            case .unreadable:
+                break
+            }
+            cache[dir] = directory
+        }
+        labelIndex = nil
+        confirmedDeletedIds.removeAll()
+        return known ? ids : nil
     }
 
     /// A `.json` note that shows up after launch was written by a Mac still on an
@@ -1598,12 +1688,12 @@ final class NoteStore {
     }
 
     private func startWatching() {
-        watcher = FileWatcher { [weak self] in
+        watcher = FileWatcher { [weak self] events in
             guard let self = self else { return }
             // Conflict copies arrive as ordinary file changes. Merging only at
             // launch left the other Mac's edits invisible — and diverging
             // further — for the rest of the session.
-            self.handleFileSystemEvent()
+            self.handleFileSystemEvent(events)
         }
         watcher?.watch([activeURL, archiveURL, trashURL])
     }
@@ -1727,17 +1817,17 @@ final class NoteStore {
         return NoteStore.nameCarriesId(name, id)
     }
 
-    /// Sweeping asks the filesystem for conflict versions of every file, and
-    /// the watcher fires on our own debounced saves too. Rate-limit it: iCloud
-    /// takes far longer than this to deliver a conflict in the first place.
-    private static let conflictSweepInterval: TimeInterval = 5
+    /// A sweep of every file asks the filesystem for the conflict versions of each,
+    /// so the watcher's own is rate-limited: iCloud takes far longer than this to
+    /// deliver a conflict in the first place. A change to one file is looked at for
+    /// that file alone, as it is reported.
+    private static let conflictSweepInterval: TimeInterval = 30
     private var lastConflictSweep = Date.distantPast
 
     private func resolveConflictsIfDue() {
         let now = clock.now()
         guard now.timeIntervalSince(lastConflictSweep) > NoteStore.conflictSweepInterval else { return }
-        lastConflictSweep = now
-        resolveConflicts()
+        resolveConflictsInBackground()
     }
 
     /// Resolve every iCloud conflict in the active and archive folders,
@@ -1755,11 +1845,13 @@ final class NoteStore {
         return resolveConflicts(at: files)
     }
 
-    private func resolveConflicts(at files: [URL]) -> Int {
+    private func resolveConflicts(at files: [URL], prefetched: [URL: [PrefetchedVersion]] = [:]) -> Int {
         var resolved = 0
         var changedIds = Set<UUID>()
         for url in files {
-            if let id = resolveConflict(at: url) {
+            var needsRetry = false
+            defer { settleConflictRetry(for: url, needed: needsRetry) }
+            if let id = resolveConflict(at: url, prefetched: prefetched[url], needsRetry: &needsRetry) {
                 resolved += 1
                 changedIds.insert(id)
             }
@@ -1772,39 +1864,64 @@ final class NoteStore {
     /// is dropped instead of applied to the new one.
     private var storageGeneration = 0
 
-    /// Merge the conflict versions of every note, without holding up the caller.
-    /// Asking `NSFileVersion` about each file is a round trip to another process,
-    /// so only that question runs on a utility queue. What it finds is merged on
-    /// the main queue, where the store lives and where `beforeResolvingConflicts`
-    /// lets an open window write first, and observers hear `.external(ids)` for
-    /// the notes that changed. `completion` gets the number of files merged.
-    func resolveConflictsInBackground(completion: ((Int) -> Void)? = nil) {
+    /// One conflict version, and what reading its file gave, read where the sweep
+    /// found it.
+    private struct PrefetchedVersion {
+        let handle: ConflictVersionHandle
+        let read: DatalessGuard.Read
+    }
+
+    /// Merge the conflict versions of every note, or of just `files`, without
+    /// holding up the caller. Asking `NSFileVersion` about each file is a round trip
+    /// to another process, and each version is a file to read, so only those run on
+    /// a utility queue. What they find is merged on the main queue, where the store
+    /// lives and where `beforeResolvingConflicts` lets an open window write first,
+    /// and observers hear `.external(ids)` for the notes that changed. `completion`
+    /// gets the number of files merged.
+    func resolveConflictsInBackground(files named: [URL]? = nil, completion: ((Int) -> Void)? = nil) {
         dispatchPrecondition(condition: .onQueue(.main))
         let generation = storageGeneration
-        // This is the sweep; the watcher's own, a moment later, would only repeat it on the main queue.
-        lastConflictSweep = clock.now()
+        // A sweep of everything; the watcher's own, a moment later, would only repeat it.
+        if named == nil { lastConflictSweep = clock.now() }
         let folders = [activeURL, archiveURL]
         let provider = UncheckedSendable(conflictVersionsProvider)
-        let merge = UncheckedSendable { [weak self] (urls: [URL]) in
+        let isDataless = UncheckedSendable(dataless.isDataless)
+        let readData = UncheckedSendable(dataless.readData)
+        let merge = UncheckedSendable { [weak self] (found: [(url: URL, versions: [PrefetchedVersion])]) in
             guard let self, self.storageGeneration == generation else { completion?(0); return }
-            let merged = self.resolveConflicts(at: urls)
+            var prefetched: [URL: [PrefetchedVersion]] = [:]
+            for entry in found {
+                prefetched[entry.url] = entry.versions
+                for version in entry.versions where version.read.isNotDownloaded { self.dataless.request(version.handle.url) }
+            }
+            let merged = self.resolveConflicts(at: found.map(\.url), prefetched: prefetched)
             completion?(merged)
         }
-        DispatchQueue.global(qos: .utility).async {
-            var withConflicts: [URL] = []
-            for dir in folders {
-                guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
-                    continue
-                }
-                for url in files where url.pathExtension == NoteStore.fileExtension
-                    && !provider.value(url).isEmpty {
-                    withConflicts.append(url)
+        offMain.ask({
+            var candidates: [URL] = named ?? []
+            if named == nil {
+                for dir in folders {
+                    guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+                        continue
+                    }
+                    candidates += files.filter { $0.pathExtension == NoteStore.fileExtension }
                 }
             }
-            let found = withConflicts
-            DispatchQueue.main.async { merge.value(found) }
-        }
+            var found: [(url: URL, versions: [PrefetchedVersion])] = []
+            for url in candidates {
+                let versions = provider.value(url)
+                guard !versions.isEmpty else { continue }
+                found.append((url, versions.map {
+                    PrefetchedVersion(
+                        handle: $0, read: DatalessGuard.classify($0.url, isDataless: isDataless.value, readData: readData.value))
+                }))
+            }
+            return UncheckedSendable(found)
+        }, then: { merge.value($0.value) })
     }
+
+    /// Where questions for iCloud's daemons are asked; see `OffMain`.
+    var offMain: OffMain = .background
 
     /// A conflict version of a file as `resolveConflict` needs it. Production
     /// builds these from `NSFileVersion`; tests supply their own, because real
@@ -1910,11 +2027,13 @@ final class NoteStore {
     private func resolveConflict(at url: URL) -> UUID? {
         var needsRetry = false
         defer { settleConflictRetry(for: url, needed: needsRetry) }
-        return resolveConflict(at: url, needsRetry: &needsRetry)
+        return resolveConflict(at: url, prefetched: nil, needsRetry: &needsRetry)
     }
 
-    private func resolveConflict(at url: URL, needsRetry: inout Bool) -> UUID? {
-        let conflicts = conflictVersionsProvider(url)
+    /// `prefetched` is the versions and their files as a background sweep read them;
+    /// without it they are asked for and read here.
+    private func resolveConflict(at url: URL, prefetched: [PrefetchedVersion]?, needsRetry: inout Bool) -> UUID? {
+        let conflicts = prefetched?.map(\.handle) ?? conflictVersionsProvider(url)
         guard !conflicts.isEmpty else { return nil }
 
         // Without the current file nothing can be judged, and resolving the
@@ -1933,7 +2052,8 @@ final class NoteStore {
         // left unresolved for a later sweep; resolving it now would lose it.
         var unreadable = Set<Int>()
         for (index, version) in conflicts.enumerated() {
-            guard var note = read(version.url) else {
+            let versionRead = prefetched?[index].read ?? readBytes(version.url)
+            guard case let .bytes(data) = versionRead, var note = note(from: data, at: version.url) else {
                 unreadable.insert(index)
                 continue
             }
@@ -2029,7 +2149,8 @@ final class NoteStore {
         conflictRetries[key] = scheduler.schedule(after: delay) { [weak self] in
             guard let self, self.storageGeneration == generation else { return }
             self.conflictRetries[key] = nil
-            if let id = self.resolveConflict(at: url) { self.notifyChange(.external([id])) }
+            // The versions are asked for, and read, off the main thread.
+            self.resolveConflictsInBackground(files: [url])
         }
     }
 
@@ -2138,11 +2259,14 @@ final class NoteStore {
         case .notDownloaded: return .notDownloaded
         case .unreadable: return .unreadable
         }
-        let note = String(data: data, encoding: .utf8).flatMap {
+        guard let note = note(from: data, at: url) else { return .unreadable }
+        return .snapshot(NoteSnapshot(note: note, fingerprint: Fingerprint(of: data)))
+    }
+
+    private func note(from data: Data, at url: URL) -> Note? {
+        String(data: data, encoding: .utf8).flatMap {
             parseMarkdown($0, fallbackId: idFromFilename(url) ?? stableId(for: url))
         }
-        guard let note else { return .unreadable }
-        return .snapshot(NoteSnapshot(note: note, fingerprint: Fingerprint(of: data)))
     }
 
     /// The note in the file, or nil when it cannot be had now: unreadable, or not
