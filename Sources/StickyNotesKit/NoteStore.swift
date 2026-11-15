@@ -658,7 +658,8 @@ final class NoteStore {
         _ = resolveConflict(at: existing)
         for _ in 0..<2 {
             guard let onDisk = readSnapshot(existing) else { return }
-            let merged = ConflictResolver.merge([onDisk.note, note], now: clock.now()) ?? note
+            var merged = ConflictResolver.merge([onDisk.note, note], now: clock.now()) ?? note
+            merged.preserved = onDisk.note.preserved
             guard renderMarkdown(merged) != renderMarkdown(onDisk.note) else { break }
             if case .saved = writeIfUnchanged(merged, to: existing, expecting: .fingerprint(onDisk.fingerprint)) { break }
         }
@@ -1017,7 +1018,8 @@ final class NoteStore {
         )
 
         guard ConflictResolver.needsMerge(versions),
-              let merged = ConflictResolver.merge(versions, now: clock.now()) else { return nil }
+              var merged = ConflictResolver.merge(versions, now: clock.now()) else { return nil }
+        merged.preserved = current.preserved
 
         // A merge that changed nothing must not be written: the write comes
         // back through the watcher, which sweeps again — and a conflict that
@@ -1252,6 +1254,8 @@ final class NoteStore {
         if merged.title.isEmpty, let title = versions.first(where: { !$0.title.isEmpty })?.title {
             merged.title = title
         }
+        // The properties of the file in place are its own, whichever version won.
+        if let existing { merged.preserved = existing.snapshot.note.preserved }
 
         if let existing, renderMarkdown(merged) == renderMarkdown(existing.snapshot.note) {
             // The Markdown file already holds everything the JSON does.
@@ -1354,21 +1358,11 @@ final class NoteStore {
     private func reassignId(of url: URL, expecting snapshot: NoteSnapshot) -> Bool {
         guard let data = try? Data(contentsOf: url), Fingerprint(of: data) == snapshot.fingerprint,
               let text = String(data: data, encoding: .utf8) else { return false }
-        var lines = text.components(separatedBy: "\n")
-        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "---" else { return false }
         let newId = UUID()
-        var replaced = false
-        for index in 1..<lines.count {
-            let line = lines[index]
-            if line.trimmingCharacters(in: .whitespacesAndNewlines) == "---" { break }
-            guard let colon = line.firstIndex(of: ":"),
-                  line[..<colon].trimmingCharacters(in: .whitespacesAndNewlines) == "id" else { continue }
-            lines[index] = "id: \(newId.uuidString)" + (line.hasSuffix("\r") ? "\r" : "")
-            replaced = true
-            break
+        guard let rewritten = MarkdownFile.replacingValue(ofKey: "id", in: text, with: newId.uuidString) else {
+            return false
         }
-        guard replaced else { return false }
-        let updated = Data(lines.joined(separator: "\n").utf8)
+        let updated = Data(rewritten.utf8)
         do {
             try updated.write(to: url, options: .atomic)
         } catch {
@@ -1448,15 +1442,26 @@ final class NoteStore {
             ("height", String(format: "%.2f", note.height)),
             ("collapsed", note.collapsed ? "true" : "false"),
             ("float", note.floatLevel.rawValue),
-            ("created", iso8601.string(from: note.createdAt)),
-            ("updated", iso8601.string(from: note.updatedAt))
+            ("created", unreadableDate("created", of: note) ?? iso8601.string(from: note.createdAt)),
+            ("updated", unreadableDate("updated", of: note) ?? iso8601.string(from: note.updatedAt))
         ]
         let document = MarkdownFile.Document(
-            frontmatter: frontmatter, body: note.content, layout: note.preserved.layout
+            frontmatter: frontmatter, body: note.content, layout: note.preserved.layout,
+            originals: note.preserved.originals
         )
         return MarkdownFile.serialize(
             document, forceQuoteKeys: ["title"], blockListKeys: note.preserved.labelsAsBlock ? ["labels"] : []
         )
+    }
+
+    /// The date the file wrote for `key` in a format the app cannot read, such as
+    /// a plugin's `2026-11-15 10:00`, while the note still holds the date the
+    /// parser made up in its place. The app writes ISO dates only when it has
+    /// a date of its own to write.
+    private func unreadableDate(_ key: String, of note: Note) -> String? {
+        guard let original = note.preserved.originals[key], iso8601.date(from: original.value) == nil else { return nil }
+        if key == "updated", note.updatedAt != note.createdAt { return nil }
+        return original.value
     }
 
     /// The keys the app reads and writes itself. Any other key in a note's
@@ -1496,7 +1501,7 @@ final class NoteStore {
             updatedAt: updatedAt
         )
         note.preserved = PreservedFrontmatter(
-            layout: doc.layout, labelsAsBlock: doc.blockListKeys.contains("labels")
+            layout: doc.layout, labelsAsBlock: doc.blockListKeys.contains("labels"), originals: doc.originals
         )
         return note
     }

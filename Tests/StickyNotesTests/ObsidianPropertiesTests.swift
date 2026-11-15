@@ -59,7 +59,7 @@ final class ObsidianPropertiesTests: XCTestCase {
     /// The file as Obsidian leaves it after a property edit: the app's own
     /// keys, `extra` lines among them, and the body.
     private func obsidianWrites(
-        _ document: NoteDocument, title: String = "Note", labels: String = "[]",
+        _ document: NoteDocument, title: String = "Note", labels: String = " []",
         extra: String, body: String = "start", updated: String = "2030-01-01T00:00:00Z"
     ) throws {
         try """
@@ -67,7 +67,7 @@ final class ObsidianPropertiesTests: XCTestCase {
         id: \(document.id.uuidString)
         title: \(title)
         \(extra)
-        labels: \(labels)
+        labels:\(labels)
         updated: \(updated)
         ---
 

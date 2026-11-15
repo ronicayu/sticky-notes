@@ -15,6 +15,13 @@ enum MarkdownFile {
         case verbatim(String)
     }
 
+    struct Original: Equatable {
+        var value: String
+        var raw: String
+        /// The value was written in quotes.
+        var quoted: Bool
+    }
+
     struct Document {
         /// The `key: value` entries read from the file, with the value unquoted:
         /// those of the owned keys, or all of them when none were named. A block
@@ -29,6 +36,10 @@ enum MarkdownFile {
         var layout: [Slot] = []
         /// Keys whose value was a block list in the file.
         var blockListKeys: Set<String> = []
+        /// What the file had for each owned key. A key whose value is still the
+        /// one read is written as the lines it was read from, so its quoting
+        /// and layout (and a date in a format the app does not write) stay.
+        var originals: [String: Original] = [:]
 
         func value(for key: String) -> String? {
             frontmatter.first(where: { $0.0 == key })?.1
@@ -56,7 +67,7 @@ enum MarkdownFile {
             let line = lines[i]
             // The closing fence starts the line. An indented `---` is text
             // inside a multi-line value.
-            if line.first?.isWhitespace != true, line.trimmingCharacters(in: .whitespacesAndNewlines) == separator {
+            if isClosingFence(line) {
                 i += 1
                 closed = true
                 break
@@ -80,6 +91,7 @@ enum MarkdownFile {
         var frontmatter: [(String, String)] = []
         var layout: [Slot] = []
         var blockListKeys: Set<String> = []
+        var originals: [String: Original] = [:]
         var seenOwned: Set<String> = []
         for block in blocks {
             // Blank lines after a value are not part of it; each stays where it was.
@@ -88,12 +100,31 @@ enum MarkdownFile {
             while block.key != nil, body.count > 1, isBlank(body[body.count - 1]) {
                 trailing.insert(body.removeLast(), at: 0)
             }
-            if let key = block.key, ownedKeys.isEmpty || ownedKeys.contains(key) {
-                let entry = entry(from: body)
+            if let key = block.key, ownedKeys.isEmpty || ownedKeys.contains(key),
+               ownedKeys.isEmpty || !seenOwned.contains(key) {
+                // Comments inside the value are not the value: each stays as a
+                // line of its own after the key.
+                var kept = [body[0]]
+                var comments: [String] = []
+                for line in body.dropFirst() {
+                    if line.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("#") {
+                        comments.append(line)
+                    } else {
+                        kept.append(line)
+                    }
+                }
+                while kept.count > 1, isBlank(kept[kept.count - 1]) { kept.removeLast() }
+                let entry = entry(from: kept)
                 frontmatter.append((key, entry.value))
                 if entry.isBlockList { blockListKeys.insert(key) }
-                if !ownedKeys.isEmpty, seenOwned.insert(key).inserted { layout.append(.key(key)) }
+                if !ownedKeys.isEmpty {
+                    seenOwned.insert(key)
+                    originals[key] = Original(value: entry.value, raw: kept.joined(separator: "\n"), quoted: entry.quoted)
+                    layout.append(.key(key))
+                    for comment in comments { layout.append(.verbatim(comment)) }
+                }
             } else {
+                // Not the app's, or a repeat of a key it already has: kept as it is.
                 layout.append(.verbatim(body.joined(separator: "\n")))
             }
             for line in trailing { layout.append(.verbatim(line)) }
@@ -105,7 +136,7 @@ enum MarkdownFile {
         let body = lines[i...].joined(separator: "\n")
         return Document(
             frontmatter: frontmatter, body: body, layout: ownedKeys.isEmpty ? [] : layout,
-            blockListKeys: blockListKeys
+            blockListKeys: blockListKeys, originals: originals
         )
     }
 
@@ -118,11 +149,23 @@ enum MarkdownFile {
         var written: Set<String> = []
         func write(_ key: String, _ value: String) {
             written.insert(key)
+            let original = document.originals[key]
+            if let original, original.value == value {
+                out += original.raw + "\n"
+                return
+            }
             if blockListKeys.contains(key), let items = flowListItems(value), !items.isEmpty {
                 out += "\(key):\n" + items.map { "  - \(blockItem($0))\n" }.joined()
                 return
             }
-            let serialized = forceQuoteKeys.contains(key) ? forceQuote(value) : quoteIfNeeded(value)
+            let serialized: String
+            if forceQuoteKeys.contains(key) {
+                // A value the file wrote without quotes stays that way when it
+                // reads back the same, so a save does not touch every title.
+                serialized = original?.quoted == false && isPlainSafe(value) ? value : forceQuote(value)
+            } else {
+                serialized = quoteIfNeeded(value)
+            }
             out += "\(key): \(serialized)\n"
         }
         for slot in document.layout {
@@ -154,13 +197,49 @@ enum MarkdownFile {
 
     /// The key of a line that starts a new entry: it begins in the first column,
     /// is not a comment or a list item, and has a name before its first colon.
-    private static func topLevelKey(of line: String) -> String? {
+    static func topLevelKey(of line: String) -> String? {
         guard let first = line.first, !first.isWhitespace, first != "#",
               !(line.hasPrefix("-") && (line.count == 1 || line[line.index(after: line.startIndex)].isWhitespace)),
               let colon = line.firstIndex(of: ":")
         else { return nil }
-        let key = String(line[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
+        var key = String(line[..<colon]).trimmingCharacters(in: .whitespacesAndNewlines)
+        // A quoted key names the same key.
+        if key.count >= 2, let q = key.first, q == "\"" || q == "'", key.last == q {
+            key = String(key.dropFirst().dropLast())
+        }
         return key.isEmpty ? nil : key
+    }
+
+    /// True for the line that closes the frontmatter: it starts the line, so an
+    /// indented `---` is text inside a multi-line value.
+    static func isClosingFence(_ line: String) -> Bool {
+        line.first?.isWhitespace != true && line.trimmingCharacters(in: .whitespacesAndNewlines) == separator
+    }
+
+    /// `raw` with the first top-level `key:` line of its frontmatter replaced by
+    /// `key: value`, and nothing else touched. Nil when there is no such line.
+    static func replacingValue(ofKey key: String, in raw: String, with value: String) -> String? {
+        var lines = raw.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == separator else { return nil }
+        for index in lines.indices.dropFirst() {
+            let line = lines[index]
+            if isClosingFence(line) { return nil }
+            if topLevelKey(of: line) == key {
+                lines[index] = "\(key): \(value)" + (line.hasSuffix("\r") ? "\r" : "")
+                return lines.joined(separator: "\n")
+            }
+        }
+        return nil
+    }
+
+    /// A value that can be written without quotes and read back as it was.
+    private static func isPlainSafe(_ value: String) -> Bool {
+        guard let first = value.first, !value.first!.isWhitespace, !value.last!.isWhitespace else { return false }
+        if "\"'[]{}&*!|>%@`#-?:,".contains(first) { return false }
+        if value.contains(": ") || value.contains(" #") || value.hasSuffix(":") { return false }
+        if value.contains(where: { $0.isNewline || $0 == "\t" }) { return false }
+        if Double(value) != nil { return false }
+        return !["true", "false", "null", "~", "yes", "no", "on", "off"].contains(value.lowercased())
     }
 
     /// A line that belongs to the entry above it: indented, blank, or an item of
@@ -171,25 +250,26 @@ enum MarkdownFile {
         return first == "-" && (line.count == 1 || line[line.index(after: line.startIndex)].isWhitespace)
     }
 
-    private static func entry(from lines: [String]) -> (value: String, isBlockList: Bool) {
+    private static func entry(from lines: [String]) -> (value: String, isBlockList: Bool, quoted: Bool) {
         let first = lines[0]
         let colon = first.firstIndex(of: ":")!
         let rest = String(first[first.index(after: colon)...]).trimmingCharacters(in: .whitespacesAndNewlines)
         let more = lines.dropFirst()
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        if more.isEmpty { return (unquote(rest), false) }
+        let quoted = rest.first == "\"" || rest.first == "'"
+        if more.isEmpty { return (unquote(rest), false, quoted) }
 
         if rest.isEmpty, more.allSatisfy({ $0 == "-" || $0.hasPrefix("- ") }) {
             let items = more.map { unquote(String($0.dropFirst()).trimmingCharacters(in: .whitespaces)) }
-            return ("[" + items.joined(separator: ", ") + "]", true)
+            return ("[" + items.joined(separator: ", ") + "]", true, false)
         }
         // A block scalar's text is on the lines below its `|` or `>`.
         if rest.range(of: #"^[|>][+-]?[0-9]*$"#, options: .regularExpression) != nil {
-            return (more.joined(separator: rest.hasPrefix("|") ? "\n" : " "), false)
+            return (more.joined(separator: rest.hasPrefix("|") ? "\n" : " "), false, false)
         }
         // A value folded over several lines reads as one line.
-        return (unquote(([rest] + more).filter { !$0.isEmpty }.joined(separator: " ")), false)
+        return (unquote(([rest] + more).filter { !$0.isEmpty }.joined(separator: " ")), false, quoted)
     }
 
     private static func flowListItems(_ value: String) -> [String]? {

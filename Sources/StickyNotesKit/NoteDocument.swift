@@ -148,6 +148,8 @@ final class NoteDocument {
         self.clock = clock
         let snapshot = repository.snapshot(id: note.id, archived: false)
         persistedFingerprint = Self.fingerprint(of: snapshot, matching: note)
+        // A document that has seen the file has seen its properties too.
+        if persistedFingerprint != nil, let snapshot { buffer.preserved = snapshot.note.preserved }
         hasFile = snapshot != nil
     }
 

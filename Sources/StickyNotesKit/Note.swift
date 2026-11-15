@@ -108,6 +108,9 @@ struct PreservedFrontmatter: Equatable {
     var layout: [MarkdownFile.Slot] = []
     /// The file wrote `labels` as a block list, so it is written back that way.
     var labelsAsBlock = false
+    /// What the file had for each key the app owns, so a value the app did not
+    /// change is written as the file had it.
+    var originals: [String: MarkdownFile.Original] = [:]
 }
 
 struct Note: Codable, Identifiable {

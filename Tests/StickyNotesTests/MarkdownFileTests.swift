@@ -298,6 +298,77 @@ final class MarkdownFileUnknownKeyTests: XCTestCase {
         let raw = "---\r\nid: A\r\ntags:\r\n  - x\r\n---\r\n\r\nbody"
         let document = MarkdownFile.parse(raw, ownedKeys: owned)
         XCTAssertEqual(document.value(for: "id"), "A")
-        XCTAssertEqual(MarkdownFile.serialize(document), "---\nid: A\ntags:\r\n  - x\r\n---\n\nbody")
+        XCTAssertEqual(MarkdownFile.serialize(document), "---\nid: A\r\ntags:\r\n  - x\r\n---\n\nbody")
+    }
+}
+
+// MARK: - Owned keys and what the file wrote for them
+
+final class MarkdownFileOwnedKeyTests: XCTestCase {
+    private let owned: Set<String> = ["id", "title", "labels"]
+
+    private func rewrite(_ raw: String, _ edit: (inout MarkdownFile.Document) -> Void, quote: Set<String> = []) -> String {
+        var document = MarkdownFile.parse(raw, ownedKeys: owned)
+        edit(&document)
+        return MarkdownFile.serialize(document, forceQuoteKeys: quote, blockListKeys: document.blockListKeys)
+    }
+
+    private func set(_ key: String, _ value: String) -> (inout MarkdownFile.Document) -> Void {
+        { document in document.frontmatter = document.frontmatter.map { $0.0 == key ? (key, value) : $0 } }
+    }
+
+    func testAChangedOwnedValueThatSpannedSeveralLinesIsWrittenOnOneLine() {
+        let folded = "---\ntitle: \"a long\n  title\"\nid: A\n---\n\nb"
+        XCTAssertEqual(rewrite(folded, set("title", "new")), "---\ntitle: new\nid: A\n---\n\nb")
+
+        let literal = "---\ntitle: |\n  one\n  two\nid: A\n---\n\nb"
+        XCTAssertEqual(rewrite(literal, set("title", "new")), "---\ntitle: new\nid: A\n---\n\nb")
+
+        let list = "---\nlabels:\n- a\n- b\nid: A\n---\n\nb"
+        XCTAssertEqual(rewrite(list, set("labels", "[c]")), "---\nlabels:\n  - c\nid: A\n---\n\nb")
+        XCTAssertEqual(rewrite(list, set("labels", "[]")), "---\nlabels: []\nid: A\n---\n\nb")
+    }
+
+    func testAnUnchangedOwnedValueIsWrittenAsTheFileHadIt() {
+        let list = "---\nlabels:\n- a\n- b\ntitle: 'q'\ntitle2: x\nid: A\n---\n\nb"
+        XCTAssertEqual(rewrite(list, { _ in }, quote: ["title"]), list)
+    }
+
+    func testAnIndentedCommentAfterAnOwnedKeyIsKept() {
+        let raw = "---\ntitle: \"t\"\n  # about tags\nid: A\n---\n\nb"
+        XCTAssertEqual(rewrite(raw, set("title", "u")), "---\ntitle: u\n  # about tags\nid: A\n---\n\nb")
+        XCTAssertEqual(rewrite(raw, { _ in }), raw)
+    }
+
+    func testALaterDuplicateOfAnOwnedKeyIsKept() {
+        let raw = "---\ntitle: \"one\"\ntitle: \"two\"\nid: A\n---\n\nb"
+        let document = MarkdownFile.parse(raw, ownedKeys: owned)
+        XCTAssertEqual(document.value(for: "title"), "one")
+        XCTAssertEqual(MarkdownFile.serialize(document), raw)
+        XCTAssertEqual(rewrite(raw, set("title", "new")), "---\ntitle: new\ntitle: \"two\"\nid: A\n---\n\nb")
+    }
+
+    func testACommentBetweenItemsOfABlockListIsNotPartOfTheList() {
+        let raw = "---\nlabels:\n  - a\n  # c\n  - b\n---\n\nb"
+        let document = MarkdownFile.parse(raw, ownedKeys: owned)
+        XCTAssertEqual(document.value(for: "labels"), "[a, b]")
+        XCTAssertEqual(rewrite(raw, set("labels", "[a, b, c]")), "---\nlabels:\n  - a\n  - b\n  - c\n  # c\n---\n\nb")
+    }
+
+    func testAQuotedOwnedKeyIsTheOwnedKeyAndIsNotWrittenTwice() {
+        let raw = "---\n\"title\": T\nid: A\n---\n\nb"
+        let document = MarkdownFile.parse(raw, ownedKeys: owned)
+        XCTAssertEqual(document.value(for: "title"), "T")
+        XCTAssertEqual(MarkdownFile.serialize(document), raw)
+        XCTAssertEqual(rewrite(raw, set("title", "U")), "---\ntitle: U\nid: A\n---\n\nb")
+    }
+
+    func testOnlyATopLevelKeyIsReplaced() {
+        let raw = "---\nsource:\n  id: 123\nid: A\n---\n\nid: body"
+        XCTAssertEqual(
+            MarkdownFile.replacingValue(ofKey: "id", in: raw, with: "NEW"),
+            "---\nsource:\n  id: 123\nid: NEW\n---\n\nid: body"
+        )
+        XCTAssertNil(MarkdownFile.replacingValue(ofKey: "id", in: "---\nx: 1\n---\n\nid: body", with: "N"))
     }
 }
