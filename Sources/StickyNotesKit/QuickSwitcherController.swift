@@ -4,6 +4,7 @@ import KeyboardShortcuts
 /// Spotlight-style palette for jumping to any note — active or archived — by
 /// typing. The notes panel is a browser; this is the keyboard path for when you
 /// already know what you're looking for.
+@MainActor
 final class QuickSwitcherController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
 
     /// What the caller should do with the chosen note. Archived notes are

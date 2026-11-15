@@ -29,8 +29,17 @@ jobs:
       - name: Swift version
         run: swift --version
 
-      - name: Build
-        run: swift build --build-tests
+      # Strict concurrency is a warning in the Swift 5 language mode, so the
+      # build log is checked: any concurrency warning in the app's own code or
+      # tests fails the job. Dependencies are not checked.
+      - name: Build (strict concurrency)
+        run: |
+          set -o pipefail
+          swift build --build-tests -Xswiftc -strict-concurrency=complete 2>&1 | tee "$RUNNER_TEMP/build.log"
+          if grep -E '(Sources/StickyNotes(Kit)?|Tests/StickyNotesTests)/.*: warning: .*(Swift 6 language mode|actor-isolated|Sendable|nonisolated|preconcurrency|data races)' "$RUNNER_TEMP/build.log"; then
+            echo "Strict concurrency warnings found in the app or its tests." >&2
+            exit 1
+          fi
 
       - name: Test
         run: swift test --skip-build

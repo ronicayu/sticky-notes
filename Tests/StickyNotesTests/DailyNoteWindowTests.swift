@@ -20,7 +20,7 @@ import XCTest
 
     private let pattern = "Daily/{YYYY}-{MM}-{DD}.md"
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         isolated = IsolatedSettings()
         clock = ManualClock()
         scheduler = TestScheduler(clock: clock)
@@ -33,7 +33,7 @@ import XCTest
         settings.dailyTemplatePath = nil
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         controllers.forEach { $0.window?.close() }
         isolated.tearDown()
         try? FileManager.default.removeItem(at: vault)

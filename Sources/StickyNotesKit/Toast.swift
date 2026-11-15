@@ -50,6 +50,7 @@ struct Toast {
 /// Only one is ever on screen: a second action replaces the first, because a
 /// stack of undo offers is noise and only the most recent one is the thing
 /// the user is reacting to.
+@MainActor
 final class ToastController {
     private var panel: NSPanel?
     private var current: Toast?

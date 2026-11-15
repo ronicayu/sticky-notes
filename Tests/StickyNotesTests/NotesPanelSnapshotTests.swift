@@ -4,16 +4,16 @@ import XCTest
 
 /// Renders the notes panel offscreen so layout regressions in the new filter
 /// row, empty state, and result rows show up as more than a passing assertion.
-final class NotesPanelSnapshotTests: XCTestCase {
+@MainActor final class NotesPanelSnapshotTests: XCTestCase {
     private var root: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("NotesPanelSnapshot-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: root)
     }
 

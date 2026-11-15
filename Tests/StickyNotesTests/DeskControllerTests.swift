@@ -13,7 +13,7 @@ import XCTest
     private var desk: DeskController!
     private var originalTextSize: CGFloat = MarkdownStyler.baseFontSize
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         _ = NSApplication.shared
         originalTextSize = MarkdownStyler.baseFontSize
         root = FileManager.default.temporaryDirectory
@@ -25,7 +25,7 @@ import XCTest
         desk = makeDesk()
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         desk.windowControllers.values.forEach { $0.window?.close() }
         desk.dailyNote?.window?.close()
         desk = nil

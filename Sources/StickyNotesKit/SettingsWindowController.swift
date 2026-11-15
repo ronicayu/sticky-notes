@@ -9,6 +9,7 @@ import KeyboardShortcuts
 /// the iCloud prefetcher, etc.) belong to the `SettingsCoordinator`
 /// — this controller only mutates the `Settings` it is given and tells the
 /// coordinator what changed.
+@MainActor
 protocol SettingsCoordinator: AnyObject {
     func applyStorageMode(_ mode: SettingsWindowController.StorageMode)
     func applyDailyPattern(_ pattern: String?)
@@ -17,6 +18,7 @@ protocol SettingsCoordinator: AnyObject {
     func openTodaysDailyNote()
 }
 
+@MainActor
 final class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
 
     enum StorageMode: Equatable {
@@ -284,7 +286,7 @@ private final class GeneralPaneView: NSView {
         hint.font = NSFont.systemFont(ofSize: 10)
         hint.textColor = .tertiaryLabelColor
 
-        func refreshHint() {
+        let refreshHint: @MainActor @Sendable () -> Void = {
             let note = HotkeyAdvice.conflictNote(for: HotkeyAdvice.describe(name))
             hint.stringValue = note ?? ""
             hint.isHidden = note == nil
@@ -296,7 +298,10 @@ private final class GeneralPaneView: NSView {
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main
-        ) { _ in refreshHint() }
+        ) { _ in
+            // `queue: .main` makes this run on the main thread.
+            MainActor.assumeIsolated { refreshHint() }
+        }
 
         let stack = NSStackView(views: [row, hint])
         stack.orientation = .vertical

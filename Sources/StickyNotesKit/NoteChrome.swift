@@ -89,6 +89,7 @@ extension NSColor {
 
 // MARK: - Drag zone
 
+@MainActor
 protocol NoteDragZoneDelegate: AnyObject {
     func dragZoneDidDoubleClick()
     /// A click that didn't turn into a drag. Only sent while collapsed, where

@@ -7,7 +7,10 @@ import Foundation
 /// Mac A wouldn't appear on Mac B until you happened to touch the file.
 ///
 /// No-op when the storage root isn't inside iCloud Drive.
-final class ICloudPrefetcher {
+///
+/// `@unchecked Sendable`: used from the main thread only; its query reports
+/// on the main queue.
+final class ICloudPrefetcher: @unchecked Sendable {
     private var query: NSMetadataQuery?
     private let onMaterialized: () -> Void
 

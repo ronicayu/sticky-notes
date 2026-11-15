@@ -507,7 +507,7 @@ final class TrashTests: XCTestCase {
         XCTAssertEqual(store.trashURL.deletingLastPathComponent().path, root.path)
     }
 
-    func testTheTrashTabListsDeletedNotes() throws {
+    @MainActor func testTheTrashTabListsDeletedNotes() throws {
         let store = NoteStore(rootURL: root)
         let note = makeNote("deleted")
         store.save(note)
@@ -521,7 +521,7 @@ final class TrashTests: XCTestCase {
         XCTAssertEqual(panel.visibleTitles, ["deleted"])
     }
 
-    func testPuttingBackFromTheTrashTabReturnsTheNoteToArchive() throws {
+    @MainActor func testPuttingBackFromTheTrashTabReturnsTheNoteToArchive() throws {
         let store = NoteStore(rootURL: root)
         let note = makeNote("put back")
         store.save(note)

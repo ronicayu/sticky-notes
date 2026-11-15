@@ -11,6 +11,7 @@ extension NSAttributedString.Key {
     static let checkboxChecked = NSAttributedString.Key("checkboxChecked")
 }
 
+@MainActor
 protocol TodoTextViewDelegate: AnyObject {
     func textViewDidToggleCheckbox(at charIndex: Int)
 }
@@ -21,7 +22,7 @@ protocol TodoTextViewDelegate: AnyObject {
 final class TodoTextView: NSTextView {
     weak var todoDelegate: TodoTextViewDelegate?
 
-    static let leadingPaddingForCheckbox: CGFloat = 18
+    nonisolated static let leadingPaddingForCheckbox: CGFloat = 18
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)

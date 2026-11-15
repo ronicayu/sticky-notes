@@ -13,7 +13,9 @@ import KeyboardShortcuts
     private let storage: StorageCoordinator
     private let undo: UndoCenter
 
-    private var statusItem: NSStatusItem!
+    // `deinit` is not main-actor isolated, and it is the only code that reads
+    // this off the actor.
+    nonisolated(unsafe) private var statusItem: NSStatusItem!
     private var hideAllItem: NSMenuItem!
     private var dailyNoteItem: NSMenuItem!
     private var storageWarningItem: NSMenuItem!

@@ -4,17 +4,34 @@ import XCTest
 
 /// `NoteStore.save(_:expecting:)`, `snapshot(id:)` and the `Change` that
 /// `didChange` carries.
+/// Changes seen by a notification observer, which the compiler cannot prove
+/// runs on one thread.
+private final class ChangeLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var changes: [NoteStore.Change] = []
+
+    func append(_ change: NoteStore.Change) {
+        lock.lock(); defer { lock.unlock() }
+        changes.append(change)
+    }
+
+    var all: [NoteStore.Change] {
+        lock.lock(); defer { lock.unlock() }
+        return changes
+    }
+}
+
 @MainActor final class CompareAndSwapSaveTests: XCTestCase {
     private var root: URL!
     private var lockedDirectories: [URL] = []
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("CompareAndSwap-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         for url in lockedDirectories {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         }
@@ -43,13 +60,13 @@ import XCTest
     }
 
     private func changes(from store: NoteStore, during body: () -> Void) -> [NoteStore.Change] {
-        var seen: [NoteStore.Change] = []
+        let seen = ChangeLog()
         let token = NotificationCenter.default.addObserver(
             forName: NoteStore.didChange, object: store, queue: nil
         ) { seen.append(NoteStore.change(in: $0)) }
         body()
         NotificationCenter.default.removeObserver(token)
-        return seen
+        return seen.all
     }
 
     // MARK: - SaveResult

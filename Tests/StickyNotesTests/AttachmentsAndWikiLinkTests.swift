@@ -169,7 +169,7 @@ final class AttachmentsTests: XCTestCase {
     }
 }
 
-final class WikiLinkTests: XCTestCase {
+@MainActor final class WikiLinkTests: XCTestCase {
 
     private func note(title: String = "", content: String = "") -> Note {
         Note(

@@ -4,6 +4,7 @@ import KeyboardShortcuts
 /// Single panel that lists every sticky note (active + archived). Toggle with a
 /// segmented control. Active rows focus their on-desktop note window when
 /// clicked; archived rows can be restored or permanently deleted.
+@MainActor
 final class NotesPanelController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
 
     enum Mode: Int { case active = 0, archived = 1, trash = 2 }

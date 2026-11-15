@@ -17,7 +17,7 @@ import XCTest
     private var closed: [UUID] = []
     private var controllers: [NoteWindowController] = []
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("NoteWindowE2E-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -26,7 +26,7 @@ import XCTest
         store = NoteStore(rootURL: root, clock: clock)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         controllers.forEach { $0.window?.close() }
         try? FileManager.default.removeItem(at: root)
     }

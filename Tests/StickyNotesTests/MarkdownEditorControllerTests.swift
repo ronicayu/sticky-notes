@@ -10,7 +10,7 @@ import XCTest
     private var store: NoteStore!
     private var clock: ManualClock!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MarkdownEditor-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -18,7 +18,7 @@ import XCTest
         clock = ManualClock()
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: root)
     }
 

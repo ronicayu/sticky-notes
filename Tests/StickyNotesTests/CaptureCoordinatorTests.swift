@@ -12,7 +12,7 @@ import XCTest
     private var desk: DeskController!
     private var capture: CaptureCoordinator!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         _ = NSApplication.shared
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("Capture-\(UUID().uuidString)", isDirectory: true)
@@ -30,7 +30,7 @@ import XCTest
         capture = CaptureCoordinator(desk: desk, store: store)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         desk.windowControllers.values.forEach { $0.window?.close() }
         desk.dailyNote?.window?.close()
         isolated.tearDown()

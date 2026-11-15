@@ -5,18 +5,18 @@ enum NoteColor: String, Codable, CaseIterable {
     case yellow, pink, orange, green, blue, purple, gray
 
     /// Body / paper color — bright, clean, high-luminosity pastels (TickTick-style).
-    var bodyHex: String {
+    @MainActor var bodyHex: String {
         Appearance.isDark ? darkBodyHex : lightBodyHex
     }
 
     /// Header strip — same hue, slightly more saturated so the title bar reads
     /// like the top of a real paper sticky.
-    var headerHex: String {
+    @MainActor var headerHex: String {
         Appearance.isDark ? darkHeaderHex : lightHeaderHex
     }
 
     /// Text tone that stays legible on this note's paper.
-    var textHex: String {
+    @MainActor var textHex: String {
         Appearance.isDark ? "#ECECEE" : "#1A1A1F"
     }
 

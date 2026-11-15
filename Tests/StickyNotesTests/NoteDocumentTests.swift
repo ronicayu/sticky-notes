@@ -75,8 +75,9 @@ final class NoteDocumentTests: XCTestCase {
     /// revoked permission would; the folder is made writable again on teardown.
     private func failWrites() throws {
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: store.activeURL.path)
-        addTeardownBlock { [store = store!] in
-            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: store.activeURL.path)
+        let activePath = store.activeURL.path
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: activePath)
         }
     }
 

@@ -5,7 +5,7 @@ import XCTest
 @MainActor final class UndoCenterTests: XCTestCase {
     private let clock = ManualClock()
 
-    override func setUp() {
+    override func setUp() async throws {
         _ = NSApplication.shared
     }
 
@@ -57,14 +57,14 @@ import XCTest
     private var clock: ManualClock!
     private var recovery: RecoveryFiles!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         isolated = IsolatedSettings()
         clock = ManualClock()
         store = NoteStore(rootURL: isolated.localRoot.appendingPathComponent("notes"))
         recovery = RecoveryFiles(settings: isolated.settings, store: store, clock: clock)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         isolated.tearDown()
     }
 

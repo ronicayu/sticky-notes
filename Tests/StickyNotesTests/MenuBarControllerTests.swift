@@ -13,7 +13,7 @@ import XCTest
     private var menuBar: MenuBarController!
     private var savedMainMenu: NSMenu?
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         _ = NSApplication.shared
         savedMainMenu = NSApp.mainMenu
         root = FileManager.default.temporaryDirectory
@@ -41,7 +41,7 @@ import XCTest
         menuBar.install()
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         desk.windowControllers.values.forEach { $0.window?.close() }
         menuBar = nil
         NSApp.mainMenu = savedMainMenu

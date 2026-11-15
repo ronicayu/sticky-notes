@@ -109,15 +109,15 @@ final class NoteTests: XCTestCase {
 
     // MARK: - Colors
 
-    func testEveryColorHasDistinctBodyAndHeaderHexValues() {
-        let bodies = NoteColor.allCases.map(\.bodyHex)
+    @MainActor func testEveryColorHasDistinctBodyAndHeaderHexValues() {
+        let bodies = NoteColor.allCases.map { $0.bodyHex }
         XCTAssertEqual(Set(bodies).count, bodies.count, "two colors share a body hex")
 
-        let headers = NoteColor.allCases.map(\.headerHex)
+        let headers = NoteColor.allCases.map { $0.headerHex }
         XCTAssertEqual(Set(headers).count, headers.count, "two colors share a header hex")
     }
 
-    func testEveryColorHexIsWellFormed() {
+    @MainActor func testEveryColorHexIsWellFormed() {
         for color in NoteColor.allCases {
             for hex in [color.bodyHex, color.headerHex] {
                 XCTAssertEqual(hex.count, 7, "\(color) hex \(hex) is not #RRGGBB")

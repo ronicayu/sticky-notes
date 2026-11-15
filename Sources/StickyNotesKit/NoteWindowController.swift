@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate, NoteDragZoneDelegate {
     /// The note's text, labels and file. The window draws it and forwards
     /// every change to it; none of the save rules live here.

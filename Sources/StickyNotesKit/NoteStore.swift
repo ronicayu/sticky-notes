@@ -65,7 +65,8 @@ struct MigrationReport {
 /// In memory only, so after a relaunch everything merges.
 enum WriteLineage {
     private static let lock = NSLock()
-    private static var hashes: [String: [String]] = [:]
+    // Every access holds `lock`.
+    nonisolated(unsafe) private static var hashes: [String: [String]] = [:]
     private static let limit = 1000
 
     static func record(_ hash: String, for key: String) {

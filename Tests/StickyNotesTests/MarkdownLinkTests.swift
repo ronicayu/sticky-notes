@@ -2,7 +2,7 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-final class MarkdownLinkTests: XCTestCase {
+@MainActor final class MarkdownLinkTests: XCTestCase {
 
     private func styled(_ source: String) -> NSTextStorage {
         let storage = NSTextStorage(string: source)

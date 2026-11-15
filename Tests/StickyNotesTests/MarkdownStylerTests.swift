@@ -2,7 +2,7 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-final class MarkdownStylerTests: XCTestCase {
+@MainActor final class MarkdownStylerTests: XCTestCase {
 
     // MARK: - Helpers
 

@@ -15,7 +15,7 @@ import XCTest
     private var clock: ManualClock!
     private var delegate: AppDelegate?
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         _ = NSApplication.shared
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppDelegateLaunch-\(UUID().uuidString)", isDirectory: true)
@@ -25,7 +25,7 @@ import XCTest
         clock = ManualClock()
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         delegate?.desk.windowControllers.values.forEach { $0.window?.close() }
         delegate = nil
         isolated.tearDown()

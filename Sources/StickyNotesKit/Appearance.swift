@@ -6,6 +6,7 @@ import AppKit
 /// Note windows are borderless and paint their own paper color, so AppKit's
 /// automatic appearance handling doesn't reach them — every color has to be
 /// re-derived by hand when the system flips.
+@MainActor
 enum Appearance {
     /// Posted after the system appearance changes, once `isDark` already
     /// reflects the new value.

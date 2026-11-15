@@ -2,16 +2,16 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-final class NotesPanelTests: XCTestCase {
+@MainActor final class NotesPanelTests: XCTestCase {
     private var root: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("NotesPanelTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: root)
     }
 

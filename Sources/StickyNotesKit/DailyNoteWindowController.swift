@@ -5,6 +5,7 @@ import AppKit
 /// injection — so Obsidian and other plugins remain authoritative for
 /// formatting. Window chrome (position / size / color) is persisted to
 /// `<vault>/StickyNotes/_daily.json` via `DailyNote.saveState`.
+@MainActor
 final class DailyNoteWindowController: NSWindowController, NSWindowDelegate, NoteDragZoneDelegate {
     private let settings: Settings
     private let clock: AppClock

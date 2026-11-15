@@ -2,7 +2,7 @@ import AppKit
 import XCTest
 @testable import StickyNotesKit
 
-final class NoteColorAppearanceTests: XCTestCase {
+@MainActor final class NoteColorAppearanceTests: XCTestCase {
 
     /// Chrome ink used to be a fixed black, which is invisible on the dark
     /// papers — the buttons, the footer date and the label chips all vanished.

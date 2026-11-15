@@ -28,6 +28,7 @@ extension MarkdownStyler {
 /// Parsing is done by Apple's `swift-markdown` (CommonMark + GFM AST). The
 /// regex-based approach this replaced mis-handled nested emphasis (`***x***`),
 /// escaped markers (`\*x\*`), and markers inside code spans.
+@MainActor
 enum MarkdownStyler {
     /// Body text size. Follows the user's ⌘+ / ⌘- choice; heading sizes and
     /// the code font are derived from it so the whole note scales together.
@@ -332,7 +333,10 @@ private struct LineOffsetTable {
 /// from the source line because their AST `range` includes child paragraphs
 /// that we don't want to repaint. Inline nodes (Strong, Emphasis, Strikethrough,
 /// InlineCode) get their full marker-and-content range from the AST.
-private struct StylingVisitor: MarkupWalker {
+// `@preconcurrency`: `MarkupWalker` is not main-actor aware, but styling only
+// ever runs on the main thread.
+@MainActor
+private struct StylingVisitor: @preconcurrency MarkupWalker {
     let storage: NSTextStorage
     let source: NSString
     let table: LineOffsetTable

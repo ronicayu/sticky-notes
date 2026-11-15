@@ -4,16 +4,16 @@ import XCTest
 /// Storage failures used to be swallowed by `try?`, so a full disk or a
 /// revoked vault permission looked exactly like a successful save. These
 /// tests drive real write failures by making the notes directory read-only.
-final class NoteStoreHealthTests: XCTestCase {
+@MainActor final class NoteStoreHealthTests: XCTestCase {
     private var root: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("StickyNotesHealthTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         // Restore write permission so cleanup can remove the tree.
         if let root = root {
             try? setWritable(true, at: root.appendingPathComponent("notes", isDirectory: true))

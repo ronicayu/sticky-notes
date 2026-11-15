@@ -13,7 +13,7 @@ import XCTest
     private var desk: DeskController!
     private var storage: StorageCoordinator!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         _ = NSApplication.shared
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("Storage-\(UUID().uuidString)", isDirectory: true)
@@ -31,7 +31,7 @@ import XCTest
         storage = StorageCoordinator(store: store, settings: isolated.settings, desk: desk)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         desk.dailyNote?.window?.close()
         isolated.tearDown()
         try? FileManager.default.removeItem(at: root)

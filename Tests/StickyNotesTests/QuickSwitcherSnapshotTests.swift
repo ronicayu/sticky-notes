@@ -10,16 +10,16 @@ import XCTest
 /// is deliberately not asserted: whether text rasterizes offscreen depends on
 /// the window server, which differs between a developer's machine and a CI
 /// runner, and a flaky pixel heuristic is worse than no assertion.
-final class QuickSwitcherSnapshotTests: XCTestCase {
+@MainActor final class QuickSwitcherSnapshotTests: XCTestCase {
     private var root: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("QuickSwitcherSnapshot-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? FileManager.default.removeItem(at: root)
     }
 

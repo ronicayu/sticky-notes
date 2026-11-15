@@ -6,7 +6,11 @@ import CoreServices
 /// queue. Unlike a directory-level `DispatchSourceFileSystemObject`, this
 /// fires when an external editor (Obsidian, an iCloud sync agent, etc.)
 /// rewrites a `.md` inside the watched tree.
-final class FileWatcher {
+///
+/// `@unchecked Sendable`: it is used from the main thread only, and events
+/// arrive on the main queue; the compiler cannot see that, and owners call
+/// `stop()` from `deinit`.
+final class FileWatcher: @unchecked Sendable {
     private var stream: FSEventStreamRef?
     private var pending = false
     private let debounce: TimeInterval
