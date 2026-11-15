@@ -19,6 +19,8 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     /// Called when closing was refused because the text could not be saved.
     /// The argument runs the close again.
     var onCloseRefused: ((_ retry: @escaping () -> Void) -> Void)?
+    /// Called when the note has just been collapsed.
+    var onCollapsed: (() -> Void)?
     /// Called when a label was removed with its chip, with what puts it back.
     var onLabelRemoved: ((_ label: String, _ restore: @escaping () -> Void) -> Void)?
     /// Called when the note left the active folder under typed text, and the text
@@ -512,6 +514,15 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
             noteDocument.adjust(save: false) { $0.width = width; $0.height = height }
         }
         layoutStore.set(geometry, for: note.id)
+    }
+
+    /// Replace part of the body as the person's own edit: it goes through the
+    /// text view, so it is undoable, restyled and saved like typing.
+    func replaceBody(range: NSRange, with text: String) {
+        guard NSMaxRange(range) <= textView.textStorage?.length ?? 0,
+              textView.shouldChangeText(in: range, replacementString: text) else { return }
+        textView.textStorage?.replaceCharacters(in: range, with: text)
+        textView.didChangeText()
     }
 
     func focusEditor() {
@@ -1058,6 +1069,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         updateButtonAccessibility()
         updateChromeVisibility()
         updateAlpha()
+        if geometry.collapsed { onCollapsed?() }
     }
 
     // MARK: - External change sync

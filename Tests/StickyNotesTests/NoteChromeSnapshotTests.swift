@@ -26,6 +26,17 @@ import XCTest
         try? FileManager.default.removeItem(at: root)
     }
 
+    private func save(_ view: NSView, as name: String) throws {
+        view.layoutSubtreeIfNeeded()
+        let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: rep)
+        if let dir = ProcessInfo.processInfo.environment["SNAPSHOT_DIR"],
+           let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+        }
+        XCTAssertGreaterThan(rep.pixelsWide, 0)
+    }
+
     private func render(dark: Bool, collapsed: Bool, to name: String) throws {
         NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         var note = Note.makeNew(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
@@ -59,5 +70,23 @@ import XCTest
 
     func testACollapsedNoteRendersItsTitleBar() throws {
         try render(dark: false, collapsed: true, to: "note-collapsed-light.png")
+    }
+
+    func testTheWelcomeNoteWithAllFourTasksDone() throws {
+        NSApp.appearance = NSAppearance(named: .aqua)
+        let suite = "ChromeSnapshot-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let welcome = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))
+        let controller = NoteWindowController(
+            note: welcome, store: store,
+            layout: DeviceLayoutStore(url: root.appendingPathComponent("layout-welcome.json"), scheduler: TestScheduler()),
+            placing: { _ in NSRect(x: 0, y: 0, width: 320, height: 340) }, onClosed: { _ in }
+        )
+        controllers.append(controller)
+        let checklist = WelcomeChecklist(defaults: defaults, windowFor: { _ in controller })
+        WelcomeNote.Step.allCases.forEach(checklist.did)
+
+        try save(try XCTUnwrap(controller.window?.contentView), as: "welcome-done.png")
     }
 }

@@ -49,6 +49,18 @@ final class WelcomeNoteTests: XCTestCase {
         XCTAssertEqual(store.loadActive().count, 1, "the note should be saved, not just returned")
     }
 
+    func testTheWelcomeNoteIdIsKeptForItsChecklistOnlyWhenOneWasMade() throws {
+        let note = try XCTUnwrap(WelcomeNote.makeIfNeeded(store: makeStore(), defaults: defaults))
+        XCTAssertEqual(defaults.string(forKey: WelcomeNote.noteIDKey), note.id.uuidString)
+
+        let other = try XCTUnwrap(UserDefaults(suiteName: suiteName + "-other"))
+        defer { other.removePersistentDomain(forName: suiteName + "-other") }
+        let store = makeStore()
+        store.save(makeNote())
+        XCTAssertNil(WelcomeNote.makeIfNeeded(store: store, defaults: other))
+        XCTAssertNil(other.string(forKey: WelcomeNote.noteIDKey))
+    }
+
     func testTheWelcomeNoteIsOnlyEverCreatedOnce() {
         let store = makeStore()
         XCTAssertNotNil(WelcomeNote.makeIfNeeded(store: store, defaults: defaults))

@@ -16,6 +16,10 @@ import AppKit
 
     private(set) var windowControllers: [UUID: NoteWindowController] = [:]
     private(set) var notesHidden = false
+    /// The welcome note's checklist, ticked as the person tries what it asks.
+    private(set) lazy var welcome = WelcomeChecklist(
+        defaults: settings.defaults, windowFor: { [weak self] in self?.windowControllers[$0] }
+    )
     /// Where the menu-bar icon is on screen, when it has one. An archived note
     /// fades toward it.
     var menuBarIconFrame: (() -> NSRect?)?
@@ -190,6 +194,7 @@ import AppKit
         }
         controller.motionDuration = { [weak self] length in self?.motionDuration(length) ?? 0 }
         controller.archiveDestination = { [weak self] in self?.menuBarIconFrame?() }
+        controller.onCollapsed = { [weak self] in self?.welcome.did(.collapse) }
         controller.onLabelRemoved = { [weak self] label, restore in
             self?.undo.offerUndoForLabelRemoval(label, restore: restore)
         }
@@ -271,6 +276,7 @@ import AppKit
             return
         }
         makeNote()
+        welcome.did(.newNote)
     }
 
     /// Create, save, and present a note. Everything that captures a note —
@@ -408,6 +414,7 @@ import AppKit
         applyVisibility()
 
         guard hiding else { undo.dismiss(); return }
+        welcome.did(.hideLabel)
         undo.offerUndoForHiding(count: affected, label: label) { [weak self] in
             guard let self = self else { return }
             var current = self.settings.hiddenLabels
@@ -558,6 +565,7 @@ import AppKit
             return
         }
         showQuickSwitcher()
+        welcome.did(.findNote)
     }
 
     /// Open the palette, optionally with a query already typed.
