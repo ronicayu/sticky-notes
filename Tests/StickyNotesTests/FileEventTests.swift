@@ -8,6 +8,14 @@ private final class ChangeLog: @unchecked Sendable {
     func append(_ change: NoteStore.Change) { changes.append(change) }
 }
 
+/// Wait for `condition`, up to `timeout` seconds, letting the main run loop turn:
+/// what happens off the main thread is reported back through it. Load on the
+/// machine makes this slower, never wrong.
+@MainActor private func waitUntil(_ timeout: TimeInterval = 20, _ condition: () -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition(), Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+}
+
 private final class ReadLog: @unchecked Sendable {
     private let lock = NSLock()
     private var all: [(String, Bool)] = []
@@ -27,6 +35,9 @@ private final class Tally: @unchecked Sendable {
         total += 1
         if !Thread.isMainThread { offMain += 1 }
     }
+    private var done = 0
+    func finish() { lock.lock(); defer { lock.unlock() }; done += 1 }
+    var finished: Int { lock.lock(); defer { lock.unlock() }; return done }
     var count: Int { lock.lock(); defer { lock.unlock() }; return total }
     var countOffMain: Int { lock.lock(); defer { lock.unlock() }; return offMain }
 }
@@ -111,22 +122,28 @@ final class FileWatcherEventTests: XCTestCase {
 
     func testOurOwnAtomicWriteIsNotReportedAndAnotherProcessesWriteIs() async throws {
         var batches: [FileWatcher.Events] = []
-        let outside = expectation(description: "the other process's write was reported")
+        var heardTheirs = false
         let ours = folder.appendingPathComponent("ours.md")
         let theirs = folder.appendingPathComponent("theirs.md")
         let watcher = FileWatcher(debounce: 0.05) { events in
             batches.append(events)
-            if events.changed.contains(where: { $0.hasSuffix("theirs.md") }) { outside.fulfill() }
+            if events.changed.contains(where: { $0.hasSuffix("theirs.md") }) { heardTheirs = true }
         }
         self.watcher = watcher
         watcher.watch([folder])
-        // The stream starts asynchronously; events from before it runs are not its to report.
-        try await Task.sleep(nanoseconds: 300_000_000)
 
-        try Data("ours".utf8).write(to: ours, options: .atomic)
-        try await Task.sleep(nanoseconds: 400_000_000)
-        try writeFromAnotherProcess("theirs", to: theirs)
-        await fulfillment(of: [outside], timeout: 10)
+        // The stream starts asynchronously and events from before it runs are not its
+        // to report, so both writes are repeated until the other process's is heard.
+        var round = 0
+        let deadline = Date().addingTimeInterval(30)
+        while !heardTheirs, Date() < deadline {
+            round += 1
+            try Data("ours \(round)".utf8).write(to: ours, options: .atomic)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            try writeFromAnotherProcess("theirs \(round)", to: theirs)
+            try await waitUntil(1) { heardTheirs }
+        }
+        XCTAssertTrue(heardTheirs, "the other process's write was never reported")
 
         let reported = batches.flatMap { $0.changed.union($0.metadataOnly) }
         XCTAssertFalse(reported.contains { $0.contains("ours.md") }, "our own write came back as an event: \(reported)")
@@ -140,17 +157,22 @@ final class FileWatcherEventTests: XCTestCase {
             .appendingPathComponent("OwnWriteWatch-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let reported = expectation(description: "the unconfirmed own write was reported")
+        var reported = false
         let watcher = FileWatcher(debounce: 0.05, confirmsOwnWrite: { _ in false }) { events in
-            if events.changed.contains(where: { $0.hasSuffix("ours.md") }) { reported.fulfill() }
+            if events.changed.contains(where: { $0.hasSuffix("ours.md") }) { reported = true }
         }
         defer { watcher.stop() }
         watcher.watch([folder])
-        try await Task.sleep(nanoseconds: 300_000_000)
 
-        try Data("ours".utf8).write(to: folder.appendingPathComponent("ours.md"), options: .atomic)
-
-        await fulfillment(of: [reported], timeout: 10)
+        // Repeated, since a write before the stream is running is not reported.
+        var round = 0
+        let deadline = Date().addingTimeInterval(30)
+        while !reported, Date() < deadline {
+            round += 1
+            try Data("ours \(round)".utf8).write(to: folder.appendingPathComponent("ours.md"), options: .atomic)
+            try await waitUntil(1) { reported }
+        }
+        XCTAssertTrue(reported, "the unconfirmed own write was never reported")
     }
 }
 
@@ -378,7 +400,7 @@ final class FileWatcherEventTests: XCTestCase {
             dispatchPrecondition(condition: .notOnQueue(.main))
             asked.record()
             // A busy daemon: the main thread must not be the one that waits.
-            Thread.sleep(forTimeInterval: 0.4)
+            Thread.sleep(forTimeInterval: 2)
             return [version]
         }
         store.otherVersionsRemover = { _ in }
@@ -396,19 +418,15 @@ final class FileWatcherEventTests: XCTestCase {
         store.handleFileSystemEvent(.init(changed: [url.path]))
         let returned = CFAbsoluteTimeGetCurrent() - began
 
-        XCTAssertLessThan(returned, 0.2, "the main thread waited for the version query")
-        await fulfillment(of: [merged], timeout: 10)
+        XCTAssertLessThan(returned, 1, "the main thread waited for the version query")
+        await fulfillment(of: [merged], timeout: 30)
+        // The second question, before the other versions are removed, comes after the merge.
+        try await waitUntil { asked.count >= 2 }
         XCTAssertEqual(asked.count, 2, "the sweep's question, and the one before the other versions are removed")
         XCTAssertEqual(asked.countOffMain, 2)
         let versionReads = reads.entries.filter { $0.0 == URL(fileURLWithPath: version.url.path).lastPathComponent }
         XCTAssertEqual(versionReads.map(\.1), [false], "the version file was read on the main thread: \(reads.entries)")
         XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("only in the version"))
-    }
-
-    /// Wait on the main run loop, which the off-main queue reports back to.
-    private func waitUntil(_ timeout: TimeInterval = 8, _ condition: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while !condition(), Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
     }
 
     func testAFileReportedAgainWhileItsQuestionIsPendingIsAskedOnceMoreNotOnEveryReport() async throws {
@@ -419,12 +437,14 @@ final class FileWatcherEventTests: XCTestCase {
         store.conflictVersionsProvider = { _ in
             asked.record()
             Thread.sleep(forTimeInterval: 0.3)
+            asked.finish()
             return []
         }
         store.dataless.readData = { try Data(contentsOf: $0) }
 
         for _ in 0..<5 { store.handleFileSystemEvent(.init(changed: [url.path])) }
-        try await waitUntil { asked.count >= 2 }
+        try await waitUntil { asked.finished >= 2 }
+        // Anything wrongly queued behind them would be asked within this time.
         try await Task.sleep(nanoseconds: 900_000_000)
         XCTAssertEqual(asked.count, 2, "one question in flight, one more for the later reports, no more")
 
@@ -455,19 +475,19 @@ final class FileWatcherEventTests: XCTestCase {
         store.conflictVersionsProvider = { _ in asked.record(); return [] }
         store.dataless.readData = { try Data(contentsOf: $0) }
 
+        // The folder holds one note, so a sweep asks once.
         store.handleFileSystemEvent(.init(everything: true))
         try await waitUntil { asked.count >= 1 }
-        try await Task.sleep(nanoseconds: 300_000_000)
-        let first = asked.count
+        XCTAssertEqual(asked.count, 1)
         store.handleFileSystemEvent(.init(everything: true))
-        try await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertGreaterThan(first, 0)
-        XCTAssertEqual(asked.count, first, "swept again inside the interval")
+        // Anything wrongly swept again would be asked within this time.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(asked.count, 1, "swept again inside the interval")
 
         clock.advance(by: 31)
         store.handleFileSystemEvent(.init(everything: true))
-        try await waitUntil { asked.count >= first * 2 }
-        XCTAssertEqual(asked.count, first * 2)
+        try await waitUntil { asked.count >= 2 }
+        XCTAssertEqual(asked.count, 2)
     }
 }
 
@@ -623,7 +643,7 @@ final class FileWatcherEventTests: XCTestCase {
         document.conflictVersionsProvider = { _ in
             dispatchPrecondition(condition: .notOnQueue(.main))
             asked.record()
-            Thread.sleep(forTimeInterval: 0.4)
+            Thread.sleep(forTimeInterval: 2)
             return []
         }
 
@@ -632,9 +652,9 @@ final class FileWatcherEventTests: XCTestCase {
         document.storeDidChange()
         let returned = CFAbsoluteTimeGetCurrent() - began
 
-        XCTAssertLessThan(returned, 0.2, "the main thread waited for the conflict query")
+        XCTAssertLessThan(returned, 1, "the main thread waited for the conflict query")
         XCTAssertEqual(document.body, "text")
-        try await Task.sleep(nanoseconds: 700_000_000)
+        try await waitUntil { asked.count >= 1 }
         XCTAssertEqual(asked.count, 1)
         XCTAssertEqual(asked.countOffMain, 1)
     }
