@@ -83,8 +83,9 @@ final class SlashReplacement: NSObject {
         textView.insertionPointColor = MarkdownStyler.bodyTextColor
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
+        textView.usesFindBar = !options.quietSubstitutions
+        textView.isIncrementalSearchingEnabled = !options.quietSubstitutions
         if options.quietSubstitutions {
-            textView.usesFindBar = false
             textView.smartInsertDeleteEnabled = false
             textView.isAutomaticTextReplacementEnabled = false
             textView.isAutomaticSpellingCorrectionEnabled = false

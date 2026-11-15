@@ -16,6 +16,7 @@ Built with AppKit. Two dependencies: [`KeyboardShortcuts`](https://github.com/si
 - **Live Markdown** — `# heading`, `**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `- list`. Markers hide automatically when the cursor is not inside the element, like Obsidian / TickTick live preview.
 - **Links** — bare URLs and `[text](url)` render as links. `⌘`-click one to open it, or click it in a note that isn't focused. Pasting a URL over selected text turns the selection into a markdown link.
 - **Editor shortcuts** — `⌘B` / `⌘I` / `⌘E` wrap the selection in bold, italic, or code (press again to unwrap). `⌘↩` turns the current line into a task, then checks and unchecks it. `⇥` / `⇧⇥` indent and outdent list items. `↩` continues a list and exits it on an empty item.
+- **Note menu shortcuts** — in the focused note: `⌘1`–`⌘7` pick the colour, `⌘M` collapses or expands, `⌘W` archives (with an undo toast), `⌥⌘F` toggles float on top, `⌘F` finds in the note, `⌥⌘L` opens the label list.
 - **Text size** — `⌘+` / `⌘-` / `⌘0` resize body text across every note (11–18pt), remembered between launches.
 - **Task progress** — notes with checkboxes show a `2/5` count in the notes panel and quick switcher.
 - **Collapse / expand** — double-click a note's header to collapse it into a slim title bar; double-click again to expand.

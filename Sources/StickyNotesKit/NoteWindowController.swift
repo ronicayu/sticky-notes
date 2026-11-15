@@ -568,8 +568,19 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
 
     // MARK: - Actions
 
-    @objc private func toggleCollapse() {
+    @objc func toggleCollapse() {
         performToggleCollapse()
+    }
+
+    var isCollapsed: Bool { geometry.collapsed }
+
+    /// Open the find bar over the body, for ⌘F. A collapsed note shows no body.
+    func showFindBar() {
+        guard !geometry.collapsed, let window = window else { return }
+        window.makeFirstResponder(textView)
+        let show = NSMenuItem()
+        show.tag = NSTextFinder.Action.showFindInterface.rawValue
+        textView.performTextFinderAction(show)
     }
 
     @objc func closeNote() {
@@ -636,6 +647,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     @objc private func pickFloatLevel(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let level = NoteFloatLevel(rawValue: raw) else { return }
+        setFloatLevel(level)
+    }
+
+    var floatLevel: NoteFloatLevel { note.floatLevel }
+
+    func setFloatLevel(_ level: NoteFloatLevel) {
         noteDocument.edit { $0.floatLevel = level }
         applyFloatLevel()
     }
@@ -656,6 +673,12 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
     @objc private func pickColor(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let color = NoteColor(rawValue: raw) else { return }
+        setColor(color)
+    }
+
+    var color: NoteColor { note.color }
+
+    func setColor(_ color: NoteColor) {
         noteDocument.edit { $0.color = color }
         applyAppearanceColors()
     }
@@ -689,7 +712,7 @@ final class NoteWindowController: NSWindowController, NSWindowDelegate, NSTextFi
         editor.applyTextSize()
     }
 
-    private static func colorSwatch(for color: NoteColor) -> NSImage {
+    static func colorSwatch(for color: NoteColor) -> NSImage {
         return NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
             let path = NSBezierPath(
                 roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),

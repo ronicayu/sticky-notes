@@ -1,4 +1,5 @@
 import AppKit
+import KeyboardShortcuts
 import XCTest
 @testable import StickyNotesKit
 
@@ -73,6 +74,38 @@ import XCTest
                 }
             }
         }
+    }
+
+    func testTheMainMenuHasANoteMenuThatActsOnTheKeyNote() throws {
+        let note = try XCTUnwrap(NSApp.mainMenu?.items.first { $0.submenu?.title == "Note" }?.submenu)
+        XCTAssertEqual(note.items.first { $0.title == "Archive" }?.keyEquivalent, "w")
+
+        // No window is key here, so the menu has nothing to act on.
+        note.update()
+        XCTAssertTrue(note.items.filter { !$0.isSeparatorItem }.allSatisfy { !$0.isEnabled })
+    }
+
+    /// A shortcut used twice in the main menu would only ever run the first, and
+    /// one that a global hotkey or the text editor also answers would run twice
+    /// or never.
+    func testNoShortcutIsUsedTwiceOrCollidesWithAGlobalHotkeyOrTheEditor() throws {
+        func chord(_ item: NSMenuItem) -> String {
+            "\(item.keyEquivalent.lowercased())+\(item.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask).rawValue)"
+        }
+        let chorded = allItems(in: try XCTUnwrap(NSApp.mainMenu)).filter { !$0.keyEquivalent.isEmpty }
+        let chords = chorded.map(chord)
+        XCTAssertEqual(Set(chords).count, chords.count,
+                       "duplicate chords: \(chorded.map { "\($0.title) \(chord($0))" })")
+
+        let globals: [KeyboardShortcuts.Name] = [.newNote, .notesPanel, .hideAll, .quickSwitcher, .newFromClipboard]
+        for name in globals {
+            let probe = NSMenuItem()
+            probe.setShortcut(for: name)
+            XCTAssertFalse(chords.contains(chord(probe)), "a menu item uses the global chord \(chord(probe))")
+        }
+
+        let editor = ["b", "i", "e", "\r"].map { "\($0)+\(NSEvent.ModifierFlags.command.rawValue)" }
+        XCTAssertTrue(Set(chords).isDisjoint(with: editor), "a menu item takes a chord the note editor answers")
     }
 
     func testTheStatusMenuHasTheCaptureAndManagementRows() throws {

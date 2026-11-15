@@ -12,6 +12,8 @@ import KeyboardShortcuts
     private let capture: CaptureCoordinator
     private let storage: StorageCoordinator
     private let undo: UndoCenter
+    /// Holds the Note menu's actions: its items do not retain their target.
+    private let noteMenu: NoteMenu
 
     // `deinit` is not main-actor isolated, and it is the only code that reads
     // this off the actor.
@@ -35,6 +37,7 @@ import KeyboardShortcuts
         self.capture = capture
         self.storage = storage
         self.undo = undo
+        self.noteMenu = NoteMenu(keyNote: { [weak desk] in desk?.focusedController() })
         super.init()
     }
 
@@ -66,7 +69,8 @@ import KeyboardShortcuts
     /// Even though we're an accessory (no Dock icon, no system menu bar),
     /// installing a main menu lets standard key equivalents like ⌘C / ⌘V /
     /// ⌘X / ⌘A / ⌘Z reach the focused text view via `performKeyEquivalent`.
-    /// It also gives us a home for ⌘, → Settings.
+    /// It also gives us a home for ⌘, → Settings and for the Note menu's
+    /// keyboard shortcuts.
     private func installMainMenu() {
         let mainMenu = NSMenu()
 
@@ -99,6 +103,10 @@ import KeyboardShortcuts
         editMenu.addItem(withTitle: "Select All", action: NSSelectorFromString("selectAll:"), keyEquivalent: "a")
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
+
+        let noteMenuItem = NSMenuItem()
+        noteMenuItem.submenu = noteMenu.makeMenu()
+        mainMenu.addItem(noteMenuItem)
 
         // Text size follows the platform convention rather than hiding in
         // Settings — it is the shortcut people already know.

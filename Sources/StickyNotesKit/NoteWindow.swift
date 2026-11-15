@@ -58,31 +58,12 @@ final class NoteWindow: NSWindow {
         isReleasedWhenClosed = false
     }
 
-    /// Borderless windows don't always route ⌘-modified key events through
-    /// `NSApp.mainMenu`, so dispatch the standard text editing actions directly
-    /// to the responder chain.
+    /// A borderless window may not offer key equivalents to `NSApp.mainMenu`
+    /// itself, so offer them here. The Edit, Note and View menus carry every
+    /// shortcut a note answers; the text view's own ⌘B / ⌘I / ⌘E / ⌘↩ are tried
+    /// first, through `super`.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if super.performKeyEquivalent(with: event) { return true }
-
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard mods.contains(.command) else { return false }
-
-        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        let shift = mods.contains(.shift)
-
-        let selector: Selector?
-        switch key {
-        case "c": selector = Selector(("copy:"))
-        case "x": selector = Selector(("cut:"))
-        case "v": selector = shift ? Selector(("pasteAsPlainText:")) : Selector(("paste:"))
-        case "a": selector = Selector(("selectAll:"))
-        // Undo goes to the app delegate first so a pending undo toast wins;
-        // it falls back to the text view's own undo when there isn't one.
-        case "z": selector = shift ? Selector(("redo:")) : Selector(("undoLastAction:"))
-        default: selector = nil
-        }
-
-        guard let selector = selector else { return false }
-        return NSApp.sendAction(selector, to: nil, from: self)
+        return NSApp.mainMenu?.performKeyEquivalent(with: event) ?? false
     }
 }
