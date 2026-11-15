@@ -47,3 +47,54 @@ final class IsolatedSettings {
         try? FileManager.default.removeItem(at: directory)
     }
 }
+
+/// A scheduler the test moves by hand. `advance(by:)` runs every task that falls
+/// due, in order, including ones a running task schedules inside the window, and
+/// moves the clock it was given by the same amount.
+final class TestScheduler: Scheduler {
+    private final class Task: ScheduledWork {
+        let due: TimeInterval
+        let work: () -> Void
+        var cancelled = false
+
+        init(due: TimeInterval, work: @escaping () -> Void) {
+            self.due = due
+            self.work = work
+        }
+
+        func cancel() { cancelled = true }
+    }
+
+    private var tasks: [Task] = []
+    private(set) var elapsed: TimeInterval = 0
+    private let clock: ManualClock?
+
+    init(clock: ManualClock? = nil) {
+        self.clock = clock
+    }
+
+    /// Tasks that are waiting and have not been cancelled.
+    var pendingCount: Int { tasks.filter { !$0.cancelled }.count }
+
+    func schedule(after delay: TimeInterval, _ work: @escaping () -> Void) -> ScheduledWork {
+        let task = Task(due: elapsed + delay, work: work)
+        tasks.append(task)
+        return task
+    }
+
+    func advance(by seconds: TimeInterval) {
+        let target = elapsed + seconds
+        while let next = tasks.filter({ !$0.cancelled && $0.due <= target }).min(by: { $0.due < $1.due }) {
+            tasks.removeAll { $0 === next }
+            move(to: next.due)
+            next.work()
+        }
+        tasks.removeAll { $0.cancelled }
+        move(to: target)
+    }
+
+    private func move(to time: TimeInterval) {
+        clock?.advance(by: time - elapsed)
+        elapsed = time
+    }
+}
